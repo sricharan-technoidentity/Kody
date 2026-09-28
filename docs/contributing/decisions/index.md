@@ -106,6 +106,9 @@ Open these before proposing a new primitive, surface, or storage home.
 - [0050 — Package share grants are not platform scope grants](./0050-package-share-grants-are-not-scope-grants.md)
   — person-to-person `package_share_grants` stay separate from admin-minted
   platform `package_scope_grants`; grant `pin` is not an import specifier pin
+- [0051 — Temporal orchestrates; Cloudflare stores and executes](./0051-temporal-orchestration-boundary.md)
+  — no user data source of truth or untrusted package execution moves into the
+  Temporal process
 
 ## Historical / UI / implementation
 

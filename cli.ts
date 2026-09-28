@@ -18,7 +18,7 @@ import {
 	isWorkerHealthOk,
 	workerPortRange,
 } from './tools/dev-server.ts'
-import { resolveNpmCommand } from './tools/node-runtime.ts'
+import { resolveNpmInvocation } from './tools/node-runtime.ts'
 const defaultMockPort = 8788
 const mockReadyTimeoutMs = 10_000
 const mockReadyPollMs = 200
@@ -110,9 +110,10 @@ function runNpmScript(
 		label: options.label ?? script,
 		mode: options.mode ?? 'live',
 	} satisfies ResolvedChildOutputConfig
+	const npm = resolveNpmInvocation(process.env)
 	const child = spawnInOwnProcessGroup(
-		resolveNpmCommand(),
-		['run', '--silent', script, '--', ...args],
+		npm.command,
+		[...npm.argsPrefix, 'run', '--silent', script, '--', ...args],
 		{
 			stdio: ['inherit', 'pipe', 'pipe'],
 			cwd: options.cwd,

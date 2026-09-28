@@ -5,7 +5,6 @@ import { getJobInspection } from '#worker/jobs/inspect.ts'
 import { listRunRecords } from '#worker/run-records/service.ts'
 import {
 	buildJobInspectionOutput,
-	buildJobManagerDebugOutput,
 	buildJobSourceInspectionOutput,
 	formatJobRecentRunFromRecord,
 	jobGetInputSchema,
@@ -18,7 +17,7 @@ export const jobGetCapability = defineDomainCapability(
 	{
 		name: 'jobGet',
 		description:
-			'Load one existing scheduled job for the signed-in user, including debugging fields such as run counters, last error, recent run history from run records (with run ids for runGet log drill-down), current alarm state, and optionally the published source code. Recurring schedules belong on a package (`kody.jobs`); deferred one-shots use `workflows.create`.',
+			'Load one existing Temporal-scheduled job for the signed-in user, including run counters, last error, recent run history from run records (with run ids for runGet log drill-down), and optionally the published source code. Recurring schedules belong on a package (`kody.jobs`); deferred one-shots use `workflows.create`.',
 		keywords: [
 			'job',
 			'inspect',
@@ -55,7 +54,6 @@ export const jobGetCapability = defineDomainCapability(
 			})
 			return {
 				job: buildJobInspectionOutput(inspection.job, { recentRuns }),
-				alarm: buildJobManagerDebugOutput(inspection.alarm),
 				...(inspection.source
 					? { source: buildJobSourceInspectionOutput(inspection.source) }
 					: {}),

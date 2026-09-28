@@ -6,7 +6,11 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { ensureGuideCatalogModules } from './build-guide-catalog-modules.ts'
 import { ensureWorkerBundlerModules } from './build-worker-bundler-modules.ts'
-import { isExecutedDirectly, resolveLocalBinary } from './node-runtime.ts'
+import {
+	type CommandInvocation,
+	isExecutedDirectly,
+	resolveWranglerInvocation,
+} from './node-runtime.ts'
 import { writeRuntimeDryRunConfig } from './local-runtime-dev-config.ts'
 import {
 	buildOriginProductionViteBundle,
@@ -421,7 +425,7 @@ async function inspectViteOriginStartupBundle(
 async function inspectWranglerStartupBundle(
 	definition: StartupBundleDefinition,
 	outputRoot: string,
-	wranglerBinary: string,
+	wrangler: CommandInvocation,
 ) {
 	const outputDir = path.join(outputRoot, definition.name)
 	const cwd = path.join(repoRoot, definition.packageDir)
@@ -435,8 +439,9 @@ async function inspectWranglerStartupBundle(
 			)
 		: 'wrangler.jsonc'
 	await execFileAsync(
-		wranglerBinary,
+		wrangler.command,
 		[
+			...wrangler.argsPrefix,
 			'deploy',
 			...(definition.entryOverride ? [definition.entryOverride] : []),
 			'--dry-run',
@@ -478,17 +483,13 @@ async function inspectWranglerStartupBundle(
 async function inspectStartupBundle(
 	definition: StartupBundleDefinition,
 	outputRoot: string,
-	wranglerBinary: string,
+	wrangler: CommandInvocation,
 ) {
 	switch (definition.bundler) {
 		case 'vite':
 			return inspectViteOriginStartupBundle(definition, outputRoot)
 		case 'wrangler':
-			return inspectWranglerStartupBundle(
-				definition,
-				outputRoot,
-				wranglerBinary,
-			)
+			return inspectWranglerStartupBundle(definition, outputRoot, wrangler)
 		default: {
 			const exhaustive: never = definition.bundler
 			throw new Error(`Unhandled startup bundler: ${String(exhaustive)}`)
@@ -507,11 +508,11 @@ async function inspectStartupBundle(
 export async function checkWorkerStartupBundles() {
 	await Promise.all([ensureWorkerBundlerModules(), ensureGuideCatalogModules()])
 	const outputRoot = await mkdtemp(path.join(tmpdir(), 'kody-startup-bundles-'))
-	const wranglerBinary = resolveLocalBinary('wrangler')
+	const wrangler = resolveWranglerInvocation(repoRoot)
 	try {
 		const results = await Promise.all(
 			startupBundles.map((definition) =>
-				inspectStartupBundle(definition, outputRoot, wranglerBinary),
+				inspectStartupBundle(definition, outputRoot, wrangler),
 			),
 		)
 		for (const result of results) {

@@ -17,7 +17,6 @@ import { buildPackageJobId } from './package-job-id.ts'
 import { type PersistedJobCallerContext } from './types.ts'
 import {
 	repoMockModule,
-	jobManagerMockModule,
 	resetJobServiceMocks,
 	mockRepoPersistence,
 	createDatabase,
@@ -51,11 +50,6 @@ vi.mock('#worker/repo/repo-session-do.ts', async () =>
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionDoMock(),
 )
-vi.mock('./manager-client.ts', async () =>
-	(
-		await import('#worker/test-support/jobs-service-mocks.ts')
-	).managerClientMock(),
-)
 vi.mock('#worker/identity/background-mcp-user.ts', async () =>
 	(
 		await import('#worker/test-support/jobs-service-mocks.ts')
@@ -77,7 +71,7 @@ afterEach(() => {
 	resetJobServiceMocks()
 })
 
-test('updateJob and deleteJob sync the job manager alarm', async () => {
+test('updateJob and deleteJob persist schedule and source cleanup', async () => {
 	const env = createJobServiceTestEnv({
 		APP_DB: createDatabase(),
 		CLOUDFLARE_ACCOUNT_ID: 'acct-test',
@@ -122,7 +116,7 @@ test('updateJob and deleteJob sync the job manager alarm', async () => {
 		env,
 		callerContext,
 		body: {
-			name: 'Sync job manager on update',
+			name: 'Persist schedule update',
 			schedule: {
 				type: 'interval',
 				every: '15m',
@@ -130,7 +124,6 @@ test('updateJob and deleteJob sync the job manager alarm', async () => {
 		},
 	})
 
-	jobManagerMockModule.syncJobManagerAlarm.mockClear()
 	await updateJob({
 		env,
 		callerContext,
@@ -143,11 +136,6 @@ test('updateJob and deleteJob sync the job manager alarm', async () => {
 		},
 	})
 
-	expect(jobManagerMockModule.syncJobManagerAlarm).toHaveBeenCalledWith({
-		env,
-		userId: callerContext.user.userId,
-	})
-	jobManagerMockModule.syncJobManagerAlarm.mockClear()
 	repoMockModule.listRepoSessionsBySource.mockResolvedValueOnce([
 		{ id: 'session-1' },
 	])
@@ -175,10 +163,6 @@ test('updateJob and deleteJob sync the job manager alarm', async () => {
 		},
 	)
 	expect(repoMockModule.cleanupSessionBranch).not.toHaveBeenCalled()
-	expect(jobManagerMockModule.syncJobManagerAlarm).toHaveBeenCalledWith({
-		env,
-		userId: callerContext.user.userId,
-	})
 })
 
 test('updateJob and deleteJob reject another user trying to mutate or remove a job by id', async () => {
@@ -546,7 +530,7 @@ test('updateJob rejects code changes on leftover jobs', async () => {
 	})
 })
 
-test('inspectJobsForUser returns persisted job fields with alarm debug state', async () => {
+test('inspectJobsForUser returns persisted job fields with run observability', async () => {
 	const env = createJobServiceTestEnv({
 		APP_DB: createDatabase(),
 	})
@@ -582,15 +566,6 @@ test('inspectJobsForUser returns persisted job fields with alarm debug state', a
 		job: jobRow.record,
 		callerContextJson: jobRow.callerContextJson,
 	})
-	jobManagerMockModule.getJobManagerDebugState.mockResolvedValue({
-		bindingAvailable: true,
-		status: 'armed',
-		storedUserId: callerContext.user.userId,
-		alarmScheduledFor: '2026-04-20T10:00:00.000Z',
-		nextRunnableJobId: created.id,
-		nextRunnableRunAt: '2026-04-20T10:00:00.000Z',
-		alarmInSync: true,
-	})
 	const observabilitySpy = vi
 		.spyOn(
 			await import('#worker/run-records/service.ts'),
@@ -614,26 +589,12 @@ test('inspectJobsForUser returns persisted job fields with alarm debug state', a
 		const inspected = await inspectJobsForUser({
 			env,
 			userId: callerContext.user.userId,
-			now: new Date('2026-04-20T10:10:00.000Z'),
 		})
 
-		expect(jobManagerMockModule.getJobManagerDebugState).toHaveBeenCalledWith({
-			env,
-			userId: callerContext.user.userId,
-		})
 		expect(observabilitySpy).toHaveBeenCalledWith({
 			env,
 			userId: callerContext.user.userId,
 			jobIds: [created.id],
-		})
-		expect(inspected.alarm).toEqual({
-			bindingAvailable: true,
-			status: 'armed',
-			storedUserId: 'user-123',
-			alarmScheduledFor: '2026-04-20T10:00:00.000Z',
-			nextRunnableJobId: created.id,
-			nextRunnableRunAt: '2026-04-20T10:00:00.000Z',
-			alarmInSync: true,
 		})
 		expect(inspected.jobs).toEqual([
 			expect.objectContaining({
@@ -655,7 +616,7 @@ test('inspectJobsForUser returns persisted job fields with alarm debug state', a
 	}
 })
 
-test('getJobInspection reports alarm state, source code, and artifact gaps', async () => {
+test('getJobInspection reports source code and artifact gaps', async () => {
 	const env = createJobServiceTestEnv({
 		APP_DB: createDatabase(),
 		BUNDLE_ARTIFACTS_KV: createBundleArtifactsKv(),
@@ -674,21 +635,10 @@ test('getJobInspection reports alarm state, source code, and artifact gaps', asy
 			},
 		},
 	})
-	jobManagerMockModule.getJobManagerDebugState.mockResolvedValue({
-		bindingAvailable: true,
-		status: 'out_of_sync',
-		storedUserId: callerContext.user.userId,
-		alarmScheduledFor: '2026-04-20T18:35:00.000Z',
-		nextRunnableJobId: created.id,
-		nextRunnableRunAt: '2026-04-20T18:30:00.000Z',
-		alarmInSync: false,
-	})
-
 	const inspected = await getJobInspection({
 		env,
 		userId: callerContext.user.userId,
 		jobId: created.id,
-		now: new Date('2026-04-20T18:00:00.000Z'),
 	})
 
 	expect(inspected.job).toMatchObject({
@@ -702,15 +652,6 @@ test('getJobInspection reports alarm state, source code, and artifact gaps', asy
 		runCount: 0,
 		successCount: 0,
 		errorCount: 0,
-	})
-	expect(inspected.alarm).toEqual({
-		bindingAvailable: true,
-		status: 'out_of_sync',
-		storedUserId: 'user-123',
-		alarmScheduledFor: '2026-04-20T18:35:00.000Z',
-		nextRunnableJobId: created.id,
-		nextRunnableRunAt: '2026-04-20T18:30:00.000Z',
-		alarmInSync: false,
 	})
 	expect(inspected).not.toHaveProperty('source')
 

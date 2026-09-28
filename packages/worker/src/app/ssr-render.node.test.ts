@@ -215,7 +215,6 @@ function createTestEnv(db: D1Database) {
 		...testOidcSigningEnv,
 		APP_DB: db,
 		BUNDLE_ARTIFACTS_KV: createMemoryKv(),
-		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},
 		PACKAGE_REALTIME_SESSION: {},
 		MCP_CLIENT_HUB: {},

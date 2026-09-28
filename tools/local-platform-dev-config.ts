@@ -69,6 +69,7 @@ export async function writeLocalPlatformDevConfig({
 	// env block so inherit/override both stay consistent).
 	const localized = localizeMigrations(
 		envRecord.migrations ?? config.migrations,
+		{ excludedClasses: ['StripePlanRefresh'] },
 	)
 	config.migrations = localized
 	envRecord.migrations = localized

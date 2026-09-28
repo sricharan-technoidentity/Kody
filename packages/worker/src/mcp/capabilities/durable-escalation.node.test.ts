@@ -167,7 +167,7 @@ vi.mock('#worker/run-records/service.ts', async (importOriginal) => {
 	}
 })
 
-const projectionBindingName = 'DYNAMIC_CALLABLE_WORKFLOWS'
+const projectionBindingName = 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS'
 
 beforeEach(() => {
 	runRecordMocks.resetProjections()
@@ -189,7 +189,6 @@ function envStub() {
 		// Create still types APP_DB for entitlement/plan lookup; unused here
 		// because createDynamicCallableWorkflow is mocked.
 		APP_DB: undefined as unknown as D1Database,
-		DYNAMIC_CALLABLE_WORKFLOWS: {} as Workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 }
@@ -551,7 +550,7 @@ test('runWithDurableEscalation never throws and reports structured failures', as
 	})
 
 	mockModule.createDynamicCallableWorkflow.mockRejectedValue(
-		new Error('Missing DYNAMIC_CALLABLE_WORKFLOWS binding.'),
+		new Error('Missing BUNDLE_ARTIFACTS_KV binding.'),
 	)
 	const dispatchFailed = await runWithDurableEscalation({
 		env: envStub(),
@@ -571,7 +570,7 @@ test('runWithDurableEscalation never throws and reports structured failures', as
 	})
 	expect(dispatchFailed).toEqual({
 		kind: 'failed',
-		error: 'Missing DYNAMIC_CALLABLE_WORKFLOWS binding.',
+		error: 'Missing BUNDLE_ARTIFACTS_KV binding.',
 	})
 })
 

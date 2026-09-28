@@ -37,8 +37,8 @@ import { originWorkerHandler } from './origin-handler.ts'
  *
  * Everything else `index.ts` exports (MCP, McpClientHub,
  * OAuthPurgeCoordinator, UserMeter, Mailbox, RepoSession, RepoSessionIndex,
- * StripePlanRefresh, StorageRunner, RunLog, PackageRealtimeSession,
- * DynamicCallableWorkflow, PackageAppRuntimeBridge) is reached in
+ * StorageRunner, RunLog, PackageRealtimeSession,
+ * PackageAppRuntimeBridge) is reached in
  * steady-state production only through cross-script bindings or the
  * `RUNTIME_WORKER` service forward, never through a local export on this
  * script.

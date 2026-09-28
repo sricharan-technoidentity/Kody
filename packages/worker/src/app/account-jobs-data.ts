@@ -1,9 +1,5 @@
 import { type readAuthenticatedAppUser } from '#app/authenticated-user.ts'
-import {
-	buildJobInspectionOutput,
-	buildJobManagerDebugOutput,
-} from '#mcp/capabilities/jobs/shared.ts'
-import { type JobManagerDebugState } from '#worker/jobs/manager-client.ts'
+import { buildJobInspectionOutput } from '#mcp/capabilities/jobs/shared.ts'
 import {
 	defaultJobRetentionDays,
 	type JobRetentionPreferences,
@@ -72,16 +68,6 @@ export type AccountJobDetail = AccountJobListItem & {
 	updatedAt: string
 }
 
-export type AccountJobsAlarm = {
-	bindingAvailable: boolean
-	status: JobManagerDebugState['status']
-	storedUserId: string | null
-	alarmScheduledFor: string | null
-	nextRunnableJobId: string | null
-	nextRunnableRunAt: string | null
-	alarmInSync: boolean | null
-}
-
 export type AccountJobRetentionPreferences = JobRetentionPreferences & {
 	defaults: typeof defaultJobRetentionDays
 }
@@ -92,7 +78,6 @@ export type AccountJobsLoaderData = {
 	jobs: Array<AccountJobListItem>
 	selectedJob: AccountJobDetail | null
 	selectedJobId: string | null
-	alarm?: AccountJobsAlarm
 	retention: AccountJobRetentionPreferences
 }
 
@@ -229,19 +214,6 @@ async function toDetail(input: {
 	}
 }
 
-function toAlarm(state: JobManagerDebugState): AccountJobsAlarm {
-	const debug = buildJobManagerDebugOutput(state)
-	return {
-		bindingAvailable: debug.binding_available,
-		status: debug.status,
-		storedUserId: debug.stored_user_id,
-		alarmScheduledFor: debug.alarm_scheduled_for,
-		nextRunnableJobId: debug.next_runnable_job_id,
-		nextRunnableRunAt: debug.next_runnable_run_at,
-		alarmInSync: debug.alarm_in_sync,
-	}
-}
-
 export async function loadAccountJobsData(input: {
 	env: Env
 	request: Request
@@ -289,7 +261,6 @@ export async function loadAccountJobsData(input: {
 				})
 			: null,
 		selectedJobId,
-		alarm: toAlarm(inspection.alarm),
 		retention: {
 			...retentionPreferences,
 			defaults: defaultJobRetentionDays,

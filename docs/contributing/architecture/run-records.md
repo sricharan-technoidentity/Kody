@@ -39,7 +39,7 @@ via `runUpdate`). The account UI is `/account/activity`.
 | `app_fetch`    | Package app HTTP fetch handler                                 |
 | `app_realtime` | Package app realtime websocket session                         |
 | `job`          | Scheduled or manually triggered job execution                  |
-| `workflow`     | Cloudflare Workflow run (`DynamicCallableWorkflow`)            |
+| `workflow`     | Temporal package workflow run                                  |
 | `retriever`    | Package retriever evaluation                                   |
 | `webhook`      | Authenticated inbound webhook delivery (and post-auth rejects) |
 
@@ -164,8 +164,8 @@ passes the authenticated `userId` can only open that user’s stub. Binding name
 `RUN_LOG` (class `RunLog`).
 
 This satisfies the repo-wide per-user isolation invariant the same way
-`JobManager` and `McpClientHub` do — by namespacing Durable Object identity —
-rather than by filtering a shared table.
+`McpClientHub` does — by namespacing Durable Object identity — rather than by
+filtering a shared table.
 
 ## Why not D1
 
@@ -455,7 +455,7 @@ table.
 
 | Table                   | Role                                                                                                                                                                                                                                          | Retention inside RunLog                                                                                                                                                                  |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflow_projections`  | Workflow idempotency + concurrent-workflow entitlements. Includes `binding_name` (typically `DYNAMIC_CALLABLE_WORKFLOWS`) so multiple bindings project correctly. Authoritative for lifecycle; there is no D1 `workflow_runs` table.          | Terminal rows (`complete`, `errored`, `terminated`) age-prune after **90 days** (`workflowProjectionRetentionDays`); active/running rows and short-TTL `creating` reservations are kept. |
+| `workflow_projections`  | Workflow idempotency + concurrent-workflow entitlements. Includes `binding_name` (`TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS`). Authoritative for lifecycle; there is no D1 `workflow_runs` table.                                                   | Terminal rows (`complete`, `errored`, `terminated`) age-prune after **90 days** (`workflowProjectionRetentionDays`); active/running rows and short-TTL `creating` reservations are kept. |
 | `job_run_observability` | Per-job terminal outcomes and counters for Activity and MCP reads. Not a substitute for D1 schedule metadata; D1 `jobs.last_run_at` / `last_run_status` remain retention anchors only.                                                        | Never pruned by run-history or workflow retention passes.                                                                                                                                |
 | `package_run_successes` | Per-package success counters toward activation.                                                                                                                                                                                               | Never pruned.                                                                                                                                                                            |
 | `activation_milestones` | One row each for `package_run_succeeded` and `package_activated` (`package_id` on the second). High-frequency HTTP surfaces (`webhook`, `app_fetch`) do not count; activation means two unattended capability successes for the same package. | Never pruned.                                                                                                                                                                            |

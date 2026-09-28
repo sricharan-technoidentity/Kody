@@ -69,7 +69,6 @@ test('privacy page and usage doc distinguish chat-model inference from embedding
 		...testOidcSigningEnv,
 		APP_DB: createAnonymousTestDb(),
 		BUNDLE_ARTIFACTS_KV: {},
-		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},
 		PACKAGE_REALTIME_SESSION: {},
 		MCP_CLIENT_HUB: {},

@@ -88,7 +88,7 @@ test('workflow projections track binding name, idempotency, and active counts', 
 		userId,
 		projection: {
 			id: 'wf-active-1',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'package',
 			packageId: 'pkg-1',
 			kodyId: 'kody-1',
@@ -105,7 +105,7 @@ test('workflow projections track binding name, idempotency, and active counts', 
 		userId,
 		projection: {
 			id: 'wf-creating',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'adhoc',
 			idempotencyKey: 'idem-creating',
@@ -118,7 +118,7 @@ test('workflow projections track binding name, idempotency, and active counts', 
 		userId,
 		projection: {
 			id: 'wf-done',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'package',
 			packageId: 'pkg-1',
 			workflowName: 'nightly',
@@ -137,7 +137,7 @@ test('workflow projections track binding name, idempotency, and active counts', 
 	})
 	expect(got).toMatchObject({
 		id: 'wf-active-1',
-		bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+		bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 		workflowName: 'nightly',
 		status: 'running',
 		packageId: 'pkg-1',
@@ -162,14 +162,14 @@ test('workflow projections track binding name, idempotency, and active counts', 
 			env,
 			userId,
 			idempotencyKey: 'idem-creating',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 		}),
 	).toBeNull()
 	expect(
 		await findWorkflowProjectionByBindingIdempotencyKey({
 			env,
 			userId,
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			idempotencyKey: 'idem-creating',
 		}),
 	).toMatchObject({
@@ -193,7 +193,7 @@ test('workflow projections track binding name, idempotency, and active counts', 
 		userId,
 		projection: {
 			id: 'wf-active-1',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'package',
 			packageId: 'pkg-1',
 			workflowName: 'nightly',
@@ -239,7 +239,7 @@ test('reserveWorkflowProjectionSlot serializes concurrent creating, prunes stale
 				userId,
 				projection: {
 					id: `wf-reserve-${index}`,
-					bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+					bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 					sourceType: 'inline',
 					workflowName: 'adhoc',
 					idempotencyKey: `reserve-key-${index}`,
@@ -291,7 +291,7 @@ test('reserveWorkflowProjectionSlot serializes concurrent creating, prunes stale
 		userId: ttlUserId,
 		projection: {
 			id: 'wf-stale-creating',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'stale',
 			idempotencyKey: 'stale-creating-key',
@@ -306,7 +306,7 @@ test('reserveWorkflowProjectionSlot serializes concurrent creating, prunes stale
 		userId: ttlUserId,
 		projection: {
 			id: 'wf-terminal',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'done',
 			idempotencyKey: 'terminal-key',
@@ -323,7 +323,7 @@ test('reserveWorkflowProjectionSlot serializes concurrent creating, prunes stale
 		userId: ttlUserId,
 		projection: {
 			id: 'wf-fresh',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'fresh',
 			idempotencyKey: 'fresh-key',
@@ -347,7 +347,7 @@ test('reserveWorkflowProjectionSlot serializes concurrent creating, prunes stale
 		userId: ttlUserId,
 		projection: {
 			id: 'wf-terminal',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'should-not-clobber',
 			idempotencyKey: 'terminal-key',
@@ -370,7 +370,7 @@ test('reserveWorkflowProjectionSlot serializes concurrent creating, prunes stale
 		userId: ttlUserId,
 		projection: {
 			id: 'wf-fresh',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'fresh',
 			idempotencyKey: 'fresh-key',
@@ -394,7 +394,7 @@ test('workflow projection upsert keeps terminal status sticky against newer acti
 			userId,
 			projection: {
 				id,
-				bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+				bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 				sourceType: 'inline',
 				workflowName: 'adhoc',
 				idempotencyKey: `${terminalStatus}-key`,
@@ -412,7 +412,7 @@ test('workflow projection upsert keeps terminal status sticky against newer acti
 				userId,
 				projection: {
 					id,
-					bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+					bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 					sourceType: 'inline',
 					workflowName: 'adhoc',
 					idempotencyKey: `${terminalStatus}-key`,
@@ -437,7 +437,7 @@ test('workflow projection upsert keeps terminal status sticky against newer acti
 		userId,
 		projection: {
 			id: 'wf-cancelled',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'adhoc',
 			idempotencyKey: 'cancelled-key',
@@ -814,7 +814,7 @@ test('retention prunes runs but never dedicated workflow/job/activation state', 
 		userId,
 		projection: {
 			id: 'wf-keep',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'keep',
 			idempotencyKey: 'idem-keep',
@@ -867,7 +867,10 @@ test('retention prunes runs but never dedicated workflow/job/activation state', 
 
 	expect(
 		await getWorkflowProjection({ env, userId, id: 'wf-keep' }),
-	).toMatchObject({ id: 'wf-keep', bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS' })
+	).toMatchObject({
+		id: 'wf-keep',
+		bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
+	})
 	expect(
 		await getJobRunObservability({ env, userId, jobId: 'job-keep' }),
 	).toMatchObject({ jobId: 'job-keep', successCount: 1 })
@@ -977,7 +980,7 @@ test('export pages dedicated state after runs and ledger; clearAll purges and re
 		userId,
 		projection: {
 			id: 'wf-export',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'export-wf',
 			idempotencyKey: 'idem-export',
@@ -1072,7 +1075,7 @@ test('export pages dedicated state after runs and ledger; clearAll purges and re
 		userId,
 		projection: {
 			id: 'wf-after-clear',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'fresh',
 			idempotencyKey: 'idem-fresh',
@@ -1111,7 +1114,7 @@ test('export cursors always make progress across phase handoffs and empty tails'
 		userId,
 		projection: {
 			id: 'wf-progress',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'progress',
 			idempotencyKey: 'idem-progress',
@@ -1575,7 +1578,7 @@ test('getAdminInsightsSnapshot returns content-free workflow, job, and activatio
 		userId,
 		projection: {
 			id: 'wf-running-1',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'secret-name-must-not-leak',
 			idempotencyKey: 'admin-running-1',
@@ -1591,7 +1594,7 @@ test('getAdminInsightsSnapshot returns content-free workflow, job, and activatio
 		userId,
 		projection: {
 			id: 'wf-running-2',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'other',
 			idempotencyKey: 'admin-running-2',
@@ -1606,7 +1609,7 @@ test('getAdminInsightsSnapshot returns content-free workflow, job, and activatio
 		userId,
 		projection: {
 			id: 'wf-complete',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'done',
 			idempotencyKey: 'admin-complete',

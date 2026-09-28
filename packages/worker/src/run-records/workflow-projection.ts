@@ -2,10 +2,9 @@
  * Workflow run projections stored in the per-user RunLog Durable Object.
  *
  * Per-user RunLog `workflow_projections` rows (DO identity is the user; no
- * `user_id` column) plus the Cloudflare Workflow binding name so a user with
- * multiple bindings can be projected correctly. This is correctness state for
- * idempotency and concurrent-workflow entitlements; it must never be derived
- * from pruned run-history rows.
+ * `user_id` column) plus the Temporal workflow kind. This is correctness state
+ * for idempotency and concurrent-workflow entitlements; it must never be
+ * derived from pruned run-history rows.
  */
 
 import {
@@ -14,10 +13,11 @@ import {
 } from '#worker/package-runtime/workflow-statuses.ts'
 
 /**
- * Cloudflare Workflow binding names Kody may project. Expand the union when a
- * second binding ships; resolvers must stay exhaustive.
+ * Durable workflow kinds Kody may project.
  */
-export const workflowBindingNames = ['DYNAMIC_CALLABLE_WORKFLOWS'] as const
+export const workflowBindingNames = [
+	'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
+] as const
 
 export type WorkflowBindingName = (typeof workflowBindingNames)[number]
 

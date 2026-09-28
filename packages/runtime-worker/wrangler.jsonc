@@ -116,13 +116,6 @@
 					"binding": "APP_LOADER",
 				},
 			],
-			"workflows": [
-				{
-					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-runtime-dynamic-callable-workflows",
-					"class_name": "DynamicCallableWorkflow",
-				},
-			],
 			"durable_objects": {
 				"bindings": [
 					// Runtime-owned classes, local to this script.
@@ -175,7 +168,7 @@
 				],
 			},
 			// Jobs worker service binding (ADR 0016): package save/delete paths
-			// sync the JobManager alarm through this coarse-grained contract.
+			// synchronize jobs through this coarse-grained contract.
 			"services": [
 				{
 					"binding": "JOBS",
@@ -301,13 +294,6 @@
 				},
 				{
 					"binding": "APP_LOADER",
-				},
-			],
-			"workflows": [
-				{
-					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-runtime-preview-dynamic-callable-workflows",
-					"class_name": "DynamicCallableWorkflow",
 				},
 			],
 			"durable_objects": {

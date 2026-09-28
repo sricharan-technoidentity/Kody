@@ -154,8 +154,8 @@ Requests are handled in this order:
 ## Workflow runtime
 
 All server-side Kody runtime contexts expose `workflows` from `kody:runtime`.
-The helper routes every call to the shared `DynamicCallableWorkflow` binding;
-there is no separate context-specific Workflow class.
+The helper routes every call through the signed Temporal gateway and the shared
+`DynamicPackageWorkflow`; there is no context-specific workflow class.
 
 - `workflows.create({ code, workflowName?, runAt, idempotencyKey, params })`
   queues an inline ESM module and later executes it through the same module

@@ -68,6 +68,7 @@ If you are trying to understand what this repository is for, start with
 | Package Manager | [npm](https://www.npmjs.com/)                                                            |
 | Workspace       | [Nx](https://nx.dev/) + npm workspaces                                                   |
 | Database        | [Cloudflare D1](https://developers.cloudflare.com/d1/)                                   |
+| Orchestration   | [Temporal](https://temporal.io/) (Node worker and signed control-plane gateway)          |
 | Session/OAuth   | [Cloudflare KV](https://developers.cloudflare.com/kv/)                                   |
 | MCP State       | [Durable Objects](https://developers.cloudflare.com/durable-objects/) on `kody-platform` |
 | E2E Testing     | [Playwright](https://playwright.dev/)                                                    |
@@ -87,7 +88,12 @@ If you are trying to understand what this repository is for, start with
 kody.codes  → kody-production (origin: Remix, /mcp HTTP, OAuth, email, queues)
                  ├─→ kody-platform  (MCP / mailbox / meter / repo-session DOs)
                  ├─→ kody-runtime   (package apps, invoke API, StorageRunner)
-                 └─→ kody-jobs      (cron + JobManager; calls back via JobsHost)
+                 └─→ kody-jobs      (cron + Temporal schedule sync; calls back via JobsHost)
+
+Cloudflare callers → kody-temporal-gateway → Temporal service
+                                                   ↕ task queues
+                                       kody-temporal-worker
+                                                   └─→ signed Cloudflare Activity Gateway
 
 kody.run    → kody-runtime (package-app zone routes)
 ```
@@ -95,6 +101,9 @@ kody.run    → kody-runtime (package-app zone routes)
 - `packages/worker/src/index.ts` is the origin entrypoint; platform, runtime,
   and jobs have sibling entrypoints (see
   [architecture](./docs/contributing/architecture/index.md#production-worker-fleet))
+- `packages/temporal-gateway` and `packages/temporal-worker` provide the local
+  Temporal control plane; this change does not select or deploy a production
+  Temporal service
 - OAuth requests are handled first, then MCP requests, then static assets
 - Non-asset requests fall through to the server handler and router
 - Client assets are bundled into `packages/worker/public/` and served via the
@@ -102,15 +111,16 @@ kody.run    → kody-runtime (package-app zone routes)
 
 ## Documentation
 
-| Document                                                                                     | Description                          |
-| -------------------------------------------------------------------------------------------- | ------------------------------------ |
-| [`docs/contributing/getting-started.md`](./docs/contributing/getting-started.md)             | Setup, environment variables, deploy |
-| [`docs/contributing/environment-variables.md`](./docs/contributing/environment-variables.md) | Adding new env vars                  |
-| [`docs/contributing/cloudflare-offerings.md`](./docs/contributing/cloudflare-offerings.md)   | Optional Cloudflare integrations     |
-| [`docs/contributing/project-intent.md`](./docs/contributing/project-intent.md)               | Scope, goals, and non-goals          |
-| [`docs/contributing/index.md`](./docs/contributing/index.md)                                 | Developing and extending Kody        |
-| [`docs/use/index.md`](./docs/use/index.md)                                                   | Using Kody over MCP                  |
-| [`docs/contributing/setup/`](./docs/contributing/setup/index.md)                             | Local development and verification   |
+| Document                                                                                                           | Description                               |
+| ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------- |
+| [`docs/contributing/getting-started.md`](./docs/contributing/getting-started.md)                                   | Setup, environment variables, deploy      |
+| [`docs/contributing/environment-variables.md`](./docs/contributing/environment-variables.md)                       | Adding new env vars                       |
+| [`docs/contributing/cloudflare-offerings.md`](./docs/contributing/cloudflare-offerings.md)                         | Optional Cloudflare integrations          |
+| [`docs/contributing/project-intent.md`](./docs/contributing/project-intent.md)                                     | Scope, goals, and non-goals               |
+| [`docs/contributing/index.md`](./docs/contributing/index.md)                                                       | Developing and extending Kody             |
+| [`docs/contributing/architecture/temporal-foundation.md`](./docs/contributing/architecture/temporal-foundation.md) | Temporal worker, gateway, and local setup |
+| [`docs/use/index.md`](./docs/use/index.md)                                                                         | Using Kody over MCP                       |
+| [`docs/contributing/setup/`](./docs/contributing/setup/index.md)                                                   | Local development and verification        |
 
 ## Contributing
 

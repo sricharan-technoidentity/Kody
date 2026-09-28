@@ -36,7 +36,6 @@ import { scheduleSavedPackageSearchIndexUpsert } from './search-index-debt.ts'
 import { deletePackageInvocationTokensForPackage } from '#worker/package-invocations/repo.ts'
 import { jobsData } from '#worker/jobs/jobs-data.ts'
 import { scheduleKitSubscriberSync } from '#worker/kit/subscriber-sync.ts'
-import { syncJobManagerAlarm } from '#worker/jobs/manager-client.ts'
 import { rebuildPublishedPackageArtifacts } from '#worker/package-runtime/published-bundle-artifacts.ts'
 import {
 	refreshPackageRetrieverManifestCache,
@@ -448,7 +447,7 @@ export async function refreshSavedPackageProjection(input: {
 			}
 			const { syncPackageJobsForPackage } =
 				await import('#worker/jobs/service.ts')
-			const schedulerStateChanged = await syncPackageJobsForPackage({
+			await syncPackageJobsForPackage({
 				env: input.env,
 				userId: input.userId,
 				baseUrl: input.baseUrl,
@@ -456,12 +455,6 @@ export async function refreshSavedPackageProjection(input: {
 				sourceId: input.sourceId,
 				manifest: loaded.manifest,
 			})
-			if (schedulerStateChanged) {
-				await syncJobManagerAlarm({
-					env: input.env,
-					userId: input.userId,
-				})
-			}
 			// Same-isolate invoke paths must observe this refresh immediately;
 			// other isolates converge within the freshness-cache TTL.
 			invalidateInvokeContractFreshness({
@@ -507,7 +500,6 @@ export async function deleteSavedPackageProjection(input: {
 				buildPackageStorageId(input.packageId),
 				input.packageId,
 			])
-			let packageJobsRemoved = false
 			if (savedPackage) {
 				const listing = await getCommunityListingByOwnerAndPackage(
 					input.env.APP_DB,
@@ -583,7 +575,6 @@ export async function deleteSavedPackageProjection(input: {
 					}
 					await jobs.deleteJob({ userId: input.userId, jobId: row.id })
 				}
-				packageJobsRemoved = packageRows.length > 0
 			}
 			try {
 				const inventoryIds = await listPackageOwnedStorageIdsFromInventory({
@@ -677,12 +668,6 @@ export async function deleteSavedPackageProjection(input: {
 				],
 				sourceId: savedPackage?.sourceId ?? null,
 			})
-			if (packageJobsRemoved) {
-				await syncJobManagerAlarm({
-					env: input.env,
-					userId: input.userId,
-				})
-			}
 		},
 	})
 }

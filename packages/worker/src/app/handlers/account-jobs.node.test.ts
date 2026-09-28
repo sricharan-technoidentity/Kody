@@ -59,16 +59,6 @@ const packageJob = {
 	],
 }
 
-const alarmState = {
-	bindingAvailable: true,
-	status: 'armed' as const,
-	storedUserId: 'stable-user-1',
-	alarmScheduledFor: adHocJob.nextRunAt,
-	nextRunnableJobId: adHocJob.id,
-	nextRunnableRunAt: adHocJob.nextRunAt,
-	alarmInSync: true,
-}
-
 const mockModule = vi.hoisted(() => ({
 	readAuthenticatedAppUser: vi.fn(async () => ({
 		sessionUserId: '42',
@@ -87,7 +77,7 @@ const mockModule = vi.hoisted(() => ({
 	inspectJobsForUser: vi.fn(),
 	updateJob: vi.fn(),
 	deleteJob: vi.fn(),
-	runJobNowViaManager: vi.fn(),
+	runJobNowViaJobsService: vi.fn(),
 	getAppBaseUrl: vi.fn(() => 'https://example.com'),
 	listRunRecords: vi.fn(),
 	readJobRetentionPreferencesForUser: vi.fn(async () => ({
@@ -151,9 +141,9 @@ vi.mock('#worker/jobs/service.ts', () => ({
 	deleteJob: (...args: Array<unknown>) => mockModule.deleteJob(...args),
 }))
 
-vi.mock('#worker/jobs/manager-client.ts', () => ({
-	runJobNowViaManager: (...args: Array<unknown>) =>
-		mockModule.runJobNowViaManager(...args),
+vi.mock('#worker/jobs/client.ts', () => ({
+	runJobNowViaJobsService: (...args: Array<unknown>) =>
+		mockModule.runJobNowViaJobsService(...args),
 }))
 
 vi.mock('#worker/jobs/job-retention-cleanup.ts', () => ({
@@ -185,7 +175,6 @@ function createEnv() {
 function resetInspection(jobs = [adHocJob, packageJob]) {
 	mockModule.inspectJobsForUser.mockResolvedValue({
 		jobs,
-		alarm: alarmState,
 	})
 	mockModule.listRunRecords.mockImplementation(
 		async (input: { filter?: { jobId?: string | null } }) => {
@@ -274,10 +263,6 @@ test('jobs API lists jobs with ownership and selected detail', async () => {
 				scheduleType: 'interval',
 			}),
 		],
-		alarm: expect.objectContaining({
-			bindingAvailable: true,
-			status: 'armed',
-		}),
 	})
 
 	mockModule.inspectJobsForUser.mockClear()
@@ -375,7 +360,7 @@ test('jobs API mutations are user-scoped for non-package jobs and kill switch', 
 	resetInspection()
 	mockModule.updateJob.mockResolvedValue({ ...adHocJob, enabled: false })
 	mockModule.deleteJob.mockResolvedValue({ id: adHocJob.id, deleted: true })
-	mockModule.runJobNowViaManager.mockResolvedValue({
+	mockModule.runJobNowViaJobsService.mockResolvedValue({
 		job: adHocJob,
 		execution: { ok: true, logs: [] },
 		deletedAfterRun: false,
@@ -472,7 +457,7 @@ test('jobs API mutations are user-scoped for non-package jobs and kill switch', 
 		}),
 	})
 	expect(runNowResponse.status).toBe(200)
-	expect(mockModule.runJobNowViaManager).toHaveBeenCalledWith(
+	expect(mockModule.runJobNowViaJobsService).toHaveBeenCalledWith(
 		expect.objectContaining({
 			userId: 'stable-user-1',
 			jobId: adHocJob.id,

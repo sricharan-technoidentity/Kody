@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { expect, test } from 'vitest'
 import {
 	findStartupBudgetViolations,
@@ -44,9 +45,11 @@ test('origin startup profile runs from the Vite snapshot, not the workspace root
 	expect(resolveStartupTimeCwd(resolved.packageDir)).toBe(
 		'/tmp/kody-startup-time/origin-vite/ssr',
 	)
-	expect(resolveStartupTimeCwd('packages/platform-worker')).toMatch(
-		/packages\/platform-worker$/,
-	)
+	expect(
+		resolveStartupTimeCwd('packages/platform-worker').endsWith(
+			path.join('packages', 'platform-worker'),
+		),
+	).toBe(true)
 })
 
 test('sibling startup profiles pass an explicit Wrangler config', () => {

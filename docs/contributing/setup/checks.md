@@ -57,6 +57,9 @@ pushes. See the [setup index](./index.md) for the other setup pages.
   [`packages/nx-cache/readme.md`](../../../packages/nx-cache/readme.md)). Those
   cached scripts run through `tools/run-nx.ts` so a mid-run remote-cache
   transport flake cannot fail validate after the tasks already succeeded.
+- `npm run typecheck` includes `npm run temporal:validate`, which typechecks the
+  Temporal gateway and worker, runs the dedicated Temporal Vitest suite, and
+  builds the deterministic workflow bundle.
 - `npm run deploy-guardrails:check` protects reviewed Durable Object migration
   history and bindings in both Wrangler configs, requires exact allowlisting for
   class deletion, and rejects destructive Cloudflare CLI operations in

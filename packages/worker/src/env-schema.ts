@@ -165,6 +165,11 @@ export const EnvSchema = object({
 		'COOKIE_SECRET must be at least 32 characters for session signing.',
 	),
 	SECRET_STORE_KEY: secretStoreKeySchema,
+	// Current and optional previous HMAC keys for Temporal Activity requests.
+	// The signed gateway is disabled when this secret is absent.
+	CLOUDFLARE_ACTIVITY_SIGNING_KEYS: optionalNonEmptyStringSchema,
+	TEMPORAL_GATEWAY_URL: optionalUrlStringSchema,
+	TEMPORAL_GATEWAY_SIGNING_KEYS: optionalNonEmptyStringSchema,
 	APP_DB: d1DatabaseSchema,
 	BUNDLE_ARTIFACTS_KV: createSchema<unknown, KVNamespace>((value, context) => {
 		if (value) {
@@ -175,9 +180,8 @@ export const EnvSchema = object({
 			context.path,
 		)
 	}),
-	// Jobs worker service binding (ADR 0016). Optional: tests and local
-	// single-worker dev fall back to jobs tables in APP_DB and skip
-	// JobManager alarm scheduling.
+	// Jobs worker service binding (ADR 0016). Optional only for tests and
+	// single-worker local development.
 	JOBS: createSchema<unknown, Fetcher | undefined>((value, _context) => {
 		if (value === undefined) return { value: undefined }
 		return { value: value as Fetcher }

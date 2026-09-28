@@ -3,7 +3,7 @@ import { expect, test, vi } from 'vitest'
 const listedWorkflow = {
 	id: 'dynwf-1',
 	userId: 'stable-user-1',
-	bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS' as const,
+	bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS' as const,
 	sourceType: 'inline' as const,
 	packageId: null,
 	kodyId: null,

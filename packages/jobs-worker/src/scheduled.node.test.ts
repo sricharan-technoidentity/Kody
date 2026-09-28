@@ -19,25 +19,21 @@ import {
 	runScheduledLaneWithFailureIsolation,
 } from './scheduled.ts'
 
-vi.mock('./watchdog.ts', () => ({
-	runJobScheduleWatchdogTick: vi.fn().mockResolvedValue({
-		overdueJobCount: 0,
-		stuckSkippedJobCount: 0,
-		repairedStuckJobCount: 0,
-		usersSynced: 0,
-		usersFailedSync: 0,
-		usersSkippedCap: 0,
-		scanTruncated: false,
-		alerted: false,
+vi.mock('./schedule-reconciler.ts', () => ({
+	runTemporalScheduleReconcilerTick: vi.fn().mockResolvedValue({
+		enabled: false,
+		processed: 0,
+		failed: 0,
+		repaired: 0,
 	}),
 }))
 
-const { runJobScheduleWatchdogTick } = await import('./watchdog.ts')
+const { runTemporalScheduleReconcilerTick } =
+	await import('./schedule-reconciler.ts')
 
 function createEnv(overrides: Partial<Record<string, unknown>> = {}) {
 	return {
 		JOBS_DB: {} as D1Database,
-		JOB_MANAGER: {} as DurableObjectNamespace,
 		HOST: {
 			runScheduledLane: vi.fn().mockResolvedValue('completed'),
 		},
@@ -66,8 +62,7 @@ function queueMessage(input: {
 	}
 }
 
-test('lane routing forwards platform work to HOST, runs watchdog locally, and acks invalid queue bodies', async () => {
-	vi.mocked(runJobScheduleWatchdogTick).mockClear()
+test('lane routing forwards platform work to HOST, runs Temporal schedule sync locally, and acks invalid queue bodies', async () => {
 	const env = createEnv()
 	await expect(
 		runScheduledLaneWithFailureIsolation({
@@ -78,17 +73,14 @@ test('lane routing forwards platform work to HOST, runs watchdog locally, and ac
 	expect(env.HOST.runScheduledLane).toHaveBeenCalledWith(
 		message('oauth_purge_expired'),
 	)
-	expect(runJobScheduleWatchdogTick).not.toHaveBeenCalled()
-
-	vi.mocked(runJobScheduleWatchdogTick).mockClear()
 	vi.mocked(env.HOST.runScheduledLane).mockClear()
 	await expect(
 		runScheduledLaneWithFailureIsolation({
 			env,
-			message: message('job_schedule_watchdog'),
+			message: message('temporal_schedule_sync'),
 		}),
 	).resolves.toBe('completed')
-	expect(runJobScheduleWatchdogTick).toHaveBeenCalledOnce()
+	expect(runTemporalScheduleReconcilerTick).toHaveBeenCalledOnce()
 	expect(env.HOST.runScheduledLane).not.toHaveBeenCalled()
 
 	consoleError.mockImplementation(() => {})
@@ -149,7 +141,7 @@ test('cron dispatch enqueues cadence lanes and falls back when the queue is miss
 	})
 	const directLanes = getScheduledLaneCadence(new Date(directTime))
 	expect(directEnv.HOST.runScheduledLane).toHaveBeenCalledTimes(
-		directLanes.length,
+		directLanes.filter((lane) => lane !== 'temporal_schedule_sync').length,
 	)
 
 	consoleError.mockImplementation(() => {})

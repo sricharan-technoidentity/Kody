@@ -3,27 +3,15 @@ import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
 import { requireMcpUser } from '#mcp/capabilities/meta/require-user.ts'
 import { emptyCapabilityInputSchema } from '#mcp/capabilities/types.ts'
 import { inspectJobsForUser } from '#worker/jobs/inspect.ts'
-import {
-	buildJobInspectionOutput,
-	buildJobManagerDebugOutput,
-	jobListOutputSchema,
-} from './shared.ts'
+import { buildJobInspectionOutput, jobListOutputSchema } from './shared.ts'
 
 export const jobListCapability = defineDomainCapability(
 	capabilityDomainNames.jobs,
 	{
 		name: 'jobList',
 		description:
-			"List existing scheduled jobs for the signed-in user with status, counters, and job-manager alarm state for debugging scheduling issues. Recurring schedules belong on a package (`kody.jobs`); deferred one-shots use `workflows.create`. recent_runs is empty here for efficiency; use jobGet for one job's recent runs or runList/runSummary for cross-job failure history.",
-		keywords: [
-			'job',
-			'list',
-			'inspect',
-			'debug',
-			'scheduled jobs',
-			'alarm',
-			'status',
-		],
+			"List existing Temporal-scheduled jobs for the signed-in user with status and counters. Recurring schedules belong on a package (`kody.jobs`); deferred one-shots use `workflows.create`. recent_runs is empty here for efficiency; use jobGet for one job's recent runs or runList/runSummary for cross-job failure history.",
+		keywords: ['job', 'list', 'inspect', 'debug', 'scheduled jobs', 'status'],
 		readOnly: true,
 		idempotent: true,
 		destructive: false,
@@ -39,7 +27,6 @@ export const jobListCapability = defineDomainCapability(
 				jobs: inspection.jobs.map((job) =>
 					buildJobInspectionOutput(job, { recentRuns: [] }),
 				),
-				alarm: buildJobManagerDebugOutput(inspection.alarm),
 			}
 		},
 	},

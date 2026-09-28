@@ -14,23 +14,27 @@ Official guide markdown uploads origin and platform.
 
 ## Ownership
 
-| Concern                                                                                                                        | Owner                                                       |
-| ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| Remix UI, blog, official guides, static assets                                                                                 | `kody` (origin)                                             |
-| MCP HTTP (`/mcp`), OAuth, inbound email, queues                                                                                | `kody` (origin)                                             |
-| `MCP`, `McpClientHub`, `OAuthPurgeCoordinator`, `UserMeter`, `Mailbox`, `RepoSession`, `RepoSessionIndex`, `StripePlanRefresh` | `kody-platform` (origin and runtime bind them cross-script) |
-| `StorageRunner`, `RunLog`, `PackageRealtimeSession`                                                                            | `kody-runtime`                                              |
-| `JobManager`                                                                                                                   | `kody-jobs`                                                 |
-| `APP_DB` / `AUDIT_DB` / KV / R2 / queues / Vectorize / AI                                                                      | Shared resources; each worker binds directly                |
+| Concern                                                                                                   | Owner                                                       |
+| --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Remix UI, blog, official guides, static assets                                                            | `kody` (origin)                                             |
+| MCP HTTP (`/mcp`), OAuth, inbound email, queues                                                           | `kody` (origin)                                             |
+| `MCP`, `McpClientHub`, `OAuthPurgeCoordinator`, `UserMeter`, `Mailbox`, `RepoSession`, `RepoSessionIndex` | `kody-platform` (origin and runtime bind them cross-script) |
+| `StorageRunner`, `RunLog`, `PackageRealtimeSession`                                                       | `kody-runtime`                                              |
+| Stripe plan refresh coordination                                                                          | Temporal workflow; owner mapping in Cloudflare KV           |
+| Historical `StripePlanRefresh` namespace                                                                  | Migration ledger only; no active binding or export          |
+| `APP_DB` / `AUDIT_DB` / KV / R2 / queues / Vectorize / AI                                                 | Shared resources; each worker binds directly                |
 
 ## Invariants
 
 - Do not add another `transferred_classes` row for `MCP`, `McpClientHub`,
   `OAuthPurgeCoordinator`, `UserMeter`, `Mailbox`, `RepoSession`,
-  `RepoSessionIndex`, or `StripePlanRefresh`. The `v1` transfer already applied
-  on production `kody-platform`. The exact set is protected by
-  `tools/ci/durable-object-baseline.json`.
-- Never add `deleted_classes` for a transferred class. That destroys data.
+  `RepoSessionIndex`, or the historical `StripePlanRefresh` entry. The `v1`
+  transfer is applied production migration history. The exact set is protected
+  by `tools/ci/durable-object-baseline.json`.
+- Never delete an active transferred class. This local Temporal change does not
+  add a production deletion migration for the retired Stripe coordinator; any
+  later remote deletion needs explicit production scope and reviewed deploy
+  sequencing.
 - The committed `from_script: "kody"` in
   `packages/platform-worker/wrangler.jsonc` is rewritten by
   `tools/ci/platform-worker-config.ts` to the deployed origin script name
@@ -68,9 +72,7 @@ before each production origin upload:
   owns transferred classes while platform and runtime own none): origin uploads
   the full `index.ts` entry first so `new_sqlite_classes` can replay, then
   platform and runtime apply the existing `transferred_classes` tags, then
-  origin uploads the slim entry. The bootstrap workflow binding uses
-  `kody-production-bootstrap-dynamic-callable-workflows` so it does not collide
-  with the runtime-owned name.
+  origin uploads the slim entry.
 - **Ambiguous** (probe failed, mixed ownership, or a missing origin while
   destinations already own classes): origin keeps the full entry. The workflow
   does not bootstrap and does not force a transfer. Bindings for classes origin

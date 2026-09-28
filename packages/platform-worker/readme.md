@@ -3,7 +3,7 @@
 The platform Durable Object lane extracted from the origin `kody` Worker per
 [ADR 0034](../../docs/contributing/decisions/0034-origin-owns-no-durable-objects.md):
 `MCP`, `McpClientHub`, `OAuthPurgeCoordinator`, `UserMeter`, `Mailbox`,
-`RepoSession`, `RepoSessionIndex`, and `StripePlanRefresh`.
+`RepoSession`, and `RepoSessionIndex`.
 
 The Worker entry module is
 [`packages/worker/src/platform-worker.ts`](../worker/src/platform-worker.ts):
@@ -25,3 +25,9 @@ outbound fetch from the platform-owned `MCP` Durable Object.
   to `/docs*`).
 - Production Durable Object ownership: see the
   [migration runbook](../../docs/contributing/architecture/platform-worker-migration-runbook.md).
+
+The committed migration ledger still names the retired `StripePlanRefresh` class
+so Cloudflare's historical namespace chain remains valid. The active platform
+entrypoint does not export or bind that class; Stripe refresh coordination uses
+the Temporal workflow described in
+[Temporal foundation](../../docs/contributing/architecture/temporal-foundation.md).

@@ -233,7 +233,7 @@ test('workflow projection retention prunes old terminal rows but keeps active an
 		userId,
 		projection: {
 			id: 'wf-old-terminal',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'done',
 			idempotencyKey: 'idem-old-terminal',
@@ -249,7 +249,7 @@ test('workflow projection retention prunes old terminal rows but keeps active an
 		userId,
 		projection: {
 			id: 'wf-old-active',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'inline',
 			workflowName: 'still-running',
 			idempotencyKey: 'idem-old-active',
@@ -264,7 +264,7 @@ test('workflow projection retention prunes old terminal rows but keeps active an
 		userId,
 		projection: {
 			id: 'wf-old-creating',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 			sourceType: 'package',
 			packageId: 'pkg-keep',
 			workflowName: 'creating',

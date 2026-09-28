@@ -9,11 +9,11 @@ import {
 	type ScheduledLaneOutcome,
 } from '@kody-internal/shared/jobs/scheduled-lanes.ts'
 import { type JobsWorkerEnv } from './env.ts'
-import { runJobScheduleWatchdogTick } from './watchdog.ts'
+import { runTemporalScheduleReconcilerTick } from './schedule-reconciler.ts'
 
 /**
  * Execute one scheduled lane. Lanes the jobs worker owns run locally against
- * the jobs database and JobManager namespace; every other lane (the platform
+ * the jobs database and Temporal schedule gateway; every other lane (the platform
  * lanes welded to the main worker's subsystems) is forwarded to
  * `JobsHost.runScheduledLane`, which applies its own failure isolation.
  */
@@ -24,10 +24,17 @@ export async function runScheduledLaneWithFailureIsolation(input: {
 	const scheduledAt = new Date(input.message.scheduledTime)
 	try {
 		if (isJobsWorkerLocalLane(input.message.lane)) {
-			await runJobScheduleWatchdogTick({
-				env: input.env,
-				now: scheduledAt,
-			})
+			switch (input.message.lane) {
+				case 'temporal_schedule_sync':
+					console.info(
+						'temporal_schedule_sync',
+						await runTemporalScheduleReconcilerTick({
+							env: input.env,
+							now: scheduledAt,
+						}),
+					)
+					break
+			}
 			return 'completed'
 		}
 		return await input.env.HOST.runScheduledLane(input.message)

@@ -15,7 +15,7 @@ import {
 	workerOriginForPort,
 	workerPortRange,
 } from './dev-server.ts'
-import { isExecutedDirectly, resolveNpmCommand } from './node-runtime.ts'
+import { isExecutedDirectly, resolveNpmInvocation } from './node-runtime.ts'
 
 export const defaultReadyTimeoutMs = 180_000
 export const defaultReadyPollMs = 500
@@ -219,27 +219,62 @@ export function resolveNode26BinDir(
 	options: {
 		readDir?: (dir: string) => Array<string>
 		hasNodeBin?: (binDir: string) => boolean
+		platform?: NodeJS.Platform
+		localAppData?: string
+		nvmHome?: string
 	} = {},
 ) {
+	const platform = options.platform ?? process.platform
+	const pathApi = platform === 'win32' ? path.win32 : path.posix
 	const readDir = options.readDir ?? ((dir) => readdirSync(dir))
 	const hasNodeBin =
-		options.hasNodeBin ?? ((binDir) => existsSync(path.join(binDir, 'node')))
-	const versionsDir = path.join(homeDir, '.nvm', 'versions', 'node')
-	let names: Array<string>
-	try {
-		names = readDir(versionsDir)
-	} catch {
-		return null
+		options.hasNodeBin ??
+		((binDir) =>
+			existsSync(
+				pathApi.join(binDir, platform === 'win32' ? 'node.exe' : 'node'),
+			))
+	const versionRoots =
+		platform === 'win32'
+			? [
+					...(options.nvmHome
+						? [pathApi.join(options.nvmHome, 'installs'), options.nvmHome]
+						: []),
+					...(options.localAppData
+						? [
+								pathApi.join(
+									options.localAppData,
+									'Author Software',
+									'nvm',
+									'installs',
+								),
+							]
+						: []),
+				]
+			: [pathApi.join(homeDir, '.nvm', 'versions', 'node')]
+	for (const versionsDir of versionRoots) {
+		let names: Array<string>
+		try {
+			names = readDir(versionsDir)
+		} catch {
+			continue
+		}
+		const node26 = names
+			.filter((name) => name.startsWith('v26.'))
+			.sort((left, right) =>
+				right.localeCompare(left, undefined, { numeric: true }),
+			)
+		const binDir = node26
+			.map((name) =>
+				pathApi.join(
+					versionsDir,
+					name,
+					...(platform === 'win32' ? [] : ['bin']),
+				),
+			)
+			.find((dir) => hasNodeBin(dir))
+		if (binDir) return binDir
 	}
-	const node26 = names
-		.filter((name) => name.startsWith('v26.'))
-		.sort((left, right) =>
-			right.localeCompare(left, undefined, { numeric: true }),
-		)
-	const binDir = node26
-		.map((name) => path.join(versionsDir, name, 'bin'))
-		.find((dir) => hasNodeBin(dir))
-	return binDir ?? null
+	return null
 }
 
 export function envWithPreferredNode26(
@@ -249,16 +284,38 @@ export function envWithPreferredNode26(
 		homeDir?: string
 		readDir?: (dir: string) => Array<string>
 		hasNodeBin?: (binDir: string) => boolean
+		platform?: NodeJS.Platform
+		localAppData?: string
+		nvmHome?: string
 	} = {},
 ) {
 	const nodeMajor =
 		options.nodeMajor ?? Number.parseInt(process.versions.node, 10)
 	if (Number.isFinite(nodeMajor) && nodeMajor >= 26) return env
-	const binDir = resolveNode26BinDir(options.homeDir ?? homedir(), options)
+	const platform = options.platform ?? process.platform
+	const binDir = resolveNode26BinDir(options.homeDir ?? homedir(), {
+		...options,
+		platform,
+		localAppData: options.localAppData ?? env.LOCALAPPDATA,
+		nvmHome: options.nvmHome ?? env.NVM_HOME,
+	})
 	if (!binDir) return env
+	const pathApi = platform === 'win32' ? path.win32 : path.posix
 	return {
 		...env,
-		PATH: `${binDir}${path.delimiter}${env.PATH ?? ''}`,
+		PATH: `${binDir}${pathApi.delimiter}${env.PATH ?? ''}`,
+		...(platform === 'win32'
+			? {
+					npm_node_execpath: pathApi.join(binDir, 'node.exe'),
+					npm_execpath: pathApi.join(
+						binDir,
+						'node_modules',
+						'npm',
+						'bin',
+						'npm-cli.js',
+					),
+				}
+			: {}),
 	}
 }
 
@@ -537,11 +594,16 @@ function createDefaultStartDev(env: NodeJS.ProcessEnv): StartedDevHandle {
 			`Created ${workerEnvRelativePath} from ${workerEnvExampleRelativePath}`,
 		)
 	}
-	const child = spawnInOwnProcessGroup(resolveNpmCommand(), ['run', 'dev'], {
-		stdio: ['ignore', 'pipe', 'pipe'],
-		env,
-		cwd: process.cwd(),
-	})
+	const npm = resolveNpmInvocation(env)
+	const child = spawnInOwnProcessGroup(
+		npm.command,
+		[...npm.argsPrefix, 'run', 'dev'],
+		{
+			stdio: ['ignore', 'pipe', 'pipe'],
+			env,
+			cwd: process.cwd(),
+		},
+	)
 	const buffered: Array<string> = []
 	const stdoutState = { pending: '' }
 	const stderrState = { pending: '' }

@@ -12,7 +12,6 @@ function createEnv(overrides: Record<string, unknown> = {}) {
 		...testOidcSigningEnv,
 		APP_DB: {},
 		BUNDLE_ARTIFACTS_KV: {},
-		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},
 		PACKAGE_REALTIME_SESSION: {},
 		MCP_CLIENT_HUB: {},

@@ -93,7 +93,22 @@ test('buildKodyFns rejects role-gated capabilities even when passed an unfiltere
 
 test('package workflow tools create instances from package context and honor caller overrides in runModuleWithRegistry', async () => {
 	silenceIncidentalRuntimeWarnings()
-	const created: Array<WorkflowInstanceCreateOptions<unknown>> = []
+	const started: Array<Record<string, unknown>> = []
+	const fetchSpy = vi
+		.spyOn(globalThis, 'fetch')
+		.mockImplementation(
+			async (_request: RequestInfo | URL, init?: RequestInit) => {
+				const request = JSON.parse(String(init?.body)) as Record<
+					string,
+					unknown
+				>
+				started.push(request)
+				return Response.json({
+					workflowId: request['workflowId'],
+					firstExecutionRunId: 'temporal-run-1',
+				})
+			},
+		)
 	const runLog = createFakeRunLogNamespace()
 	const workflowTools = createWorkflowTools({
 		env: {
@@ -133,19 +148,14 @@ test('package workflow tools create instances from package context and honor cal
 				},
 			} as unknown as D1Database,
 			RUN_LOG: runLog.namespace,
-			DYNAMIC_CALLABLE_WORKFLOWS: {
-				get: async () => {
-					throw new Error('not found')
+			BUNDLE_ARTIFACTS_KV: createJobMutationKv(),
+			TEMPORAL_GATEWAY_URL: 'https://temporal-gateway.test',
+			TEMPORAL_GATEWAY_SIGNING_KEYS: JSON.stringify([
+				{
+					id: 'current',
+					secret: 'a-secure-test-secret-that-is-long-enough',
 				},
-				create: async (options?: WorkflowInstanceCreateOptions<unknown>) => {
-					if (!options) throw new Error('missing options')
-					created.push(options)
-					return {
-						id: options.id ?? 'generated',
-						status: async () => ({ status: 'queued' }),
-					} as WorkflowInstance
-				},
-			} as Workflow<unknown>,
+			]),
 		} as Env,
 		callerContext: {
 			baseUrl: 'https://app.example.com',
@@ -178,17 +188,16 @@ test('package workflow tools create instances from package context and honor cal
 		export_name: './run-event',
 		run_at: '2026-05-03T12:00:00.000Z',
 	})
-	expect(created).toHaveLength(1)
-	expect(created[0]?.params).toEqual(
-		expect.objectContaining({
-			userId: 'user-1',
-			packageId: 'pkg-1',
-			kodyId: 'shade-automation',
-			sourceId: 'source-1',
-			workflowName: 'shade-event',
-			params: { eventId: 'event-1' },
+	expect(started).toHaveLength(1)
+	expect(started[0]).toMatchObject({
+		workflowType: 'dynamicPackageWorkflow',
+		input: expect.objectContaining({
+			requestedRunAt: '2026-05-03T12:00:00.000Z',
+			sourceRef: expect.any(String),
+			callerContextRef: expect.any(String),
 		}),
-	)
+	})
+	expect(JSON.stringify(started[0])).not.toContain('event-1')
 
 	const env = {} as Env
 	const callerContext = createMcpCallerContext({
@@ -252,12 +261,28 @@ export default async function run() {
 		})
 	} finally {
 		createExecuteExecutorSpy.mockRestore()
+		fetchSpy.mockRestore()
 	}
 })
 
 test('runModuleWithRegistry queues inline workflows.create calls without runAt or idempotencyKey', async () => {
 	silenceIncidentalRuntimeWarnings()
-	const created: Array<WorkflowInstanceCreateOptions<unknown>> = []
+	const started: Array<Record<string, unknown>> = []
+	const fetchSpy = vi
+		.spyOn(globalThis, 'fetch')
+		.mockImplementation(
+			async (_request: RequestInfo | URL, init?: RequestInit) => {
+				const request = JSON.parse(String(init?.body)) as Record<
+					string,
+					unknown
+				>
+				started.push(request)
+				return Response.json({
+					workflowId: request['workflowId'],
+					firstExecutionRunId: 'temporal-run-1',
+				})
+			},
+		)
 	const runLog = createFakeRunLogNamespace()
 	const env = {
 		APP_DB: {
@@ -281,19 +306,14 @@ test('runModuleWithRegistry queues inline workflows.create calls without runAt o
 			},
 		} as unknown as D1Database,
 		RUN_LOG: runLog.namespace,
-		DYNAMIC_CALLABLE_WORKFLOWS: {
-			get: async () => {
-				throw new Error('not found')
+		BUNDLE_ARTIFACTS_KV: createJobMutationKv(),
+		TEMPORAL_GATEWAY_URL: 'https://temporal-gateway.test',
+		TEMPORAL_GATEWAY_SIGNING_KEYS: JSON.stringify([
+			{
+				id: 'current',
+				secret: 'a-secure-test-secret-that-is-long-enough',
 			},
-			create: async (options?: WorkflowInstanceCreateOptions<unknown>) => {
-				if (!options) throw new Error('missing options')
-				created.push(options)
-				return {
-					id: options.id ?? 'generated',
-					status: async () => ({ status: 'queued' }),
-				} as WorkflowInstance
-			},
-		} as Workflow<unknown>,
+		]),
 	} as Env
 	const callerContext = createMcpCallerContext({
 		baseUrl: 'https://app.example.com',
@@ -349,21 +369,20 @@ export default async function main() {
 		)
 		expect(wrappedSource).toContain('kody: __kodyProvider')
 		expect(wrappedSource).not.toMatch(/\b(?:const|let|var) kody\b/)
-		expect(created).toHaveLength(1)
-		expect(created[0]?.params).toEqual(
-			expect.objectContaining({
-				sourceType: 'inline',
-				userId: 'user-1',
-				workflowName: 'inline-code',
-				code: 'export default async function main() { return { ok: true } }',
-				idempotencyKey: expect.stringMatching(/^generated:/),
-				runAt: '2026-05-03T12:34:56.000Z',
-				planDate: '2026-05-03',
+		expect(started).toHaveLength(1)
+		expect(started[0]).toMatchObject({
+			workflowType: 'dynamicPackageWorkflow',
+			input: expect.objectContaining({
+				requestedRunAt: '2026-05-03T12:34:56.000Z',
+				sourceRef: expect.any(String),
+				callerContextRef: expect.any(String),
 			}),
-		)
+		})
+		expect(JSON.stringify(started[0])).not.toContain('export default')
 	} finally {
 		vi.useRealTimers()
 		createExecuteExecutorSpy.mockRestore()
+		fetchSpy.mockRestore()
 	}
 })
 
@@ -426,7 +445,6 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 	})
 	const kv = createJobMutationKv()
 	const repoSessionAccesses: Array<string> = []
-	const jobManagerSyncPayloads: Array<{ userId: string; source?: string }> = []
 	const env = createRunKodyRegistryTestEnv({
 		APP_DB: db,
 		SENTRY_ENVIRONMENT: 'production',
@@ -443,22 +461,7 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 				throw new Error('metadata-only job updates must not open repo sessions')
 			},
 		},
-		JOBS: {
-			...createD1JobsStore(db),
-			async syncAlarm(input: { userId: string }) {
-				if (input.userId !== callerContext.user.userId) {
-					throw new Error(
-						`Expected JOBS.syncAlarm to be scoped to ${callerContext.user.userId}`,
-					)
-				}
-				jobManagerSyncPayloads.push(input)
-				return {
-					ok: true as const,
-					userId: input.userId,
-					nextRunAt: null,
-				}
-			},
-		},
+		JOBS: createD1JobsStore(db),
 		STORAGE_RUNNER: {
 			idFromName(name: string) {
 				return name as unknown as DurableObjectId
@@ -507,9 +510,6 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 			},
 		})
 		expect(repoSessionAccesses).toEqual([])
-		expect(jobManagerSyncPayloads).toMatchObject([
-			{ userId: callerContext.user.userId },
-		])
 		await expect(
 			db
 				.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?')
@@ -524,10 +524,6 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 			deleted: true,
 		})
 		expect(repoSessionAccesses).toEqual([])
-		expect(jobManagerSyncPayloads).toMatchObject([
-			{ userId: callerContext.user.userId },
-			{ userId: callerContext.user.userId },
-		])
 		await expect(
 			db
 				.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?')

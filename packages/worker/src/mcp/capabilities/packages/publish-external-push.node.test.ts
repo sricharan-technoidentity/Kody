@@ -155,7 +155,6 @@ function createContext(
 					}
 				},
 			},
-			DYNAMIC_CALLABLE_WORKFLOWS: {},
 			PACKAGE_APP_BASE_URL: 'https://packages.kody.test',
 		} as unknown as Env,
 		callerContext: {

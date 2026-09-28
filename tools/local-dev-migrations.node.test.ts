@@ -45,6 +45,31 @@ test('localizeMigrations turns transfers into sqlite creates and elides a later 
 	).toBe(true)
 })
 
+test('localizeMigrations omits locally retired classes without adding a production deletion', () => {
+	expect(
+		localizeMigrations(
+			[
+				{
+					tag: 'v1',
+					transferred_classes: [
+						{
+							from: 'StripePlanRefresh',
+							from_script: 'kody',
+							to: 'StripePlanRefresh',
+						},
+						{
+							from: 'Mailbox',
+							from_script: 'kody',
+							to: 'Mailbox',
+						},
+					],
+				},
+			],
+			{ excludedClasses: ['StripePlanRefresh'] },
+		),
+	).toEqual([{ tag: 'v1', new_sqlite_classes: ['Mailbox'] }])
+})
+
 test('the committed runtime production chain passes wrangler’s local sqlite map', async () => {
 	const source = parseJsonc<{ migrations?: unknown }>(
 		await readFile('packages/runtime-worker/wrangler.jsonc', 'utf8'),

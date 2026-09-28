@@ -14,7 +14,6 @@ import {
 	countAccountR2ObjectRefs,
 	readAccountR2ExportPage,
 } from '#worker/account/r2-export.ts'
-import { exportJobManagerForUser } from '#worker/jobs/manager-client.ts'
 import { jobsData } from '#worker/jobs/jobs-data.ts'
 import {
 	buildPublishedSourceManifestSnapshotKvKey,
@@ -59,7 +58,6 @@ const exportRowidColumn = '__account_export_rowid'
 export const accountExportSectionNames = [
 	'd1_table',
 	'storage_runner',
-	'job_manager',
 	'run_records',
 	'user_meter',
 	'mailbox',
@@ -264,7 +262,6 @@ function formatRunRecordsExportSectionItems(page: RunRecordsExportPayload) {
 }
 
 type AccountExportDurableObjects = {
-	jobManager: unknown | null
 	runRecords: RunRecordsExportPayload | null
 	userMeter: UserMeterExportResult | null
 	mailbox: MailboxExportResult | null
@@ -1459,17 +1456,7 @@ async function exportDurableObjects(input: {
 				warnings: input.warnings,
 			}),
 		])
-	let jobManager: unknown | null = null
-	try {
-		jobManager = await exportJobManagerForUser({
-			env: input.env,
-			userId: input.userId,
-		})
-	} catch (error) {
-		input.warnings.push(`Job manager export failed: ${getErrorMessage(error)}`)
-	}
 	return {
-		jobManager,
 		runRecords,
 		userMeter,
 		mailbox,
@@ -1515,13 +1502,6 @@ function buildManifest(input: {
 			section: 'durable_object_summaries',
 			kind: 'storage_runner',
 		},
-	}
-	sections.job_manager = {
-		count: 1,
-		warnings: input.warnings.filter((warning) =>
-			warning.startsWith('Job manager '),
-		),
-		discovery: { section: 'job_manager' },
 	}
 	sections.run_records = {
 		// Full exports count every RunLog table returned by exportRuns (runs,
@@ -1781,7 +1761,7 @@ export async function readAccountExportSection(input: {
 	section: AccountExportSectionName
 	table?: string
 	storageId?: string
-	kind?: 'storage_runner' | 'job_manager'
+	kind?: 'storage_runner'
 	pageSize?: number
 	startAfter?: string
 }): Promise<AccountExportSectionResult> {
@@ -1822,21 +1802,6 @@ export async function readAccountExportSection(input: {
 			truncated: runnerExport.truncated,
 			nextStartAfter: runnerExport.nextStartAfter,
 			pageSize: runnerExport.pageSize,
-			warnings,
-		}
-	}
-	if (input.section === 'job_manager') {
-		return {
-			section: input.section,
-			items: [
-				await exportJobManagerForUser({
-					env: input.env,
-					userId: input.mcpUserId,
-				}),
-			],
-			truncated: false,
-			nextStartAfter: null,
-			pageSize: 1,
 			warnings,
 		}
 	}
@@ -1987,18 +1952,6 @@ export async function readAccountExportSection(input: {
 			const cursor = input.startAfter
 				? (JSON.parse(input.startAfter) as Record<string, unknown>)
 				: {}
-			if (input.kind === 'job_manager') {
-				return {
-					section: input.section,
-					items: cursor['done']
-						? []
-						: [{ kind: 'job_manager', userId: input.mcpUserId }],
-					truncated: false,
-					nextStartAfter: null,
-					pageSize: 1,
-					warnings,
-				}
-			}
 			// Discovery pages use D1 keyset SQL for registered storage ids, then
 			// include RunLog-only ids with one Durable Object RPC per request.
 			const stage = String(cursor['stage'] ?? 'base')

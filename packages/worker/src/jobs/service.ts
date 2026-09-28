@@ -15,7 +15,6 @@ import {
 import { type RunRecordHandle } from '#worker/run-records/types.ts'
 import { hydrateJobViewFromRunLog } from './job-run-observability-hydrate.ts'
 import { applyExecutionOutcome, processDueJobs } from './process-due-jobs.ts'
-import { syncJobManagerAlarm } from './manager-client.ts'
 import { type JobRow } from '@kody-internal/shared/jobs/repo.ts'
 import { jobsData } from './jobs-data.ts'
 import {
@@ -360,6 +359,7 @@ async function rebuildAndExecuteJobArtifact(input: {
 	waitUntil?: (promise: Promise<unknown>) => void
 	runRecordHandle?: RunRecordHandle | null
 	idempotencyKey?: string | null
+	signal?: AbortSignal
 }) {
 	if (!input.job.sourceId) {
 		throw new Error('Repo-backed job source is missing.')
@@ -390,6 +390,7 @@ async function rebuildAndExecuteJobArtifact(input: {
 		waitUntil: input.waitUntil,
 		runRecordHandle: input.runRecordHandle,
 		idempotencyKey: input.idempotencyKey,
+		signal: input.signal,
 	})
 }
 
@@ -404,7 +405,9 @@ async function executePublishedJobArtifact(input: {
 	waitUntil?: (promise: Promise<unknown>) => void
 	runRecordHandle?: RunRecordHandle | null
 	idempotencyKey?: string | null
+	signal?: AbortSignal
 }): Promise<ExecuteResult> {
+	input.signal?.throwIfAborted()
 	const source = await getEntitySourceById(
 		input.env.APP_DB,
 		input.job.sourceId,
@@ -487,6 +490,7 @@ async function executePublishedJobArtifact(input: {
 			...(packageContext ? { packageContext } : {}),
 			runRecord,
 			runRecordHandle: input.runRecordHandle,
+			signal: input.signal,
 			...packageRuntimeTools,
 			waitUntil: input.runRecordHandle ? undefined : input.waitUntil,
 		},
@@ -1155,10 +1159,6 @@ export async function updateJob(input: {
 					publishedCommit: updated.publishedCommit,
 				}),
 			})
-			await syncJobManagerAlarm({
-				env: input.env,
-				userId: callerContext.user.userId,
-			})
 			return toJobView(updated)
 		},
 	})
@@ -1230,10 +1230,6 @@ export async function deleteJob(input: {
 					})
 				}
 			}
-			await syncJobManagerAlarm({
-				env: input.env,
-				userId: input.userId,
-			})
 			return {
 				id: input.jobId,
 				deleted: true as const,
@@ -1250,12 +1246,14 @@ export async function executeJobOnce(input: {
 	waitUntil?: (promise: Promise<unknown>) => void
 	runRecordHandle?: RunRecordHandle | null
 	idempotencyKey?: string | null
+	signal?: AbortSignal
 }): Promise<JobExecutionOutcome> {
 	return await withAccountWriteLease({
 		db: input.env.APP_DB,
 		stableUserId: input.job.userId,
 		env: input.env,
 		async write() {
+			input.signal?.throwIfAborted()
 			const started = new Date()
 			let execution: JobExecutionResult
 			let outcome: 'success' | 'error' = 'success'
@@ -1302,6 +1300,7 @@ export async function executeJobOnce(input: {
 						waitUntil: input.waitUntil,
 						runRecordHandle: input.runRecordHandle,
 						idempotencyKey: input.idempotencyKey,
+						signal: input.signal,
 					})
 					if (result.error) {
 						const errorMessage =
@@ -1342,6 +1341,9 @@ export async function executeJobOnce(input: {
 					completedOccurrence = true
 				}
 			} catch (error) {
+				if (input.signal?.aborted) {
+					input.signal.throwIfAborted()
+				}
 				if (error instanceof TransientJobExecutionError) {
 					throw error
 				}
@@ -1398,7 +1400,9 @@ async function runRepoBackedJob(input: {
 	waitUntil?: (promise: Promise<unknown>) => void
 	runRecordHandle?: RunRecordHandle | null
 	idempotencyKey?: string | null
+	signal?: AbortSignal
 }): Promise<ExecuteResult> {
+	input.signal?.throwIfAborted()
 	const resolved = await resolvePublishedJobSource({
 		env: input.env,
 		userId: input.callerContext.user.userId,
@@ -1445,6 +1449,7 @@ async function runRepoBackedJob(input: {
 			waitUntil: input.waitUntil,
 			runRecordHandle: input.runRecordHandle,
 			idempotencyKey: input.idempotencyKey,
+			signal: input.signal,
 		})
 	}
 	return await rebuildAndExecuteJobArtifact({
@@ -1458,6 +1463,7 @@ async function runRepoBackedJob(input: {
 		waitUntil: input.waitUntil,
 		runRecordHandle: input.runRecordHandle,
 		idempotencyKey: input.idempotencyKey,
+		signal: input.signal,
 	})
 }
 
@@ -1572,12 +1578,14 @@ async function resolveScheduledJobRunAttribution(input: {
 	}
 }
 
-async function executeClaimedScheduledJob(input: {
+export async function executeClaimedScheduledJobWithResultRef(input: {
 	env: Env
 	row: JobRow
 	scheduledFor: string
 	waitUntil?: (promise: Promise<unknown>) => void
+	signal?: AbortSignal
 }) {
+	input.signal?.throwIfAborted()
 	const idempotencyKey = buildScheduledJobIdempotencyKey({
 		jobId: input.row.record.id,
 		scheduledFor: input.scheduledFor,
@@ -1606,6 +1614,11 @@ async function executeClaimedScheduledJob(input: {
 			},
 		},
 	})
+	if (!claim) {
+		throw new TransientJobExecutionError(
+			'Unable to claim scheduled job idempotency key; RUN_LOG is unavailable.',
+		)
+	}
 	try {
 		const outcome = await executeOrReplayScheduledJobRun({
 			claim,
@@ -1620,6 +1633,7 @@ async function executeClaimedScheduledJob(input: {
 					waitUntil: input.waitUntil,
 					runRecordHandle: handle,
 					idempotencyKey,
+					signal: input.signal,
 				}),
 		})
 		if (claim?.claimed) {
@@ -1640,7 +1654,10 @@ async function executeClaimedScheduledJob(input: {
 				})
 			}
 		}
-		return outcome
+		return {
+			outcome,
+			resultRef: `run:${claim.claimed ? claim.handle.id : claim.run.id}`,
+		}
 	} catch (error) {
 		if (claim?.claimed && error instanceof TransientJobExecutionError) {
 			await abandonRunRecord({
@@ -1650,6 +1667,15 @@ async function executeClaimedScheduledJob(input: {
 		}
 		throw error
 	}
+}
+
+async function executeClaimedScheduledJob(input: {
+	env: Env
+	row: JobRow
+	scheduledFor: string
+	waitUntil?: (promise: Promise<unknown>) => void
+}) {
+	return (await executeClaimedScheduledJobWithResultRef(input)).outcome
 }
 
 export async function runDueJobsForUser(input: {

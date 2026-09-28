@@ -29,7 +29,7 @@ export function buildScheduledJobIdempotencyKey(input: {
  * D1 blips, Durable Object isolate resets (including "instance is no longer
  * active"), and storage-estimate misses. Sandbox execute often returns these
  * on `result.error` instead of throwing; claimed scheduled runs must promote
- * that string through this helper so JobManager backs off the same occurrence.
+ * that string through this helper so the scheduler backs off the same occurrence.
  */
 export function isTransientJobExecutionError(error: unknown) {
 	return (

@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 import { isExecutedDirectly, resolveLocalBinary } from './node-runtime.ts'
 
 export const nxRemoteCacheServerEnv = 'NX_SELF_HOSTED_REMOTE_CACHE_SERVER'
@@ -43,10 +45,23 @@ export function spawnNx(
 	const stderr = forwardTo.stderr ?? process.stderr
 	return new Promise((resolve) => {
 		const chunks: Array<string> = []
-		const child = spawn(resolveLocalBinary('nx'), [...args], {
-			env,
-			stdio: ['inherit', 'pipe', 'pipe'],
-		})
+		const nxScript = path.join(
+			process.cwd(),
+			'node_modules',
+			'nx',
+			'dist',
+			'bin',
+			'nx.js',
+		)
+		const useNxScript = process.platform === 'win32' && existsSync(nxScript)
+		const child = spawn(
+			useNxScript ? process.execPath : resolveLocalBinary('nx'),
+			useNxScript ? [nxScript, ...args] : [...args],
+			{
+				env,
+				stdio: ['inherit', 'pipe', 'pipe'],
+			},
+		)
 		function forward(
 			stream: NodeJS.ReadableStream | null,
 			dest: NodeJS.WritableStream,

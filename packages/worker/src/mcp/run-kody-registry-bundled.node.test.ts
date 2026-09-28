@@ -5,7 +5,10 @@ import { createMcpCallerContext } from '#mcp/context.ts'
 import type * as ModuleGraph from '#worker/package-runtime/module-graph.ts'
 import { runBundledModuleWithRegistry } from './run-kody-registry.ts'
 import * as mcpExecutor from '#mcp/executor.ts'
-import { createFakeRunLogNamespace } from '#worker/test-support/run-kody-registry.ts'
+import {
+	createFakeRunLogNamespace,
+	createJobMutationKv,
+} from '#worker/test-support/run-kody-registry.ts'
 
 vi.mock('#worker/package-runtime/module-graph.ts', async () => {
 	const actual = await vi.importActual<typeof ModuleGraph>(
@@ -24,7 +27,22 @@ vi.mock('#worker/package-runtime/module-graph.ts', async () => {
 })
 test('runBundledModuleWithRegistry passes params and injects runtime helpers', async () => {
 	silenceIncidentalRuntimeWarnings()
-	const created: Array<WorkflowInstanceCreateOptions<unknown>> = []
+	const started: Array<Record<string, unknown>> = []
+	const fetchSpy = vi
+		.spyOn(globalThis, 'fetch')
+		.mockImplementation(
+			async (_request: RequestInfo | URL, init?: RequestInit) => {
+				const request = JSON.parse(String(init?.body)) as Record<
+					string,
+					unknown
+				>
+				started.push(request)
+				return Response.json({
+					workflowId: request['workflowId'],
+					firstExecutionRunId: 'temporal-run-1',
+				})
+			},
+		)
 	const runLog = createFakeRunLogNamespace()
 	const workflowEnv = {
 		APP_DB: {
@@ -48,19 +66,14 @@ test('runBundledModuleWithRegistry passes params and injects runtime helpers', a
 			},
 		} as unknown as D1Database,
 		RUN_LOG: runLog.namespace,
-		DYNAMIC_CALLABLE_WORKFLOWS: {
-			get: async () => {
-				throw new Error('not found')
+		BUNDLE_ARTIFACTS_KV: createJobMutationKv(),
+		TEMPORAL_GATEWAY_URL: 'https://temporal-gateway.test',
+		TEMPORAL_GATEWAY_SIGNING_KEYS: JSON.stringify([
+			{
+				id: 'current',
+				secret: 'a-secure-test-secret-that-is-long-enough',
 			},
-			create: async (options?: WorkflowInstanceCreateOptions<unknown>) => {
-				if (!options) throw new Error('missing options')
-				created.push(options)
-				return {
-					id: options.id ?? 'generated',
-					status: async () => ({ status: 'queued' }),
-				} as WorkflowInstance
-			},
-		} as Workflow<unknown>,
+		]),
 	} as Env
 	const env = {} as Env
 	const callerContext = createMcpCallerContext({
@@ -323,16 +336,19 @@ test('runBundledModuleWithRegistry passes params and injects runtime helpers', a
 			source_type: 'inline',
 			status: 'queued',
 		})
-		expect(created[0]?.params).toEqual(
-			expect.objectContaining({
-				sourceType: 'inline',
-				userId: 'user-123',
-				params: { greeting: 'hello' },
+		expect(started).toHaveLength(1)
+		expect(started[0]).toMatchObject({
+			workflowType: 'dynamicPackageWorkflow',
+			input: expect.objectContaining({
+				sourceRef: expect.any(String),
+				callerContextRef: expect.any(String),
 			}),
-		)
+		})
+		expect(JSON.stringify(started[0])).not.toContain('hello')
 	} finally {
 		createExecuteExecutorSpy.mockRestore()
 		getRegistrySpy.mockRestore()
+		fetchSpy.mockRestore()
 	}
 })
 

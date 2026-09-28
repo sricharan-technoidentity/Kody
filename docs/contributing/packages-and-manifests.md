@@ -529,9 +529,9 @@ these topics. See
 ## Package-owned workflows
 
 Packages declare workflow entrypoints in runtime code, not in
-`package.json#kody`. The shared `DynamicCallableWorkflow` hub resolves workflow
-targets at runtime, so any package export is callable as a workflow without a
-manifest declaration.
+`package.json#kody`. The shared Temporal package-workflow adapter resolves
+workflow targets at runtime, so any package export is callable as a workflow
+without a manifest declaration.
 
 Runtime code calls `workflows.create(...)` with the package export plus small
 parameters:

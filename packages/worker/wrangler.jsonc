@@ -251,17 +251,6 @@
 					"binding": "APP_LOADER",
 				},
 			],
-			// The runtime lane's workflow moved to the kody-runtime script (ADR
-			// 0016); MCP durable escalation in this Worker starts instances over
-			// the cross-script binding.
-			"workflows": [
-				{
-					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-runtime-dynamic-callable-workflows",
-					"class_name": "DynamicCallableWorkflow",
-					"script_name": "kody-runtime",
-				},
-			],
 			// Package runtime Worker (ADR 0016): runtime-owned requests are
 			// forwarded wholesale over this service binding (see
 			// packages/worker/src/runtime-worker-routing.ts). Jobs (ADR 0016)
@@ -351,11 +340,6 @@
 					{
 						"class_name": "RepoSessionIndex",
 						"name": "REPO_SESSION_INDEX",
-						"script_name": "kody-platform",
-					},
-					{
-						"class_name": "StripePlanRefresh",
-						"name": "STRIPE_PLAN_REFRESH",
 						"script_name": "kody-platform",
 					},
 					{
@@ -748,14 +732,6 @@
 					"binding": "APP_LOADER",
 				},
 			],
-			"workflows": [
-				{
-					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-runtime-preview-dynamic-callable-workflows",
-					"class_name": "DynamicCallableWorkflow",
-					"script_name": "kody-runtime",
-				},
-			],
 			// Preview deploys generate per-PR worker names; the deploy config
 			// generator rewrites "kody-runtime" service/script references to the
 			// PR's runtime worker name (tools/ci/runtime-worker-config.ts).
@@ -838,11 +814,6 @@
 					{
 						"class_name": "RepoSessionIndex",
 						"name": "REPO_SESSION_INDEX",
-						"script_name": "kody-platform",
-					},
-					{
-						"class_name": "StripePlanRefresh",
-						"name": "STRIPE_PLAN_REFRESH",
 						"script_name": "kody-platform",
 					},
 					{
@@ -1085,13 +1056,6 @@
 					"binding": "APP_LOADER",
 				},
 			],
-			"workflows": [
-				{
-					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-test-dynamic-callable-workflows",
-					"class_name": "DynamicCallableWorkflow",
-				},
-			],
 			"assets": {
 				// Static files in `public/` (styles, favicons). Vite copies this
 				// directory into `dist/client` and the Cloudflare Vite plugin
@@ -1148,10 +1112,6 @@
 					{
 						"class_name": "RepoSessionIndex",
 						"name": "REPO_SESSION_INDEX",
-					},
-					{
-						"class_name": "StripePlanRefresh",
-						"name": "STRIPE_PLAN_REFRESH",
 					},
 					{
 						"class_name": "RepoSession",

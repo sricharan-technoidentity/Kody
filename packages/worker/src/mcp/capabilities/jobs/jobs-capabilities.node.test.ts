@@ -8,7 +8,7 @@ const mockModule = vi.hoisted(() => ({
 	inspectJobsForUser: vi.fn(),
 	listRunRecords: vi.fn(),
 	listWorkflowRunsForUser: vi.fn(),
-	runJobNowViaManager: vi.fn(),
+	runJobNowViaJobsService: vi.fn(),
 	updateJob: vi.fn(),
 }))
 
@@ -24,9 +24,9 @@ vi.mock('#worker/jobs/inspect.ts', () => ({
 		mockModule.inspectJobsForUser(...args),
 }))
 
-vi.mock('#worker/jobs/manager-client.ts', () => ({
-	runJobNowViaManager: (...args: Array<unknown>) =>
-		mockModule.runJobNowViaManager(...args),
+vi.mock('#worker/jobs/client.ts', () => ({
+	runJobNowViaJobsService: (...args: Array<unknown>) =>
+		mockModule.runJobNowViaJobsService(...args),
 }))
 
 vi.mock('#worker/package-runtime/package-workflows.ts', () => ({
@@ -52,7 +52,7 @@ function resetMocks() {
 	mockModule.inspectJobsForUser.mockReset()
 	mockModule.listRunRecords.mockReset()
 	mockModule.listWorkflowRunsForUser.mockReset()
-	mockModule.runJobNowViaManager.mockReset()
+	mockModule.runJobNowViaJobsService.mockReset()
 	mockModule.updateJob.mockReset()
 	mockModule.listRunRecords.mockResolvedValue({ runs: [], nextCursor: null })
 }
@@ -100,7 +100,7 @@ test('jobUpdate and jobDelete require authentication and mutate existing jobs fo
 	).rejects.toThrow('Authenticated MCP user is required for this capability.')
 	expect(mockModule.updateJob).not.toHaveBeenCalled()
 	expect(mockModule.deleteJob).not.toHaveBeenCalled()
-	expect(mockModule.runJobNowViaManager).not.toHaveBeenCalled()
+	expect(mockModule.runJobNowViaJobsService).not.toHaveBeenCalled()
 
 	const signedInContext = createMcpCallerContext({
 		baseUrl: 'https://example.com',
@@ -496,7 +496,7 @@ test('jobRunNow executes jobs immediately and preserves failed one-off jobs for 
 			appId: 'app-123',
 		},
 	})
-	mockModule.runJobNowViaManager.mockResolvedValueOnce({
+	mockModule.runJobNowViaJobsService.mockResolvedValueOnce({
 		job: {
 			id: 'job-123',
 			name: 'Immediate run',
@@ -552,7 +552,7 @@ test('jobRunNow executes jobs immediately and preserves failed one-off jobs for 
 		},
 	)
 
-	expect(mockModule.runJobNowViaManager).toHaveBeenCalledWith({
+	expect(mockModule.runJobNowViaJobsService).toHaveBeenCalledWith({
 		env,
 		userId: 'user-123',
 		jobId: 'job-123',
@@ -594,7 +594,7 @@ test('jobRunNow executes jobs immediately and preserves failed one-off jobs for 
 		deleted_after_run: false,
 	})
 
-	mockModule.runJobNowViaManager.mockResolvedValueOnce({
+	mockModule.runJobNowViaJobsService.mockResolvedValueOnce({
 		job: {
 			id: 'job-once',
 			name: 'One-off run',
@@ -658,7 +658,7 @@ test('jobRunNow executes jobs immediately and preserves failed one-off jobs for 
 	expect(failedOneOffResult.job.last_run_error).toBe('boom')
 })
 
-test('job inspection capabilities expose due-now state, history, alarm status, optional source code, and workflow runs', async () => {
+test('job inspection capabilities expose due-now state, history, optional source code, and workflow runs', async () => {
 	resetMocks()
 	vi.useFakeTimers()
 	vi.setSystemTime(new Date('2026-04-20T18:30:00.000Z'))
@@ -698,15 +698,6 @@ test('job inspection capabilities expose due-now state, history, alarm status, o
 				runHistory: [],
 			},
 		],
-		alarm: {
-			bindingAvailable: true,
-			status: 'armed',
-			storedUserId: 'user-123',
-			alarmScheduledFor: '2026-04-20T18:30:00.000Z',
-			nextRunnableJobId: 'job-123',
-			nextRunnableRunAt: '2026-04-20T18:30:00.000Z',
-			alarmInSync: true,
-		},
 	})
 	mockModule.getJobInspection.mockResolvedValue({
 		job: {
@@ -739,15 +730,6 @@ test('job inspection capabilities expose due-now state, history, alarm status, o
 			successCount: 1,
 			errorCount: 1,
 			runHistory: [],
-		},
-		alarm: {
-			bindingAvailable: true,
-			status: 'out_of_sync',
-			storedUserId: 'user-123',
-			alarmScheduledFor: '2026-04-20T19:00:00.000Z',
-			nextRunnableJobId: 'job-123',
-			nextRunnableRunAt: '2026-04-20T18:30:00.000Z',
-			alarmInSync: false,
 		},
 	})
 	mockModule.listRunRecords.mockResolvedValue({
@@ -809,16 +791,6 @@ test('job inspection capabilities expose due-now state, history, alarm status, o
 			due_now: true,
 			recent_runs: [],
 		})
-		expect(listResult.alarm).toEqual({
-			binding_available: true,
-			status: 'armed',
-			stored_user_id: 'user-123',
-			alarm_scheduled_for: '2026-04-20T18:30:00.000Z',
-			next_runnable_job_id: 'job-123',
-			next_runnable_run_at: '2026-04-20T18:30:00.000Z',
-			alarm_in_sync: true,
-		})
-
 		expect(mockModule.getJobInspection).toHaveBeenCalledWith({
 			env,
 			userId: 'user-123',
@@ -852,16 +824,6 @@ test('job inspection capabilities expose due-now state, history, alarm status, o
 				},
 			],
 		})
-		expect(getResult.alarm).toEqual({
-			binding_available: true,
-			status: 'out_of_sync',
-			stored_user_id: 'user-123',
-			alarm_scheduled_for: '2026-04-20T19:00:00.000Z',
-			next_runnable_job_id: 'job-123',
-			next_runnable_run_at: '2026-04-20T18:30:00.000Z',
-			alarm_in_sync: false,
-		})
-
 		const sourceCode =
 			'export default async function main() { return { ok: true } }'
 		mockModule.getJobInspection.mockResolvedValue({
@@ -888,15 +850,6 @@ test('job inspection capabilities expose due-now state, history, alarm status, o
 				successCount: 0,
 				errorCount: 0,
 				runHistory: [],
-			},
-			alarm: {
-				bindingAvailable: true,
-				status: 'armed',
-				storedUserId: 'user-123',
-				alarmScheduledFor: '2026-04-20T18:30:00.000Z',
-				nextRunnableJobId: 'job-123',
-				nextRunnableRunAt: '2026-04-20T18:30:00.000Z',
-				alarmInSync: true,
 			},
 			source: {
 				entrypoint: 'src/custom-job.ts',
@@ -1094,15 +1047,6 @@ test('jobUpdate and jobList round-trip expires_at and surface expired state', as
 				errorCount: 0,
 			},
 		],
-		alarm: {
-			bindingAvailable: true,
-			status: 'idle',
-			storedUserId: 'user-123',
-			alarmScheduledFor: null,
-			nextRunnableJobId: null,
-			nextRunnableRunAt: null,
-			alarmInSync: true,
-		},
 	})
 	const listed = await jobListCapability.handler({}, { env, callerContext })
 	expect(listed.jobs[0]).toMatchObject({

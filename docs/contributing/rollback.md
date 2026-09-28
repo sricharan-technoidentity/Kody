@@ -112,8 +112,8 @@ Pass: the tool result has `ok: true` and `result: 42`. That path uses
 `kody-platform`'s `MCP` Durable Object and `KodyFetchGateway` plus the runtime
 lane. The origin-only `/__maintenance/execute-smoke` is not a substitute.
 
-After a **jobs** rollback: a due job runs end-to-end (`JobManager` alarm →
-`HOST.runDueJobsForUser` → a run on `/account/activity`). The
+After a **jobs** rollback: a due job runs end-to-end (Temporal Schedule →
+`JobOccurrenceWorkflow` → a run on `/account/activity`). The
 [jobs worker migration runbook](./architecture/jobs-worker-migration-runbook.md)
 also checks `/account/jobs` and MCP `jobs_*` listing `JOBS_DB` rows. The
 five-minute cron on `kody-jobs` is the scheduler; `jobRunNow` from MCP can

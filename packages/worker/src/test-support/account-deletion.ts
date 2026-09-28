@@ -555,10 +555,6 @@ export function createSuccessfulDeletionEnv(
 			}),
 		},
 		USER_METER: userMeter.env.USER_METER,
-		STRIPE_PLAN_REFRESH: {
-			idFromName: durableObjectId,
-			get: () => ({ purgeUser: async () => ({ ok: true as const }) }),
-		},
 		MAILBOX: {
 			idFromName: durableObjectId,
 			get: () => ({

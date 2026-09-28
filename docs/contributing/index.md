@@ -97,6 +97,12 @@ style, tests, MCP capabilities, and runtime architecture.
 
 - [Architecture](./architecture/index.md) — production worker fleet, request
   lifecycle, [authorization](./architecture/authorization.md) (RBAC)
+- [Temporal foundation](./architecture/temporal-foundation.md) — local Node
+  worker and gateway, signed cross-plane calls, payload boundaries, schedules,
+  workflows, and observability
+- [Temporal migration plan](./architecture/temporal-migration-plan.md) and
+  [decision 0051](./decisions/0051-temporal-orchestration-boundary.md) — the
+  completed local cutover and the durable ownership boundary
 
 Documentation for **using** Kody as an MCP server (not building the repo) lives
 under [`docs/use/`](../use/index.md). How we write and maintain those pages (and

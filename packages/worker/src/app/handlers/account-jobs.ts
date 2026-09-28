@@ -14,7 +14,7 @@ import { type routes } from '#universal/routes.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
 import { type ServerTimingEntry } from '#worker/server-timing.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
-import { runJobNowViaManager } from '#worker/jobs/manager-client.ts'
+import { runJobNowViaJobsService } from '#worker/jobs/client.ts'
 import { updateJobRetentionPreferencesForUser } from '#worker/jobs/job-retention-cleanup.ts'
 import { deleteJob, updateJob } from '#worker/jobs/service.ts'
 
@@ -317,7 +317,7 @@ async function handleRunNowAction(input: {
 	request: Request
 }) {
 	const id = requireJobId(input.body)
-	const result = await runJobNowViaManager({
+	const result = await runJobNowViaJobsService({
 		env: input.env,
 		userId: input.user.mcpUser.userId,
 		jobId: id,

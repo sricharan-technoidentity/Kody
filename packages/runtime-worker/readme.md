@@ -3,10 +3,9 @@
 The package runtime lane extracted from the main `kody` Worker per
 [ADR 0016](../../docs/contributing/decisions/0016-mono-worker-extraction.md):
 the package-app origin (`kody.run`), inline package-app serving forwarded from
-origin, the package invocation API, dynamic callable workflows
-(`DynamicCallableWorkflow`), `PackageAppRuntimeBridge`, `KodyFetchGateway`, and
-the runtime Durable Objects (`StorageRunner`, `RunLog`, and
-`PackageRealtimeSession`).
+origin, the package invocation API, Temporal-backed dynamic callable workflows,
+`PackageAppRuntimeBridge`, `KodyFetchGateway`, and the runtime Durable Objects
+(`StorageRunner`, `RunLog`, and `PackageRealtimeSession`).
 
 The Worker entry module is
 [`packages/worker/src/runtime-worker.ts`](../worker/src/runtime-worker.ts): the
@@ -23,3 +22,9 @@ entry module is typechecked and tested through the `worker` Nx project.
 - Deploys/previews: see `.github/workflows/deploy.yml` and `preview.yml`.
 - Production Durable Object ownership: see the
   [migration runbook](../../docs/contributing/architecture/runtime-worker-migration-runbook.md).
+
+Temporal package workflows are started through the signed Node gateway. Their
+Activities call the origin's narrow Cloudflare Activity Gateway, which resolves
+owner-scoped artifacts and dispatches package code back into this runtime's
+existing sandbox and `RunLog` boundary. The runtime Worker does not host a
+Cloudflare Workflow binding.

@@ -157,10 +157,6 @@ async function createEnv(
 			delete: async () => undefined,
 		},
 		COOKIE_SECRET: 'test-cookie-secret-0123456789abcdef0123456789',
-		JOB_MANAGER: {
-			idFromName: () => ({ toString: () => 'job-manager-id' }),
-			get: () => ({}) as DurableObjectStub,
-		} as DurableObjectNamespace,
 		STORAGE_RUNNER: {
 			idFromName: () => ({ toString: () => 'storage-runner-id' }),
 			get: () => ({}) as DurableObjectStub,

@@ -132,14 +132,6 @@
 					"binding": "APP_LOADER",
 				},
 			],
-			"workflows": [
-				{
-					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-runtime-dynamic-callable-workflows",
-					"class_name": "DynamicCallableWorkflow",
-					"script_name": "kody-runtime",
-				},
-			],
 			"durable_objects": {
 				"bindings": [
 					// Platform-owned classes, local to this script.
@@ -166,10 +158,6 @@
 					{
 						"class_name": "RepoSessionIndex",
 						"name": "REPO_SESSION_INDEX",
-					},
-					{
-						"class_name": "StripePlanRefresh",
-						"name": "STRIPE_PLAN_REFRESH",
 					},
 					{
 						"class_name": "RepoSession",
@@ -347,14 +335,6 @@
 					"binding": "APP_LOADER",
 				},
 			],
-			"workflows": [
-				{
-					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-runtime-preview-dynamic-callable-workflows",
-					"class_name": "DynamicCallableWorkflow",
-					"script_name": "kody-runtime",
-				},
-			],
 			"durable_objects": {
 				"bindings": [
 					{
@@ -380,10 +360,6 @@
 					{
 						"class_name": "RepoSessionIndex",
 						"name": "REPO_SESSION_INDEX",
-					},
-					{
-						"class_name": "StripePlanRefresh",
-						"name": "STRIPE_PLAN_REFRESH",
 					},
 					{
 						"class_name": "RepoSession",

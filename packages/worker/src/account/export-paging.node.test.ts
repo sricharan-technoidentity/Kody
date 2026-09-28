@@ -471,7 +471,7 @@ test('account export includes run_records section with runs, ledger, and dedicat
 	}
 	const workflowProjection = {
 		id: 'wf-export-1',
-		bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+		bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 		sourceType: 'inline' as const,
 		packageId: null,
 		kodyId: null,
@@ -966,7 +966,7 @@ test('run_records section paging preserves exportRuns cursor across dedicated ph
 	}
 	const workflowProjection = {
 		id: 'wf-page-1',
-		bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+		bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 		sourceType: 'inline' as const,
 		packageId: null,
 		kodyId: null,

@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { parseJsonc } from './ci/resource-utils.ts'
+import { localizeMigrations } from './local-dev-migrations.ts'
 
 type JsonRecord = Record<string, unknown>
 
@@ -63,6 +64,14 @@ export async function writeLocalOriginDevConfig({
 		throw new Error(`${originConfigPath} is missing "env.${envName}".`)
 	}
 	const envRecord = originEnv as JsonRecord
+	config.migrations = localizeMigrations(config.migrations, {
+		excludedClasses: ['StripePlanRefresh'],
+	})
+	if (envRecord.migrations !== undefined) {
+		envRecord.migrations = localizeMigrations(envRecord.migrations, {
+			excludedClasses: ['StripePlanRefresh'],
+		})
+	}
 	envRecord.vars = {
 		...asRecord(envRecord.vars),
 		...vars,

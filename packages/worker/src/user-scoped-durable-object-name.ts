@@ -20,11 +20,6 @@ export function durableObjectNameFromParts(
 	return JSON.stringify(parts)
 }
 
-/** JobManager — one scheduler DO per user. */
-export function jobManagerDurableObjectName(userId: string) {
-	return userId
-}
-
 /** RunLog — one execution-history DO per user. */
 export function runLogDurableObjectName(userId: string) {
 	return userId
@@ -32,11 +27,6 @@ export function runLogDurableObjectName(userId: string) {
 
 /** UserMeter — one daily-entitlement meter DO per user (untrimmed, like RunLog). */
 export function userMeterDurableObjectName(userId: string) {
-	return userId
-}
-
-/** StripePlanRefresh — one activity-driven refresh alarm per user. */
-export function stripePlanRefreshDurableObjectName(userId: string) {
 	return userId
 }
 

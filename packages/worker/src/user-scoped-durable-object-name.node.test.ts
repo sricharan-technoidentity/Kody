@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url'
 import { expect, test } from 'vitest'
 import {
 	durableObjectNameFromParts,
-	jobManagerDurableObjectName,
 	mailboxDurableObjectName,
 	mcpClientHubDurableObjectName,
 	packageRealtimeSessionDurableObjectName,
@@ -19,10 +18,6 @@ const identityModuleRelativePath =
 	'packages/worker/src/user-scoped-durable-object-name.ts'
 
 test('user-scoped Durable Object name helpers preserve frozen idFromName contracts', () => {
-	expect(jobManagerDurableObjectName('user-aaa')).toBe('user-aaa')
-	// JobManager historically does not trim; keep that wire format frozen.
-	expect(jobManagerDurableObjectName('  user-aaa  ')).toBe('  user-aaa  ')
-
 	expect(runLogDurableObjectName('user-aaa')).toBe('user-aaa')
 	expect(runLogDurableObjectName('  user-aaa  ')).toBe('  user-aaa  ')
 

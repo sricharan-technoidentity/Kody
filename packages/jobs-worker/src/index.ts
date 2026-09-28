@@ -1,7 +1,6 @@
 import * as Sentry from '@sentry/cloudflare'
 import { type JobsWorkerEnv } from './env.ts'
 import { handleJobsHealthRequest } from './health.ts'
-import { JobManager } from './manager-do.ts'
 import {
 	dispatchScheduledLanes,
 	handleScheduledDispatchQueue,
@@ -9,7 +8,7 @@ import {
 import { buildSentryOptions } from './sentry-options.ts'
 import { JobsService } from './service.ts'
 
-export { JobManager, JobsService }
+export { JobsService }
 
 const handler = {
 	async fetch(request: Request, env: JobsWorkerEnv) {

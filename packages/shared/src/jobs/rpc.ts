@@ -1,5 +1,5 @@
 import { type McpCallerContext } from '../chat.ts'
-import { type JobManagerDebugState } from './manager-debug.ts'
+import { type JobRow } from './repo.ts'
 import {
 	type ScheduledLaneMessage,
 	type ScheduledLaneOutcome,
@@ -15,15 +15,32 @@ import {
 /**
  * Service-binding contract the jobs worker exposes to the main worker
  * (`JOBS` binding → `JobsService` entrypoint, ADR 0016). It is the jobs
- * store plus the JobManager Durable Object scheduling operations that used to
- * be direct DO RPC from the main worker.
+ * store plus Temporal occurrence coordination.
  */
 export type JobsServiceContract = JobsStore & {
-	syncAlarm(input: {
-		userId: string
-	}): Promise<{ ok: true; userId: string; nextRunAt: string | null }>
-	getDebugState(input: { userId: string }): Promise<JobManagerDebugState>
-	exportUser(input: { userId: string }): Promise<JobManagerDebugState>
+	claimTemporalJobOccurrence(input: {
+		userHash: string
+		jobId: string
+		scheduledFor: string
+		claimRef: string
+	}): Promise<{
+		claimed: boolean
+		claimRef?: string
+		reason?: 'already-completed' | 'not-runnable' | 'claim-held'
+	}>
+	getTemporalClaimedJob(input: {
+		userHash: string
+		jobId: string
+		claimRef: string
+	}): Promise<JobRow | null>
+	finalizeTemporalJobOccurrence(input: {
+		userHash: string
+		jobId: string
+		claimRef: string
+		scheduledFor: string
+		status: 'succeeded' | 'failed' | 'cancelled'
+		finishedAt: string
+	}): Promise<boolean>
 	purgeUser(input: {
 		userId: string
 	}): Promise<{ ok: true; userId: string; purged: boolean }>
@@ -56,9 +73,7 @@ export type RunJobNowResult = {
  * jobs worker calls back through this deliberately small surface.
  */
 export type JobsHostContract = {
-	/** Execute all currently due jobs for one user (JobManager alarm body). */
-	runDueJobsForUser(input: { userId: string }): Promise<RunDueJobsResult>
-	/** Execute a single job immediately (JobManager `runNow` body). */
+	/** Execute a single job immediately. */
 	runJobNow(input: {
 		userId: string
 		jobId: string

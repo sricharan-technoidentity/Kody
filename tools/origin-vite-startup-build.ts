@@ -4,7 +4,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { parseJsonc } from './ci/resource-utils.ts'
-import { resolveLocalBinary } from './node-runtime.ts'
+import { resolveViteInvocation } from './node-runtime.ts'
 
 const execFileAsync = promisify(execFile)
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
@@ -125,7 +125,8 @@ async function buildOriginProductionViteBundleUnlocked(
 		})}\n`,
 	)
 	try {
-		await execFileAsync(resolveLocalBinary('vite'), ['build'], {
+		const vite = resolveViteInvocation(repoRoot)
+		await execFileAsync(vite.command, [...vite.argsPrefix, 'build'], {
 			cwd: repoRoot,
 			env: {
 				...process.env,

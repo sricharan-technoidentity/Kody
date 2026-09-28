@@ -1,8 +1,8 @@
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import {
 	createDynamicCallableWorkflow,
-	dynamicCallableWorkflowsBindingName,
 	findWorkflowRunByIdempotencyKey,
+	temporalDynamicPackageWorkflowsBindingName,
 	type PackageWorkflowCreateResult,
 } from '#worker/package-runtime/package-workflows.ts'
 import { terminalWorkflowStatusValues } from '#worker/package-runtime/workflow-statuses.ts'
@@ -33,7 +33,7 @@ export type DurableEscalationOutcome<T> =
 /**
  * Workflow projection statuses that mean a durable dispatch is already underway.
  * Defined as the complement of terminal statuses so the set stays aligned with
- * createDynamicCallableWorkflow: active Cloudflare statuses plus any
+ * createDynamicCallableWorkflow: active Temporal statuses plus any
  * transitional RunLog projection status written before the instance is queued
  * (today that transitional value is `creating`). New pre-active statuses are
  * covered automatically; only terminal runs (complete/errored/terminated/
@@ -113,7 +113,7 @@ async function findAlreadyDispatchedWorkflowRunByIdempotencyKey(input: {
 		env,
 		userId: input.userId,
 		idempotencyKey: trimmedKey,
-		bindingName: dynamicCallableWorkflowsBindingName,
+		bindingName: temporalDynamicPackageWorkflowsBindingName,
 	})
 	if (existing) {
 		const status = existing.status ?? ''
@@ -132,7 +132,7 @@ async function findAlreadyDispatchedWorkflowRunByIdempotencyKey(input: {
 	const match = await findWorkflowProjectionByBindingIdempotencyKey({
 		env,
 		userId: input.userId,
-		bindingName: dynamicCallableWorkflowsBindingName,
+		bindingName: temporalDynamicPackageWorkflowsBindingName,
 		idempotencyKey: trimmedKey,
 	})
 	if (!match) return null
@@ -169,7 +169,7 @@ type SettledInlineRun<T> =
 
 /**
  * Attempt `run` within a wall-clock budget. On budget exhaustion, create a
- * durable Cloudflare Workflow for the same work and return a handle instead of
+ * durable Temporal Workflow for the same work and return a handle instead of
  * hanging past MCP execute's timeout. Never throws.
  *
  * Idempotency is always caller-scoped: `idempotencyParts` are joined with the
@@ -177,7 +177,10 @@ type SettledInlineRun<T> =
  * silently disagree with projection ownership.
  */
 export async function runWithDurableEscalation<T>(input: {
-	env: Pick<Env, 'APP_DB' | 'DYNAMIC_CALLABLE_WORKFLOWS' | 'RUN_LOG'>
+	env: Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV' | 'RUN_LOG'> & {
+		TEMPORAL_GATEWAY_URL?: string
+		TEMPORAL_GATEWAY_SIGNING_KEYS?: string
+	}
 	userId: string
 	userEmail?: string | null
 	budgetMs?: number

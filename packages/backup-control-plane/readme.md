@@ -1,7 +1,8 @@
 # Production D1 backup control plane
 
 This package is a dedicated scheduled Worker and Workflow. It is intentionally
-separate from application cron and does not use `DynamicCallableWorkflow`.
+separate from application cron and does not use the package Temporal workflow
+runtime.
 
 ## Retention prefixes
 

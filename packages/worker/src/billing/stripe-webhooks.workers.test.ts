@@ -31,6 +31,10 @@ function createWebhookEnv(
 		STRIPE_WEBHOOK_SECRET: webhookSecret,
 		STRIPE_PRO_PRICE_ID: 'price_pro',
 		STRIPE_API_BASE_URL: 'https://stripe.mock',
+		TEMPORAL_GATEWAY_URL: 'https://temporal-gateway.test',
+		TEMPORAL_GATEWAY_SIGNING_KEYS: JSON.stringify([
+			{ id: 'current', secret: 'a-secure-test-secret-that-is-long-enough' },
+		]),
 		...overrides,
 	}
 }
@@ -99,6 +103,12 @@ function stubStripeFetch(input: {
 }) {
 	const fetchStub = vi.fn(async (request: RequestInfo | URL) => {
 		const url = String(request)
+		if (url.includes('/v1/workflows/signal-with-start')) {
+			return jsonResponse({
+				workflowId: 'stripe-plan-refresh-test',
+				signaledRunId: 'temporal-run-1',
+			})
+		}
 		if (url.includes('/v1/checkout/sessions/')) {
 			return jsonResponse(
 				input.checkout ?? {

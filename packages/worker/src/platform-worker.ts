@@ -9,7 +9,6 @@ import { refuseNonCanonicalProductionHost } from '#app/canonical-host.ts'
 import { McpClientHub } from './mcp-client/hub.ts'
 import { MCP } from './mcp/index.ts'
 import { UserMeter } from './entitlements/user-meter-do.ts'
-import { StripePlanRefresh } from './billing/stripe-plan-refresh-do.ts'
 import { Mailbox } from './email/mailbox-do.ts'
 import { RepoSession } from './repo/repo-session-do.ts'
 import { RepoSessionIndex } from './repo/repo-session-index-do.ts'
@@ -40,7 +39,6 @@ export {
 	Mailbox,
 	RepoSession,
 	RepoSessionIndex,
-	StripePlanRefresh,
 	KodyFetchGateway,
 	PackageAppRuntimeBridge,
 }

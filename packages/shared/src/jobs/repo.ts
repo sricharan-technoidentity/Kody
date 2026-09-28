@@ -64,7 +64,7 @@ function serializeJob(job: JobRecord) {
 	}
 }
 
-function mapRow(row: Record<string, unknown>): JobRow {
+export function mapJobRow(row: Record<string, unknown>): JobRow {
 	const jobId = String(row['id'])
 	const rawStorageId = row['storage_id']
 	const storageId =
@@ -174,14 +174,14 @@ function mapRow(row: Record<string, unknown>): JobRow {
 	}
 }
 
-export async function insertJobRow(input: {
+export function prepareInsertJobRow(input: {
 	db: D1Database
 	userId: string
 	job: JobRecord
 	callerContextJson: string
 }) {
 	const serialized = serializeJob(input.job)
-	await input.db
+	return input.db
 		.prepare(
 			`INSERT INTO jobs (
 				id, user_id, name, source_id, published_commit, repo_check_policy_json, storage_id, params_json, schedule_json, timezone, enabled,
@@ -211,17 +211,22 @@ export async function insertJobRow(input: {
 			serialized.last_run_status,
 			serialized.next_run_at,
 		)
-		.run()
 }
 
-export async function updateJobRow(input: {
+export async function insertJobRow(
+	input: Parameters<typeof prepareInsertJobRow>[0],
+) {
+	await prepareInsertJobRow(input).run()
+}
+
+export function prepareUpdateJobRow(input: {
 	db: D1Database
 	userId: string
 	job: JobRecord
 	callerContextJson: string
 }) {
 	const serialized = serializeJob(input.job)
-	const result = await input.db
+	return input.db
 		.prepare(
 			`UPDATE jobs SET
 				name = ?, source_id = ?, published_commit = ?, repo_check_policy_json = ?, storage_id = ?, params_json = ?, schedule_json = ?, timezone = ?,
@@ -254,7 +259,12 @@ export async function updateJobRow(input: {
 			serialized.id,
 			input.userId,
 		)
-		.run()
+}
+
+export async function updateJobRow(
+	input: Parameters<typeof prepareUpdateJobRow>[0],
+) {
+	const result = await prepareUpdateJobRow(input).run()
 	return (result.meta.changes ?? 0) > 0
 }
 
@@ -267,7 +277,7 @@ export async function getJobRowById(
 		.prepare(`SELECT * FROM jobs WHERE id = ? AND user_id = ?`)
 		.bind(jobId, userId)
 		.first<Record<string, unknown>>()
-	return result ? mapRow(result) : null
+	return result ? mapJobRow(result) : null
 }
 
 export async function listJobRowsByUserId(
@@ -280,11 +290,11 @@ export async function listJobRowsByUserId(
 		)
 		.bind(userId)
 		.all<Record<string, unknown>>()
-	return (results ?? []).map(mapRow)
+	return (results ?? []).map(mapJobRow)
 }
 
 /**
- * Caps how many due jobs a single JobManager alarm invocation picks up so a
+ * Caps how many due jobs a single scheduler invocation picks up so a
  * large backlog cannot exhaust the Durable Object CPU budget in one wake. The
  * post-run alarm resync schedules a near-immediate follow-up wake whenever
  * more due jobs remain, so backlogs drain across successive alarms.
@@ -305,7 +315,7 @@ export async function listJobRowsPage(
 		.prepare(`SELECT * FROM jobs WHERE id > ? ORDER BY id LIMIT ?`)
 		.bind(input.afterId ?? '', input.limit)
 		.all<Record<string, unknown>>()
-	return (results ?? []).map(mapRow)
+	return (results ?? []).map(mapJobRow)
 }
 
 export async function listDueJobRows(
@@ -335,13 +345,13 @@ export async function listDueJobRows(
 		)
 		.bind(userId, nowIso, nowIso, nowIso, maxDueJobsPerAlarm)
 		.all<Record<string, unknown>>()
-	return (results ?? []).map(mapRow)
+	return (results ?? []).map(mapJobRow)
 }
 
 /**
  * Cross-user keyset page of enabled jobs whose next occurrence is past the
  * watchdog grace cutoff and not currently leased. Used by the schedule
- * watchdog to re-arm JobManager alarms when a user's Durable Object alarm was
+ * reconciliation to recover when a schedule was
  * lost or drifted while due work remained claimable.
  */
 export async function listSilentlyOverdueJobRowsPage(
@@ -370,6 +380,12 @@ export async function listSilentlyOverdueJobRowsPage(
 					last_completed_scheduled_for IS NULL
 					OR last_completed_scheduled_for != COALESCE(retry_scheduled_for, next_run_at)
 				)
+				AND NOT EXISTS (
+					SELECT 1 FROM job_schedule_bindings AS binding
+					WHERE binding.job_id = jobs.id
+						AND binding.user_id = jobs.user_id
+						AND binding.backend = 'temporal'
+				)
 			ORDER BY id ASC
 			LIMIT ?`,
 		)
@@ -381,7 +397,7 @@ export async function listSilentlyOverdueJobRowsPage(
 			input.limit,
 		)
 		.all<Record<string, unknown>>()
-	return (results ?? []).map(mapRow)
+	return (results ?? []).map(mapJobRow)
 }
 
 /**
@@ -407,12 +423,18 @@ export async function listStuckSkippedJobRowsPage(
 				AND json_extract(schedule_json, '$.type') != 'once'
 				AND last_completed_scheduled_for IS NOT NULL
 				AND last_completed_scheduled_for = COALESCE(retry_scheduled_for, next_run_at)
+				AND NOT EXISTS (
+					SELECT 1 FROM job_schedule_bindings AS binding
+					WHERE binding.job_id = jobs.id
+						AND binding.user_id = jobs.user_id
+						AND binding.backend = 'temporal'
+				)
 			ORDER BY id ASC
 			LIMIT ?`,
 		)
 		.bind(input.afterId ?? '', input.nowIso, input.limit)
 		.all<Record<string, unknown>>()
-	return (results ?? []).map(mapRow)
+	return (results ?? []).map(mapJobRow)
 }
 
 export async function advanceStuckSkippedJobNextRunAt(input: {
@@ -480,7 +502,7 @@ export async function getNextRunnableJobRow(
 		)
 		.bind(nowIso, userId, nowIso)
 		.first<Record<string, unknown>>()
-	return result ? mapRow(result) : null
+	return result ? mapJobRow(result) : null
 }
 
 /**
@@ -536,7 +558,7 @@ export async function claimJobRow(input: {
 			nowIso,
 		)
 		.first<Record<string, unknown>>()
-	return result ? mapRow(result) : null
+	return result ? mapJobRow(result) : null
 }
 
 export async function finalizeClaimedJobRow(input: {
@@ -634,15 +656,22 @@ export async function refreshPackageJobRowIdentity(input: {
 	return (result.meta.changes ?? 0) > 0
 }
 
+export function prepareDeleteJobRow(
+	db: D1Database,
+	userId: string,
+	jobId: string,
+): D1PreparedStatement {
+	return db
+		.prepare(`DELETE FROM jobs WHERE id = ? AND user_id = ?`)
+		.bind(jobId, userId)
+}
+
 export async function deleteJobRow(
 	db: D1Database,
 	userId: string,
 	jobId: string,
 ): Promise<boolean> {
-	const result = await db
-		.prepare(`DELETE FROM jobs WHERE id = ? AND user_id = ?`)
-		.bind(jobId, userId)
-		.run()
+	const result = await prepareDeleteJobRow(db, userId, jobId).run()
 	return (result.meta.changes ?? 0) > 0
 }
 
@@ -718,7 +747,7 @@ export async function listJobRetentionCandidateRows(
 		)
 		.bind(input.afterId ?? '', input.limit)
 		.all<Record<string, unknown>>()
-	return (results ?? []).map(mapRow)
+	return (results ?? []).map(mapJobRow)
 }
 
 export async function countJobRowsForUser(

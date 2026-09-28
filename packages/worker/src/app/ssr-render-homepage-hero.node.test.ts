@@ -68,7 +68,6 @@ function createTestEnv() {
 		...testOidcSigningEnv,
 		APP_DB: createAnonymousTestDb(),
 		BUNDLE_ARTIFACTS_KV: createMemoryKv(),
-		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},
 		PACKAGE_REALTIME_SESSION: {},
 		MCP_CLIENT_HUB: {},

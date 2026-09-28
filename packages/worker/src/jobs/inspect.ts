@@ -3,10 +3,6 @@ import {
 	hydrateJobViewFromRunLog,
 	hydrateJobViewsFromRunLog,
 } from './job-run-observability-hydrate.ts'
-import {
-	getJobManagerDebugState,
-	type JobManagerDebugState,
-} from './manager-client.ts'
 import { jobsData } from './jobs-data.ts'
 import { toJobView } from './schedule.ts'
 import { type JobSourceInspection, type JobView } from './types.ts'
@@ -53,21 +49,8 @@ export async function getJob(input: {
 export async function inspectJobsForUser(input: {
 	env: Env
 	userId: string
-}): Promise<{
-	jobs: Array<JobView>
-	alarm: JobManagerDebugState
-}> {
-	const [jobs, alarm] = await Promise.all([
-		listJobs(input),
-		getJobManagerDebugState({
-			env: input.env,
-			userId: input.userId,
-		}),
-	])
-	return {
-		jobs,
-		alarm,
-	}
+}): Promise<{ jobs: Array<JobView> }> {
+	return { jobs: await listJobs(input) }
 }
 
 export async function getJobInspection(input: {
@@ -77,21 +60,11 @@ export async function getJobInspection(input: {
 	includeCode?: boolean
 }): Promise<{
 	job: JobView
-	alarm: JobManagerDebugState
 	source?: JobSourceInspection
 }> {
-	const [job, alarm] = await Promise.all([
-		getJob(input),
-		getJobManagerDebugState({
-			env: input.env,
-			userId: input.userId,
-		}),
-	])
+	const job = await getJob(input)
 	if (!input.includeCode) {
-		return {
-			job,
-			alarm,
-		}
+		return { job }
 	}
 	// Rare path: pay for published-source resolution only when code is requested.
 	const { inspectPublishedJobSource } =
@@ -103,7 +76,6 @@ export async function getJobInspection(input: {
 	})
 	return {
 		job,
-		alarm,
 		source,
 	}
 }

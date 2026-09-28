@@ -274,11 +274,6 @@
 							"script_name": "kody-platform"
 						},
 						{
-							"name": "STRIPE_PLAN_REFRESH",
-							"class_name": "StripePlanRefresh",
-							"script_name": "kody-platform"
-						},
-						{
 							"name": "REPO_SESSION",
 							"class_name": "RepoSession",
 							"script_name": "kody-platform"
@@ -334,11 +329,6 @@
 							"script_name": "kody-platform"
 						},
 						{
-							"name": "STRIPE_PLAN_REFRESH",
-							"class_name": "StripePlanRefresh",
-							"script_name": "kody-platform"
-						},
-						{
 							"name": "REPO_SESSION",
 							"class_name": "RepoSession",
 							"script_name": "kody-platform"
@@ -384,10 +374,6 @@
 						{
 							"name": "REPO_SESSION_INDEX",
 							"class_name": "RepoSessionIndex"
-						},
-						{
-							"name": "STRIPE_PLAN_REFRESH",
-							"class_name": "StripePlanRefresh"
 						},
 						{
 							"name": "REPO_SESSION",
@@ -642,10 +628,6 @@
 							"class_name": "RepoSessionIndex"
 						},
 						{
-							"name": "STRIPE_PLAN_REFRESH",
-							"class_name": "StripePlanRefresh"
-						},
-						{
 							"name": "REPO_SESSION",
 							"class_name": "RepoSession"
 						},
@@ -694,10 +676,6 @@
 							"class_name": "RepoSessionIndex"
 						},
 						{
-							"name": "STRIPE_PLAN_REFRESH",
-							"class_name": "StripePlanRefresh"
-						},
-						{
 							"name": "REPO_SESSION",
 							"class_name": "RepoSession"
 						},
@@ -722,42 +700,8 @@
 		},
 		{
 			"path": "packages/jobs-worker/wrangler.jsonc",
-			"protected_migrations": [
-				{
-					"tag": "v1",
-					"location": "env.test.migrations",
-					"new_sqlite_classes": ["JobManager"]
-				}
-			],
-			"protected_binding_sets": [
-				{
-					"location": "env.production.durable_objects",
-					"bindings": [
-						{
-							"name": "JOB_MANAGER",
-							"class_name": "JobManager"
-						}
-					]
-				},
-				{
-					"location": "env.preview.durable_objects",
-					"bindings": [
-						{
-							"name": "JOB_MANAGER",
-							"class_name": "JobManager"
-						}
-					]
-				},
-				{
-					"location": "env.test.durable_objects",
-					"bindings": [
-						{
-							"name": "JOB_MANAGER",
-							"class_name": "JobManager"
-						}
-					]
-				}
-			],
+			"protected_migrations": [],
+			"protected_binding_sets": [],
 			"protected_transfer_migrations": [
 				{
 					"tag": "v1",

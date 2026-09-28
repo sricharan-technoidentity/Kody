@@ -29,6 +29,10 @@ const mocks = vi.hoisted(() => ({
 		medianRunDurationMs: null,
 		hours: [],
 	})),
+	reconcileTemporalWorkflowProjections: vi.fn(async () => ({
+		status: 'skipped' as const,
+		reason: 'not_configured' as const,
+	})),
 	backfillStorageBucketEstimates: vi.fn(async () => ({
 		scanned: 0,
 		updated: 0,
@@ -76,6 +80,11 @@ vi.mock('#worker/usage/aggregate-rollups.ts', () => ({
 
 vi.mock('#worker/admin/insights-runlog-snapshot.ts', () => ({
 	refreshAdminInsightsRunLogSnapshot: mocks.refreshAdminInsightsRunLogSnapshot,
+}))
+
+vi.mock('#worker/temporal/observability.ts', () => ({
+	reconcileTemporalWorkflowProjections:
+		mocks.reconcileTemporalWorkflowProjections,
 }))
 
 vi.mock('#worker/storage-buckets/estimate-backfill.ts', () => ({
@@ -139,6 +148,9 @@ test('platform lanes execute with their expected inputs and jobs-owned lanes are
 	expect(mocks.refreshAdminInsightsRunLogSnapshot).toHaveBeenCalledWith(
 		expect.objectContaining({ now: scheduledAt }),
 	)
+	expect(mocks.reconcileTemporalWorkflowProjections).toHaveBeenCalledWith(
+		expect.objectContaining({ now: scheduledAt }),
+	)
 	expect(mocks.checkAuthDenialBurstAndNotify).toHaveBeenCalledWith(
 		expect.objectContaining({ now: scheduledAt }),
 	)
@@ -162,7 +174,7 @@ test('platform lanes execute with their expected inputs and jobs-owned lanes are
 	await expect(
 		runScheduledLane({
 			env,
-			lane: 'job_schedule_watchdog',
+			lane: 'temporal_schedule_sync',
 			scheduledAt: new Date(),
 		}),
 	).rejects.toThrow(/owned by the jobs worker/)

@@ -3,6 +3,7 @@ import {
 	type JobsStore,
 } from '@kody-internal/shared/jobs/store.ts'
 import { type JobsWorkerEnv } from './env.ts'
+import { getNextCloudflareRunnableJob } from './temporal-occurrences.ts'
 
 export function jobsStore(env: JobsWorkerEnv): JobsStore {
 	return createD1JobsStore(env.JOBS_DB)
@@ -22,7 +23,11 @@ export async function getNextRunnableJob(input: {
 	const nowIso = now.toISOString()
 	const store = jobsStore(input.env)
 	await store.disableExpiredJobsForUser({ userId: input.userId, nowIso })
-	const row = await store.getNextRunnableJob({ userId: input.userId, nowIso })
+	const row = await getNextCloudflareRunnableJob({
+		env: input.env,
+		userId: input.userId,
+		nowIso,
+	})
 	return row
 		? {
 				...row.record,

@@ -6,7 +6,6 @@ import {
 	isPackageOwnedJobId,
 	packageOwnedJobDeleteErrorMessage,
 } from '#worker/jobs/job-retention.ts'
-import { type JobManagerDebugState } from '#worker/jobs/manager-client.ts'
 import { logJobSchedulerEvent } from '#worker/jobs/scheduler-logging.ts'
 import {
 	type JobExecutionResult,
@@ -176,24 +175,12 @@ export const jobSourceInspectionSchema = z.object({
 		.describe('Source resolution error, or null when code was loaded.'),
 })
 
-export const jobManagerDebugSchema = z.object({
-	binding_available: z.boolean(),
-	status: z.enum(['missing_binding', 'idle', 'armed', 'out_of_sync']),
-	stored_user_id: z.string().nullable(),
-	alarm_scheduled_for: z.string().nullable(),
-	next_runnable_job_id: z.string().nullable(),
-	next_runnable_run_at: z.string().nullable(),
-	alarm_in_sync: z.boolean().nullable(),
-})
-
 export const jobListOutputSchema = z.object({
 	jobs: z.array(jobInspectionSchema),
-	alarm: jobManagerDebugSchema,
 })
 
 export const jobGetOutputSchema = z.object({
 	job: jobInspectionSchema,
-	alarm: jobManagerDebugSchema,
 	source: jobSourceInspectionSchema
 		.optional()
 		.describe('Published job source details when includeCode is true.'),
@@ -539,18 +526,6 @@ export function buildJobInspectionOutput(
 	}
 }
 
-export function buildJobManagerDebugOutput(state: JobManagerDebugState) {
-	return {
-		binding_available: state.bindingAvailable,
-		status: state.status,
-		stored_user_id: state.storedUserId,
-		alarm_scheduled_for: state.alarmScheduledFor,
-		next_runnable_job_id: state.nextRunnableJobId,
-		next_runnable_run_at: state.nextRunnableRunAt,
-		alarm_in_sync: state.alarmInSync,
-	}
-}
-
 export function buildJobRunNowOutput(input: {
 	job: JobView
 	execution: JobExecutionResult
@@ -586,8 +561,8 @@ export async function runJobNowFromArgs(input: {
 	args: JobRunNowCapabilityInput
 }) {
 	const user = requireMcpUser(input.callerContext)
-	const { runJobNowViaManager } = await import('#worker/jobs/manager-client.ts')
-	const result = await runJobNowViaManager({
+	const { runJobNowViaJobsService } = await import('#worker/jobs/client.ts')
+	const result = await runJobNowViaJobsService({
 		env: input.env,
 		userId: user.userId,
 		jobId: input.args.id,

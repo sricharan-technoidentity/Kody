@@ -65,14 +65,6 @@ function buildMainGeneratedConfig(envName: string) {
 			{ binding: 'RUNTIME_WORKER', service: 'kody-runtime' },
 			{ binding: 'JOBS', service: 'kody-pr-7-jobs', entrypoint: 'JobsService' },
 		],
-		workflows: [
-			{
-				binding: 'DYNAMIC_CALLABLE_WORKFLOWS',
-				name: 'kody-runtime-dynamic-callable-workflows',
-				class_name: 'DynamicCallableWorkflow',
-				script_name: 'kody-runtime',
-			},
-		],
 		d1_databases: [
 			{
 				binding: 'APP_DB',
@@ -237,10 +229,7 @@ test('generate rewrites worker names, copies resource ids, and patches the main 
 			binding: 'WEBHOOK_DISPATCH_QUEUE',
 			queue: 'kody-pr-7-webhook-dispatch',
 		})
-		// The workflow gets a per-worker name.
-		expect(previewEnv?.workflows?.[0]?.name).toBe(
-			'kody-pr-7-runtime-dynamic-callable-workflows',
-		)
+		expect(previewEnv?.workflows).toBeUndefined()
 		// Preview has no package-app domain, so no routes are published.
 		expect(previewEnv?.routes).toBeUndefined()
 		// The main worker's resolved vars are merged in.
@@ -269,10 +258,7 @@ test('generate rewrites worker names, copies resource ids, and patches the main 
 				(binding) => binding.name === 'STORAGE_RUNNER',
 			)?.script_name,
 		).toBe('kody-pr-7-runtime')
-		expect(patchedMain.env?.preview?.workflows?.[0]).toMatchObject({
-			name: 'kody-pr-7-runtime-dynamic-callable-workflows',
-			script_name: 'kody-pr-7-runtime',
-		})
+		expect(patchedMain.env?.preview?.workflows).toBeUndefined()
 	} finally {
 		await rm(tempDir, { force: true, recursive: true })
 	}

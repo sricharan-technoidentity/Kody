@@ -13,20 +13,27 @@ Production is four product scripts plus independent ops workers. Origin owns
 **zero** Durable Object classes
 ([ADR 0034](../decisions/0034-origin-owns-no-durable-objects.md)).
 
-| Script                       | Public surface                         | Owns                                                                                                                                               | Binds                                                                        |
-| ---------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `kody-production` (origin)   | `kody.codes`                           | Remix, MCP HTTP, OAuth, inbound email, queue consumers, `JobsHost`                                                                                 | Platform DOs, runtime DOs / workflows, `RUNTIME_WORKER`, `JOBS`, `HIGHLIGHT` |
-| `kody-platform`              | `/__platform/health` only              | `MCP`, `McpClientHub`, `OAuthPurgeCoordinator`, `UserMeter`, `Mailbox`, `RepoSession`, `RepoSessionIndex`, `StripePlanRefresh`, `KodyFetchGateway` | Shared D1/KV/R2/AI; runtime DOs for package work                             |
-| `kody-runtime`               | `{user}.kody.run`; `/__runtime/health` | `StorageRunner`, `RunLog`, `PackageRealtimeSession`, `DynamicCallableWorkflow`, `KodyFetchGateway`, `PackageAppRuntimeBridge`                      | Platform DOs, `JOBS`                                                         |
-| `kody-jobs`                  | no public hostname                     | `JobManager`, `JOBS_DB`, `kody-scheduled-dispatch`                                                                                                 | `HOST` → origin `JobsHost`                                                   |
-| `kody-highlight`             | no public hostname                     | Shiki tokenizer (`POST /highlight`)                                                                                                                | —                                                                            |
-| `kody-status`                | `status.kody.codes`                    | `StatusStore`                                                                                                                                      | HTTP probes + `JOBS` service                                                 |
-| `kody-nx-cache`              | `nx-cache.kody.codes`                  | R2 `kody-nx-cache`                                                                                                                                 | —                                                                            |
-| `kody-production-d1-backups` | operator-only                          | D1 backup / DR workflows                                                                                                                           | R2 `kody-production-backups`                                                 |
+| Script                       | Public surface                         | Owns                                                                                                                          | Binds                                                            |
+| ---------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `kody-production` (origin)   | `kody.codes`                           | Remix, MCP HTTP, OAuth, inbound email, queue consumers, `JobsHost`                                                            | Platform DOs, runtime DOs, `RUNTIME_WORKER`, `JOBS`, `HIGHLIGHT` |
+| `kody-platform`              | `/__platform/health` only              | `MCP`, `McpClientHub`, `OAuthPurgeCoordinator`, `UserMeter`, `Mailbox`, `RepoSession`, `RepoSessionIndex`, `KodyFetchGateway` | Shared D1/KV/R2/AI; runtime DOs for package work                 |
+| `kody-runtime`               | `{user}.kody.run`; `/__runtime/health` | `StorageRunner`, `RunLog`, `PackageRealtimeSession`, `KodyFetchGateway`, `PackageAppRuntimeBridge`                            | Platform DOs, `JOBS`                                             |
+| `kody-jobs`                  | no public hostname                     | `JOBS_DB`, Temporal schedule outbox reconciliation, `kody-scheduled-dispatch`                                                 | `HOST` → origin `JobsHost`                                       |
+| `kody-highlight`             | no public hostname                     | Shiki tokenizer (`POST /highlight`)                                                                                           | —                                                                |
+| `kody-status`                | `status.kody.codes`                    | `StatusStore`                                                                                                                 | HTTP probes + `JOBS` service                                     |
+| `kody-nx-cache`              | `nx-cache.kody.codes`                  | R2 `kody-nx-cache`                                                                                                            | —                                                                |
+| `kody-production-d1-backups` | operator-only                          | D1 backup / DR workflows                                                                                                      | R2 `kody-production-backups`                                     |
 
 Local `npm run dev` attaches origin, platform, runtime, jobs, and highlight in
 one Miniflare. Playwright `CLOUDFLARE_ENV=test` is the exception: Durable Object
 classes run on the single `kody-test` script with no `script_name`.
+
+The repository also contains a Node 26 Temporal worker and signed HTTP gateway
+under `packages/temporal-worker` and `packages/temporal-gateway`. They are
+separate from the Cloudflare production fleet above. Local development can run
+them against a Temporal development server; this repository change does not
+select, provision, or deploy a production Temporal service or namespace. See
+[Temporal foundation](./temporal-foundation.md).
 
 Remix/blog/UI-only deploys upload origin and skip platform, runtime, and jobs.
 Official guide markdown (`docs/guides/`, `packages/worker/src/guides/`) uploads
@@ -101,6 +108,11 @@ wrote during that fetch) so the next cron can skip the synthetic.
 - [Run records](./run-records.md): per-user execution history and logs across
   every runtime surface (`RunLog` Durable Object, `runs` MCP domain,
   `/account/activity`).
+- [Temporal foundation](./temporal-foundation.md): the local Node worker and
+  gateway, deterministic workflow boundary, signed Cloudflare Activities,
+  schedule reconciliation, and production boundary.
+- [Temporal migration plan](./temporal-migration-plan.md): the phased local
+  migration record and final Temporal-only orchestration design.
 - [Runtime worker migration runbook](./runtime-worker-migration-runbook.md):
   ownership of the package runtime lane on `kody-runtime` and the deploy
   invariants later uploads must keep
@@ -109,9 +121,9 @@ wrote during that fetch) so the next cron can skip the synthetic.
   ownership of remaining platform Durable Object classes on `kody-platform` and
   the deploy invariants that keep origin owning none
   ([ADR 0034](../decisions/0034-origin-owns-no-durable-objects.md)).
-- [Jobs worker migration runbook](./jobs-worker-migration-runbook.md): ownership
-  of `JobManager` and `JOBS_DB` on `kody-jobs` and the deploy invariants later
-  uploads must keep ([ADR 0016](../decisions/0016-mono-worker-extraction.md)).
+- [Jobs worker migration runbook](./jobs-worker-migration-runbook.md):
+  historical extraction context and enduring `JOBS_DB` ownership on `kody-jobs`
+  ([ADR 0016](../decisions/0016-mono-worker-extraction.md)).
 - [Production rollback](../rollback.md): Cloudflare version rollback vs
   forward-fix on `main` for the five product scripts, including when Durable
   Object or D1 migrations make Path A unsafe.
@@ -177,6 +189,14 @@ metadata. See [OAuth integrations](./integrations.md).
 - Platform entrypoint: `packages/worker/src/platform-worker.ts`
 - Runtime entrypoint: `packages/worker/src/runtime-worker.ts`
 - Jobs entrypoint: `packages/jobs-worker/src/index.ts`
+- Temporal gateway entrypoint: `packages/temporal-gateway/src/server.ts`
+- Temporal worker entrypoint: `packages/temporal-worker/src/worker.ts`; workflow
+  definitions live in `packages/temporal-worker/src/workflows/index.ts` and
+  Activities in `packages/temporal-worker/src/activities/index.ts`
+- Shared Temporal contracts, schemas, identifiers, and signing helpers:
+  `packages/shared/src/temporal/`
+- Cloudflare Activity gateway:
+  `packages/worker/src/temporal/activity-gateway.ts`
 - Highlight entrypoint: `packages/highlight-worker/src/index.ts`
 - App request handler: `packages/worker/src/app/handler.ts`
 - Router and HTTP route mapping: `packages/worker/src/app/router.ts` and
@@ -193,7 +213,6 @@ metadata. See [OAuth integrations](./integrations.md).
   [`../adding-capabilities.md`](../adding-capabilities.md)).
 - Workflow runtime hub:
   `packages/worker/src/package-runtime/package-workflows.ts` defines the shared
-  `DynamicCallableWorkflow` Cloudflare Workflow used by every runtime context.
-  Runtime injection is wired through
-  `packages/worker/src/mcp/run-kody-registry.ts` for bundled code and
-  `packages/worker/src/package-runtime/package-app.ts` for package apps.
+  Temporal workflow adapter used by every runtime context. Runtime injection is
+  wired through `packages/worker/src/mcp/run-kody-registry.ts` for bundled code
+  and `packages/worker/src/package-runtime/package-app.ts` for package apps.

@@ -1,4 +1,5 @@
 import { quoteSqlIdentifier } from '@kody-internal/shared/sql-literals.ts'
+import { buildTemporalUserHash } from '@kody-internal/shared/temporal/identifiers.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
@@ -620,10 +621,6 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	const clearStorageMock = vi.fn(async () => ({ ok: true as const }))
 	const clearRunLogMock = vi.fn(async () => ({ ok: true as const }))
 	const purgeUserMeterMock = vi.fn(async () => ({ ok: true as const }))
-	const purgeStripePlanRefreshMock = vi.fn(async () => ({ ok: true as const }))
-	const stripePlanRefreshIdFromNameMock = vi.fn(
-		(name: string) => name as unknown as DurableObjectId,
-	)
 	const purgeMailboxMock = vi.fn(async () => {
 		mailboxCleanupOrder.push('purge-mailbox')
 		return { ok: true as const }
@@ -659,7 +656,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		},
 	)
 	const jobsBindingStub = createJobsBindingStub(db)
-	const purgeJobManagerMock = vi.fn((input: { userId: string }) =>
+	const purgeJobsMock = vi.fn((input: { userId: string }) =>
 		jobsBindingStub.purgeUser(input),
 	)
 	const purgeRepoSessionMock = vi.fn(async () => ({ ok: true as const }))
@@ -693,10 +690,6 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 				purge: async () => purgeUserMeterMock(),
 			}),
 		},
-		STRIPE_PLAN_REFRESH: {
-			idFromName: stripePlanRefreshIdFromNameMock,
-			get: () => ({ purgeUser: purgeStripePlanRefreshMock }),
-		},
 		MAILBOX: {
 			idFromName: (name: string) => name as unknown as DurableObjectId,
 			get: () => ({
@@ -705,7 +698,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 			}),
 		},
 		JOBS: createJobsBindingStub(db, {
-			purgeUser: purgeJobManagerMock as unknown,
+			purgeUser: purgeJobsMock as unknown,
 		}),
 		REPO_SESSION: {
 			idFromName: (name: string) => name as unknown as DurableObjectId,
@@ -914,7 +907,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		'package_pkg-1',
 	])
 	expect(clearStorageMock).toHaveBeenCalledTimes(3)
-	expect(purgeJobManagerMock).toHaveBeenCalledTimes(1)
+	expect(purgeJobsMock).toHaveBeenCalledTimes(1)
 	expect(purgeRepoSessionMock).toHaveBeenCalledWith({
 		sessionId: 'rs-1',
 		userId: userAaa,
@@ -944,6 +937,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		'source-manifest-snapshot:v1:src-1:old456',
 		'source-snapshot:v1:src-1:abc123',
 		'source-snapshot:v1:src-1:old456',
+		`temporal-coordinator:v1:stripe-plan-refresh:${await buildTemporalUserHash(userAaa)}`,
 	])
 	expect(deletedKvKeys).not.toContain(
 		'package-retriever-index-entry:v1:user-bbb:search:pkg-2:notes',
@@ -998,7 +992,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		userMeters: 1,
 		stripePlanRefreshes: 1,
 		mailboxes: 1,
-		jobManagers: 1,
+		jobs: 1,
 		repoSessions: 1,
 		// The MCP client hub is purged even when the user has no
 		// mcp_server_settings rows, since the hub DO can still hold OAuth
@@ -1009,8 +1003,6 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	})
 	expect(clearRunLogMock).toHaveBeenCalledTimes(1)
 	expect(purgeUserMeterMock).toHaveBeenCalledTimes(1)
-	expect(stripePlanRefreshIdFromNameMock).toHaveBeenCalledWith(userAaa)
-	expect(purgeStripePlanRefreshMock).toHaveBeenCalledWith({ userId: userAaa })
 	expect(listBlobReferencesMock).toHaveBeenCalledTimes(1)
 	expect(purgeMailboxMock).toHaveBeenCalledTimes(1)
 	expect(mailboxCleanupOrder[0]).toBe('list-blob-references')

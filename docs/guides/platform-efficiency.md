@@ -38,15 +38,15 @@ uses the published unique-worker-day rate on
 
 The same meter is tagged with the surface that minted the isolate:
 
-| Surface                      | Typical mint                                |
-| ---------------------------- | ------------------------------------------- |
-| `execute`                    | Ad hoc MCP / capability `execute`           |
-| `job`                        | Package-owned scheduled or `jobRunNow` work |
-| `package_export`             | A saved-package export invocation           |
-| `workflow`                   | A Cloudflare Workflow run                   |
-| `subscription`               | A package subscription handler              |
-| `app_fetch` / `app_realtime` | A package app HTTP or websocket isolate     |
-| `retriever` / `webhook`      | Search retrievers and inbound webhooks      |
+| Surface                      | Typical mint                                 |
+| ---------------------------- | -------------------------------------------- |
+| `execute`                    | Ad hoc MCP / capability `execute`            |
+| `job`                        | Package-owned scheduled or `jobRunNow` work  |
+| `package_export`             | A saved-package export invocation            |
+| `workflow`                   | A Temporal-orchestrated package workflow run |
+| `subscription`               | A package subscription handler               |
+| `app_fetch` / `app_realtime` | A package app HTTP or websocket isolate      |
+| `retriever` / `webhook`      | Search retrievers and inbound webhooks       |
 
 Saved packages, jobs, and other durable surfaces reuse a stable isolate when the
 published module graph stays the same. Ad hoc `execute` identity follows the

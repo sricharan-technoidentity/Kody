@@ -132,8 +132,9 @@ npm run validate
 
 `npm run validate` is the single authoritative local gate. It runs format, lint,
 typecheck, unit tests, Playwright E2E, MCP E2E, backup/status/nx-cache/jobs/
-runtime/platform dry-run builds, and structure checks in parallel. CI runs the
-same checks as parallel jobs (node and workers unit suites on separate runners).
+runtime/platform dry-run builds, Temporal typecheck/tests/workflow bundling, and
+structure checks in parallel. CI runs the same checks as parallel jobs (node and
+workers unit suites on separate runners).
 
 To seed a deterministic test login after migrations:
 
@@ -151,6 +152,8 @@ See
 [`docs/contributing/setup/local-development.md`](./setup/local-development.md)
 for local dev commands and
 [`docs/contributing/setup/checks.md`](./setup/checks.md) for verification steps.
+Temporal-backed jobs and workflows require the additional local processes in
+[`docs/contributing/architecture/temporal-foundation.md`](./architecture/temporal-foundation.md#local-development).
 
 To create a deterministic test login after migrations, see
 [`docs/contributing/setup/seeding.md`](./setup/seeding.md).

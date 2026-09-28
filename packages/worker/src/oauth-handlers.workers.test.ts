@@ -216,7 +216,6 @@ function createEnv(
 		SENTRY_ENVIRONMENT: 'test',
 		OIDC_SIGNING_KEY_ID: TEST_OIDC_SIGNING_KEY_ID,
 		OIDC_SIGNING_PRIVATE_KEY_PEM: TEST_OIDC_SIGNING_PRIVATE_KEY_PEM,
-		JOB_MANAGER: mockJobDoNamespace('job-manager-test-id'),
 		STORAGE_RUNNER: mockJobDoNamespace('storage-runner-test-id'),
 		PACKAGE_REALTIME_SESSION: mockJobDoNamespace(
 			'package-realtime-session-test-id',

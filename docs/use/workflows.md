@@ -1,22 +1,26 @@
 # Workflows
 
-Kody exposes Cloudflare Workflows through `kody:runtime` in every server-side
+Kody exposes durable workflows through `kody:runtime` in every server-side
 runtime context: `execute`, package jobs, package subscriptions, package
 exports, and package apps.
 
 Use workflows instead of plain `execute` for durable batch sweeps, migrations,
 polling loops, retryable steps, or work that may run longer than execute's
-timeout (~90s). Workflow-invoked package exports and inline workflow code get a
-longer sandbox budget (~4.5 minutes, under the Cloudflare Workflow step timeout)
-and run without the package-invocation idempotency ledger, so a step retry
-re-executes instead of replaying a cached timeout. Outbound `fetch` in that
-sandbox is capped ~30s under the same budget (~4 minutes), so a single slow
-upstream can finish without the execute-oriented 60s fetch deadline. The initial
-`execute` call should submit one `workflows.create`; inspect that workflow later
-with `workflowRunList`, or cancel it with `workflowRunCancel`. Check-heavy admin
-steps such as fleet apply, dry-run, and revert take one page per workflow
-sandbox; when `nextCursor` is set, create another workflow with that `runId` and
-cursor instead of looping in the same run.
+timeout (~90s). Temporal owns the durable timer, retry, and cancellation state;
+the package or inline module still executes inside Kody's Cloudflare sandbox.
+That sandbox has a ~4.5-minute budget inside a five-minute Temporal Activity.
+Outbound `fetch` is capped ~30s below the sandbox budget (~4 minutes), so a
+single slow upstream can finish without the execute-oriented 60s fetch deadline.
+
+Activity retries use a stable invocation idempotency key. Package-export runs
+therefore replay a completed logical invocation instead of repeating billable
+effects after a lost response, and an already-complete workflow projection
+returns its original result reference. The initial `execute` call should submit
+one `workflows.create`; inspect that workflow later with `workflowRunList`, or
+cancel it with `workflowRunCancel`. Check-heavy admin steps such as fleet apply,
+dry-run, and revert take one page per workflow sandbox; when `nextCursor` is
+set, create another workflow with that `runId` and cursor instead of looping in
+the same run.
 
 ```ts
 import { workflows } from 'kody:runtime'
@@ -74,9 +78,8 @@ Use `workflowRunList` to inspect recent workflow runs and statuses, and
 
 `workflowRunCancel({ id })` cancels one workflow run by id. Run ids look like
 `dynwf-…` for inline runs and `pkgwf-…` for package runs; get them from
-`workflows.create` output or `workflowRunList`. The call terminates the
-underlying Cloudflare Workflow instance and marks the run `cancelled` in
-`workflowRunList`.
+`workflows.create` output or `workflowRunList`. The call stops the underlying
+workflow execution and marks the run `cancelled` in `workflowRunList`.
 
 You can only cancel your own runs. Unknown ids or another user's id return a
 "not found" error.

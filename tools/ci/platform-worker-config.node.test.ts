@@ -260,9 +260,7 @@ test('generate rewrites worker names, copies resource ids, and writes a bootstra
 			binding: 'WEBHOOK_DISPATCH_QUEUE',
 			queue: 'kody-pr-7-webhook-dispatch',
 		})
-		expect(previewEnv?.workflows?.[0]?.name).toBe(
-			'kody-pr-7-runtime-dynamic-callable-workflows',
-		)
+		expect(previewEnv?.workflows).toBeUndefined()
 		expect(previewEnv?.vars?.APP_BASE_URL).toBe(
 			'https://kody-pr-7.example.workers.dev',
 		)
@@ -305,7 +303,7 @@ test('generate rewrites worker names, copies resource ids, and writes a bootstra
 		expect(bootstrapBindings).not.toContainEqual(
 			expect.objectContaining({ name: 'STORAGE_RUNNER' }),
 		)
-		expect(platformBootstrap.env?.preview?.workflows).toEqual([])
+		expect(platformBootstrap.env?.preview?.workflows).toBeUndefined()
 		expect(platformBootstrap.env?.preview?.services).toEqual(
 			previewEnv?.services,
 		)

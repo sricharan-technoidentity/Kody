@@ -127,20 +127,19 @@ Deletion must cover these user-owned surfaces:
   `packages/worker/src/account/data-targets.node.test.ts` applies the live
   migrations to SQLite and fails if a user-owned schema column lacks schema
   coverage in the runtime target list or if that list references a stale column.
-- **Durable Objects:** `JobManager`, `StorageRunner`, `RepoSession`,
-  `RepoSessionIndex`, `PackageRealtimeSession`, `McpClientHub`, `RunLog`,
-  `UserMeter`, `StripePlanRefresh`, and `Mailbox` are purged through
-  account-deletion RPCs after their identifiers are collected (`RunLog`,
-  `UserMeter`, `StripePlanRefresh`, `Mailbox`, and `RepoSessionIndex` are one
-  object per user and need no D1 id scan). Account deletion first captures the
-  authoritative USER raw-MIME and attachment references through
-  `Mailbox.listBlobReferences`, deletes those owner-safe R2 keys plus defensive
-  owner-prefix sweeps, and only then calls `Mailbox.purge()`. The purge clears
-  DO SQLite only (see [Mailbox](#durable-objects-mailbox)). `MCP` objects remain
-  SDK session-keyed, while `mcp_agent_sessions` indexes each Durable Object id
-  by authenticated stable user id so account deletion can purge stored props,
-  conversation state, raw-fetch state, and transport storage before revoking
-  OAuth grants.
+- **Durable Objects:** `StorageRunner`, `RepoSession`, `RepoSessionIndex`,
+  `PackageRealtimeSession`, `McpClientHub`, `RunLog`, `UserMeter`, and `Mailbox`
+  are purged through account-deletion RPCs after their identifiers are collected
+  (`RunLog`, `UserMeter`, `Mailbox`, and `RepoSessionIndex` are one object per
+  user and need no D1 id scan). Account deletion first cancels the user's
+  Temporal coordinators, then captures the authoritative USER raw-MIME and
+  attachment references through `Mailbox.listBlobReferences`, deletes those
+  owner-safe R2 keys plus defensive owner-prefix sweeps, and only then calls
+  `Mailbox.purge()`. The purge clears DO SQLite only (see
+  [Mailbox](#durable-objects-mailbox)). `MCP` objects remain SDK session-keyed,
+  while `mcp_agent_sessions` indexes each Durable Object id by authenticated
+  stable user id so account deletion can purge stored props, conversation state,
+  raw-fetch state, and transport storage before revoking OAuth grants.
 - **Vectorize:** memory, job, and saved-package vector ids are derived from D1
   rows and removed with `deleteByIds`. Each surface in
   `accountUserOwnedVectorizeSurfaces` declares its row source: memory and
@@ -164,10 +163,11 @@ Deletion must cover these user-owned surfaces:
   (`repo-session:{durableObjectId}/`). Account deletion enumerates session ids
   and each `purgeSession` prefix-purges that object's keys after `deleteAll`.
 - **KV:** published bundle artifact keys, source/manifest snapshot keys,
-  community listing snapshots, and per-user package retriever cache/index keys
-  in `BUNDLE_ARTIFACTS_KV` are deleted before D1 projection rows are removed.
-  OAuth token/grant KV is owned by the OAuth provider and is handled through
-  provider grant revocation rather than app-level key scans.
+  community listing snapshots, per-user package retriever cache/index keys, and
+  the exact per-user Temporal Stripe coordinator mapping in
+  `BUNDLE_ARTIFACTS_KV` are deleted before D1 projection rows are removed. OAuth
+  token/grant KV is owned by the OAuth provider and is handled through provider
+  grant revocation rather than app-level key scans.
 - **Cloudflare Artifacts:** source repos referenced by `entity_sources` and the
   per-user `RepoSessionIndex` catalog are deleted through the REST client in
   `packages/worker/src/repo/artifacts.ts`.
@@ -263,7 +263,6 @@ Durable Object export behavior:
 - `StorageRunner` bucket contents are exported with paged entries. These buckets
   hold application and job durable state and are the primary account migration
   surface for Durable Object storage.
-- `JobManager` exposes scheduler alarm/debug state through an export RPC.
 - `RunLog` exports per-user execution history (runs + log lines), the keyed
   package-invocation idempotency ledger, and dedicated RunLog state (workflow
   projections, job-run observability, package run successes, activation
@@ -535,6 +534,22 @@ Job schedule metadata lives in the dedicated `kody-jobs` D1 database bound as
   [Run records](./run-records.md)).
 - `archived_job_artifacts`: retained job artifact rows with per-row
   `retain_until` cleanup (exempt from the global age prunes on `APP_DB`).
+- `job_schedule_bindings`: current desired/applied version, opaque Temporal
+  identity, and comparison state for each Temporal Schedule. The retained
+  compatibility `backend` column is normalized to `temporal`; it is not a
+  runtime selector. `JOBS_DB.jobs` remains authoritative.
+- `job_schedule_outbox`: versioned, payload-hashed upsert/delete operations
+  committed in the same D1 batch as each job mutation. The jobs worker's
+  five-minute reconciler retries abandoned or failed operations, repairs drift,
+  and deletes both coordination rows after a Schedule deletion succeeds so
+  account purges do not retain raw user IDs.
+
+The tables originate in
+`packages/jobs-worker/migrations/0002-temporal-schedule-shadow.sql`; migrations
+`0003-temporal-job-cutover.sql` and `0004-retire-temporal-job-cohorts.sql`
+convert that rollout schema into the permanent transactional handoff. The
+migration filename records its history, not current shadow execution or a
+fallback scheduler.
 
 ## Analytics Engine reporting
 
@@ -589,7 +604,9 @@ snapshots are stored in `BUNDLE_ARTIFACTS_KV`. That binding also holds the
 platform-owned `platform-settings:v1:reserved-usernames` runtime
 reserved-username override and short-lived encrypted MCP OAuth refresh-family
 snapshots (`derived-cache:v1:mcp-oauth-refresh-family:` /
-`derived-cache:v1:mcp-oauth-refresh-replay:`).
+`derived-cache:v1:mcp-oauth-refresh-replay:`). The Temporal Stripe plan refresh
+coordinator stores one exact-key owner mapping there so Temporal history
+receives only an opaque reference.
 
 - Bindings are configured in `packages/worker/wrangler.jsonc` (remote KV IDs are
   supplied at deploy time via generated Wrangler configs, not committed in the
@@ -608,7 +625,9 @@ snapshots (`derived-cache:v1:mcp-oauth-refresh-family:` /
   orphan/expiry sweep, which the library does not expose.
 - `BUNDLE_ARTIFACTS_KV` keys are deleted from account deletion using D1-derived
   source ids, published commits, bundle artifact rows, community listing ids,
-  and package ids.
+  and package ids. The Temporal Stripe coordinator mapping uses a key derived
+  from the hashed stable user ID and is deleted directly while its Workflow is
+  cancelled.
 
 ## R2 (`COMMUNITY_ASSETS`, `EMAIL_BLOBS`, `REPO_SESSION_BLOBS`)
 
@@ -705,21 +724,20 @@ MCP server runtime state is hosted via a Durable Object class (`MCP`) in
   is supplied on every request via the OAuth token's `props`
   (`McpCallerContext.user`) rather than baked into the DO id.
 
-## Durable Objects (`JobManager` and `StorageRunner`)
+## Job schedules and `StorageRunner`
 
-Jobs use two Durable Object roles across workers:
+Jobs split schedule authority from durable package state:
 
-- `JobManager` (jobs worker): one object per user, responsible only for alarm
-  scheduling and dispatching due jobs from `JOBS_DB`-backed metadata
+- Temporal Schedules dispatch occurrences from `JOBS_DB`-backed metadata.
+  `job_schedule_bindings` and `job_schedule_outbox` provide the transactional,
+  versioned handoff and reconciliation boundary.
 - `StorageRunner` (runtime worker): one object per durable storage id,
   responsible for isolated SQLite state that can be bound to execute calls,
   jobs, and dedicated storage inspection capabilities
 
-Each `JobManager` alarm processes at most `maxDueJobsPerAlarm` due jobs
-(`packages/worker/src/jobs/repo.ts`, oldest `next_run_at` first). When more due
-jobs remain after a run, the post-run alarm resync arms a near-immediate
-follow-up alarm so large backlogs drain across multiple short invocations
-instead of one Durable Object wake.
+The jobs worker's bounded reconciliation lane applies pending outbox versions,
+describes existing Temporal Schedules to repair drift, and relies on idempotency
+fences when a gateway response is lost after Temporal committed.
 
 Storage split:
 
@@ -729,8 +747,8 @@ Storage split:
   run error, duration, counters, and pruned execution history live in the
   per-user `RunLog` (`job_run_observability` and `runs`; see
   [Run records](./run-records.md))
-- `JobManager` SQLite: only alarm bookkeeping needed to wake the right user's
-  due jobs
+- `JOBS_DB` schedule binding/outbox tables: desired and applied Temporal
+  Schedule versions, retry state, and drift-reconciliation metadata
 - `StorageRunner` SQLite: isolated durable state addressed by `storageId`
 
 `user_storage_buckets` inventories both StorageRunner buckets and RepoSession
@@ -756,8 +774,8 @@ live in a per-user `UserMeter` Durable Object with SQLite
 (class `UserMeter`; Wrangler SQLite migration tag `v21` via `new_sqlite_classes`
 in `packages/worker/wrangler.jsonc`).
 
-Naming matches `RunLog` and `JobManager`: one object per untrimmed stable MCP
-`userId` via `userMeterDurableObjectName(userId)` → `idFromName(userId)` in
+Naming matches `RunLog`: one object per untrimmed stable MCP `userId` via
+`userMeterDurableObjectName(userId)` → `idFromName(userId)` in
 `packages/worker/src/user-scoped-durable-object-name.ts`. There is no `user_id`
 column inside the DO because the object identity is the user.
 
@@ -841,9 +859,8 @@ and outbound attachment bytes stay in `EMAIL_BLOBS` R2; the DO stores object
 keys, not payload bytes. Canonical key builders live in
 `packages/worker/src/email/blob-keys.ts`.
 
-Naming matches `RunLog`, `JobManager`, and `UserMeter`: one object per untrimmed
-stable MCP `userId` via `mailboxDurableObjectName(userId)` →
-`idFromName(userId)` in
+Naming matches `RunLog` and `UserMeter`: one object per untrimmed stable MCP
+`userId` via `mailboxDurableObjectName(userId)` → `idFromName(userId)` in
 `packages/worker/src/user-scoped-durable-object-name.ts`. Data rows have no
 `user_id` column (object identity is the user). Because a Durable Object cannot
 introspect its `idFromName` string, a singleton `mailbox_owner_identity` row
@@ -1059,7 +1076,6 @@ live in `packages/worker/src/user-scoped-durable-object-name.ts` (JSON tuples
 via `durableObjectNameFromParts`); domain helpers such as
 `durableObjectNameFromParts` delegate to that module.
 
-- `JobManager` — `jobManagerDurableObjectName(userId)` → `idFromName(userId)`.
 - `RunLog` — `runLogDurableObjectName(userId)` → `idFromName(userId)`. One
   execution-history DO per user; there is no `user_id` column inside it because
   the DO identity is the user. Hosts pruned run history, the invocation ledger,
@@ -1070,10 +1086,6 @@ via `durableObjectNameFromParts`); domain helpers such as
   daily-entitlement meter DO per user (untrimmed stable id, same as `RunLog`)
   with authoritative schema-v4 storage-byte state. See
   [Entitlements](./entitlements.md#usermeter).
-- `StripePlanRefresh` — `stripePlanRefreshDurableObjectName(userId)` →
-  `idFromName(userId)`. One ephemeral, one-shot reconciliation alarm per user;
-  checkout and subscription webhook activity arm it as a backstop to the
-  immediate Stripe refresh. Account deletion cancels and purges the alarm.
 - `Mailbox` — `mailboxDurableObjectName(userId)` → `idFromName(userId)`. One
   email-metadata DO per user (untrimmed stable id, same as `RunLog`). See
   [Mailbox](#durable-objects-mailbox).
@@ -1126,15 +1138,15 @@ imports and `import(specifier)` as the supported alternatives.
 
 Bindings are configured per environment in `packages/worker/wrangler.jsonc`
 (names and bindings only; remote D1/KV IDs come from deploy-generated configs).
-`JobManager` and `JOBS_DB` live on the jobs worker
+`JOBS_DB` and Temporal schedule reconciliation live on the jobs worker
 (`packages/jobs-worker/wrangler.jsonc`); the main worker reaches them through
 the `JOBS` service binding. Runtime Durable Objects (`StorageRunner`, `RunLog`,
 `PackageRealtimeSession`) live on the runtime worker and are bound cross-script
 from origin — see [ADR 0016](../decisions/0016-mono-worker-extraction.md).
 Platform Durable Objects (`MCP`, `McpClientHub`, `OAuthPurgeCoordinator`,
-`UserMeter`, `Mailbox`, `RepoSession`, `RepoSessionIndex`, `StripePlanRefresh`)
-live on the platform worker and are bound cross-script from origin and runtime —
-see [ADR 0034](../decisions/0034-origin-owns-no-durable-objects.md). The origin
+`UserMeter`, `Mailbox`, `RepoSession`, `RepoSessionIndex`) live on the platform
+worker and are bound cross-script from origin and runtime — see
+[ADR 0034](../decisions/0034-origin-owns-no-durable-objects.md). The origin
 script owns no Durable Object classes.
 
 - `APP_DB` (D1)
@@ -1151,8 +1163,6 @@ script owns no Durable Object classes.
 - `USER_METER` (Durable Objects; per-user daily entitlement counters — see
   [Entitlements](./entitlements.md#usermeter); class hosted on the platform
   worker)
-- `STRIPE_PLAN_REFRESH` (Durable Objects; per-user, activity-driven Stripe plan
-  reconciliation alarms; class hosted on the platform worker)
 - `MAILBOX` (Durable Objects; sole per-user email graph, inbound-ledger,
   retention, read, export, and mutation authority — see
   [Mailbox](#durable-objects-mailbox); class hosted on the platform worker)
@@ -1194,8 +1204,11 @@ script owns no Durable Object classes.
   [Usage metering](./usage-metering.md#onboarding-funnel))
 
 `packages/worker/wrangler.jsonc` also configures the `EMAIL` send binding,
-dispatch queues, worker loaders (`LOADER` / `APP_LOADER`), the `AI` binding, and
-`DYNAMIC_CALLABLE_WORKFLOWS`; the Wrangler config is authoritative.
+dispatch queues, worker loaders (`LOADER` / `APP_LOADER`), and the `AI` binding;
+the Wrangler config is authoritative. Durable workflow orchestration reaches a
+Temporal service through the signed gateway. Local development uses a Temporal
+development server; production service selection and deployment are outside this
+repository change.
 
 ## Repo-backed source and Artifacts
 
@@ -1465,12 +1478,9 @@ builders are centralized in
 `durableObjectNameFromParts` in user-scoped Durable Object naming helpers, which
 to `durableObjectNameFromParts`).
 
-- `JobManager`: `idFromName(userId)` (no trim).
 - `RunLog`: `idFromName(userId)` (no trim); one execution-history DO per user.
 - `UserMeter`: `idFromName(userId)` (no trim); one daily-entitlement meter DO
   per user, plus authoritative schema-v4 storage-byte state.
-- `StripePlanRefresh`: `idFromName(userId)` (no trim); one ephemeral billing
-  reconciliation alarm DO per user.
 - `Mailbox`: `idFromName(userId)` (no trim); one email-metadata DO per user.
 - `RepoSessionIndex`: `idFromName(userId)` (no trim); one session-catalog DO per
   user.
@@ -1506,6 +1516,9 @@ app-owned keys in it. App-owned `BUNDLE_ARTIFACTS_KV` keys are:
   Publish rebuild copies unchanged targets from the previous commit onto this
   new key (D1 identity row retargets) so a partial export bump does not leave
   the new `published_commit` missing artifacts.
+- `temporal-coordinator:v1:stripe-plan-refresh:{temporalUserHash}` — ephemeral
+  owner mapping for the opaque Stripe plan refresh coordinator reference;
+  excluded from export and removed during account deletion.
 - `community-snapshot:v1:{listingId}`.
 - `package-retriever-manifest:v1:{userId}:{packageId}:{revision}`.
 - `package-retriever-index-entry:v1:{userId}:{scope}:{packageId}:{retrieverKey}`

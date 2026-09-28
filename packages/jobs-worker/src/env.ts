@@ -7,7 +7,6 @@ import { type JobsHostContract } from '@kody-internal/shared/jobs/rpc.ts'
  */
 export type JobsWorkerEnv = {
 	JOBS_DB: D1Database
-	JOB_MANAGER: DurableObjectNamespace
 	/** Main worker's `JobsHost` entrypoint. */
 	HOST: Fetcher & JobsHostContract
 	/** Absent outside production: dispatch falls back to direct execution. */
@@ -16,4 +15,6 @@ export type JobsWorkerEnv = {
 	SENTRY_ENVIRONMENT?: string
 	SENTRY_TRACES_SAMPLE_RATE?: number
 	APP_COMMIT_SHA?: string
+	TEMPORAL_GATEWAY_URL?: string
+	TEMPORAL_GATEWAY_SIGNING_KEYS?: string
 }

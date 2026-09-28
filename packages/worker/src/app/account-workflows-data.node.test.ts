@@ -43,7 +43,7 @@ function makeWorkflow(
 	return {
 		id: 'dynwf-1',
 		userId: 'stable-user-1',
-		bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+		bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 		sourceType: 'inline',
 		packageId: null,
 		kodyId: null,
@@ -132,7 +132,7 @@ test('loadAccountWorkflowsData lists runs, resolves selection, and falls back to
 	mockModule.listWorkflowRunsForUser.mockResolvedValueOnce([])
 	mockModule.getWorkflowProjection.mockResolvedValueOnce({
 		id: 'dynwf-old',
-		bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+		bindingName: 'TEMPORAL_DYNAMIC_PACKAGE_WORKFLOWS',
 		sourceType: 'inline',
 		packageId: null,
 		kodyId: null,

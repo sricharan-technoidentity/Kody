@@ -66,17 +66,15 @@ interface __BaseEnv_Env {
 	USER_METER: DurableObjectNamespace<import("./src/index").UserMeter>;
 	MAILBOX: DurableObjectNamespace<import("./src/index").Mailbox>;
 	REPO_SESSION_INDEX: DurableObjectNamespace<import("./src/index").RepoSessionIndex>;
-	STRIPE_PLAN_REFRESH: DurableObjectNamespace<import("./src/index").StripePlanRefresh>;
 	REPO_SESSION: DurableObjectNamespace<import("./src/index").RepoSession>;
 	PACKAGE_REALTIME_SESSION: DurableObjectNamespace /* PackageRealtimeSession from kody-runtime */;
 	JOBS: Service /* entrypoint JobsService from kody-jobs */;
 	HIGHLIGHT?: Fetcher /* service kody-highlight */;
-	DYNAMIC_CALLABLE_WORKFLOWS: Workflow /* DynamicCallableWorkflow from kody-runtime */;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
-		durableNamespaces: "MCP" | "StorageRunner" | "RepoSession" | "PackageRealtimeSession" | "McpClientHub" | "OAuthPurgeCoordinator" | "RunLog" | "UserMeter" | "Mailbox" | "StripePlanRefresh" | "RepoSessionIndex";
+		durableNamespaces: "MCP" | "StorageRunner" | "RepoSession" | "PackageRealtimeSession" | "McpClientHub" | "OAuthPurgeCoordinator" | "RunLog" | "UserMeter" | "Mailbox" | "RepoSessionIndex";
 	}
 	interface Env extends __BaseEnv_Env {}
 }

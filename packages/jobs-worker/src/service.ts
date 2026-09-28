@@ -1,5 +1,4 @@
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
-import { type JobManagerDebugState } from '@kody-internal/shared/jobs/manager-debug.ts'
 import {
 	type JobsServiceContract,
 	type JobsHostContract,
@@ -15,14 +14,24 @@ import {
 } from '@kody-internal/shared/jobs/types.ts'
 import { WorkerEntrypoint } from 'cloudflare:workers'
 import { type JobsWorkerEnv } from './env.ts'
-import { jobManagerStub } from './manager.ts'
+import {
+	deleteJobWithScheduleOutbox,
+	insertJobWithScheduleOutbox,
+	purgeUserJobsWithScheduleOutbox,
+	updateJobWithScheduleOutbox,
+} from './schedule-outbox.ts'
 import { jobsStore } from './store.ts'
+import {
+	claimTemporalJobOccurrence,
+	finalizeTemporalJobOccurrence,
+	getTemporalClaimedJob,
+} from './temporal-occurrences.ts'
 
 /**
  * `JobsService` — the coarse-grained RPC surface the main worker reaches
  * through its JOBS service binding (ADR 0016). Implements
  * {@link JobsServiceContract}: the jobs-data store over the dedicated jobs D1
- * plus the JobManager Durable Object scheduling operations. Every operation
+ * plus Temporal occurrence coordination. Every operation
  * is user-scoped; userId always comes from the caller (the main worker
  * resolves it from the authenticated session/caller context).
  */
@@ -35,7 +44,7 @@ export class JobsService
 		job: JobRecord
 		callerContextJson: string
 	}): Promise<void> {
-		await jobsStore(this.env).insertJob(input)
+		await insertJobWithScheduleOutbox({ db: this.env.JOBS_DB, ...input })
 	}
 
 	async updateJob(input: {
@@ -43,7 +52,7 @@ export class JobsService
 		job: JobRecord
 		callerContextJson: string
 	}): Promise<boolean> {
-		return jobsStore(this.env).updateJob(input)
+		return updateJobWithScheduleOutbox({ db: this.env.JOBS_DB, ...input })
 	}
 
 	async getJobById(input: {
@@ -87,6 +96,34 @@ export class JobsService
 		return jobsStore(this.env).claimJob(input)
 	}
 
+	async claimTemporalJobOccurrence(input: {
+		userHash: string
+		jobId: string
+		scheduledFor: string
+		claimRef: string
+	}) {
+		return claimTemporalJobOccurrence({ env: this.env, ...input })
+	}
+
+	async getTemporalClaimedJob(input: {
+		userHash: string
+		jobId: string
+		claimRef: string
+	}) {
+		return getTemporalClaimedJob({ env: this.env, ...input })
+	}
+
+	async finalizeTemporalJobOccurrence(input: {
+		userHash: string
+		jobId: string
+		claimRef: string
+		scheduledFor: string
+		status: 'succeeded' | 'failed' | 'cancelled'
+		finishedAt: string
+	}) {
+		return finalizeTemporalJobOccurrence({ env: this.env, ...input })
+	}
+
 	async finalizeClaimedJob(input: {
 		userId: string
 		job: JobRecord
@@ -117,7 +154,7 @@ export class JobsService
 	}
 
 	async deleteJob(input: { userId: string; jobId: string }): Promise<boolean> {
-		return jobsStore(this.env).deleteJob(input)
+		return deleteJobWithScheduleOutbox({ db: this.env.JOBS_DB, ...input })
 	}
 
 	async disableExpiredJobsForUser(input: {
@@ -197,32 +234,10 @@ export class JobsService
 	}
 
 	async purgeUserJobsData(input: { userId: string }): Promise<void> {
-		await jobsStore(this.env).purgeUserJobsData(input)
+		await purgeUserJobsWithScheduleOutbox({ db: this.env.JOBS_DB, ...input })
 	}
 
-	async syncAlarm(input: {
-		userId: string
-	}): Promise<{ ok: true; userId: string; nextRunAt: string | null }> {
-		return jobManagerStub(this.env, input.userId).syncAlarm({
-			userId: input.userId,
-			source: 'rpc',
-		})
-	}
-
-	async getDebugState(input: {
-		userId: string
-	}): Promise<JobManagerDebugState> {
-		return jobManagerStub(this.env, input.userId).getDebugState(input)
-	}
-
-	async exportUser(input: { userId: string }): Promise<JobManagerDebugState> {
-		return jobManagerStub(this.env, input.userId).exportUser(input)
-	}
-
-	/**
-	 * Account-deletion hook: removes every jobs-database row for the user and
-	 * purges the JobManager Durable Object storage (including its alarm).
-	 */
+	/** Account-deletion hook for job rows and Temporal schedules. */
 	async purgeUser(input: {
 		userId: string
 	}): Promise<{ ok: true; userId: string; purged: boolean }> {
@@ -230,8 +245,7 @@ export class JobsService
 		if (!userId) {
 			throw new Error('Jobs purge requires a non-empty userId.')
 		}
-		await jobsStore(this.env).purgeUserJobsData({ userId })
-		await jobManagerStub(this.env, userId).purgeUser({ userId })
+		await purgeUserJobsWithScheduleOutbox({ db: this.env.JOBS_DB, userId })
 		return { ok: true as const, userId, purged: true }
 	}
 
@@ -241,7 +255,7 @@ export class JobsService
 		callerContext?: McpCallerContext | null
 		repoCheckPolicyOverride?: JobRepoCheckPolicy | null
 	}): Promise<Awaited<ReturnType<JobsHostContract['runJobNow']>>> {
-		return jobManagerStub(this.env, input.userId).runNow({
+		return this.env.HOST.runJobNow({
 			userId: input.userId,
 			jobId: input.jobId,
 			callerContext: input.callerContext ?? null,

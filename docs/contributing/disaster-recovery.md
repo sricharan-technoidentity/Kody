@@ -265,8 +265,9 @@ Restore rebuilds the derived stores below; do not treat them as recovery media:
   `vector_embed_fingerprints`; without `force`, matching hashes skip Vectorize
   upserts.
 - OAuth KV / browser sessions / provider tokens — users reconnect
-- Queues, Workflow instances, Durable Object alarms — recreate from config + D1
-  (`JobManager` alarms rebuild from restored `JOBS_DB`)
+- Queues, Temporal workflow instances, and Durable Object alarms — recreate or
+  reconcile from configuration plus authoritative D1 state; Temporal job
+  schedules reconcile from restored `JOBS_DB`
 - Derived community icons and ordinary KV caches
 - **UserMeter** — daily entitlement counters self-prune and can be
   re-established by traffic; authoritative storage-byte state is corrected by
@@ -460,10 +461,10 @@ import init/ingest etag. Without that prelude, drills fail with errors like
 Put the app in [maintenance mode (edge)](#maintenance-mode-edge) before execute.
 After restore: reindex Vectorize (`POST /__maintenance/reindex-capabilities`
 with `{ "force": true }`, omit `phases`, follow `cursor` until `complete`); let
-`kody-jobs` re-arm JobManager Durable Object alarms from restored `JOBS_DB`
-(`jobs.next_run_at` via `JobManager.syncAlarm` and the jobs-worker watchdog —
-APP_DB is not the job schedule store); recreate queues from Wrangler config; and
-expect users to reauthorize OAuth and reconnect MCP servers.
+`kody-jobs` reconcile Temporal Schedules from restored `JOBS_DB` through the
+transactional schedule outbox (APP_DB is not the job schedule store); recreate
+queues from Wrangler config; and expect users to reauthorize OAuth and reconnect
+MCP servers.
 
 ### Durable Object point-in-time recovery
 
@@ -889,9 +890,9 @@ Work top-to-bottom. Leave gates false until the matching gate item is done.
 - D1 `file_size` ≥ 4.5 GB or any export/restore object ≥ 5 GiB (rejected)
 - Multipart D1 capture / statement-safe split restore
 - Full Artifacts Git history or unpublished repo-session work
-- Backup of Vectorize, OAuth KV, queues, Workflow runtime, Durable Object alarms
-  (JobManager rebuilds alarms from restored `JOBS_DB`; other DOs follow their
-  own restore or accepted-loss paths)
+- Backup of Vectorize, OAuth KV, queues, Temporal runtime history, and Durable
+  Object alarms (Temporal job schedules reconcile from restored `JOBS_DB`;
+  Durable Objects follow their own restore or accepted-loss paths)
 - Backup of `RunLog` run records and logs (observability; ~30 day DO
   self-retention), invocation idempotency ledger, and workflow projections;
   never-pruned job observability and activation state are backed up

@@ -238,18 +238,12 @@ async function ensureJobsWorkerResources(options: CliOptions) {
 		// wrangler.jsonc — it is not per-PR. Preview cleanup deletes the
 		// per-preview jobs Worker (`kody-pr-<n>-jobs`) and must never delete
 		// `kody-preview-jobs` or `kody-jobs`.
-		// Per-preview jobs workers are brand new scripts: they cannot run the
-		// production script-transfer migration (from_script "kody-production"),
-		// so the
-		// generated preview config creates the class fresh instead.
+		// Per-preview jobs workers are brand new scripts and the retired
+		// JobManager class is not part of the local Temporal implementation.
+		// Do not replay the historical production transfer migration.
 		workerName = options.workerName
 		baseConfig.name = workerName
-		baseConfig.migrations = [
-			{
-				tag: 'v1',
-				new_sqlite_classes: ['JobManager'],
-			},
-		]
+		baseConfig.migrations = []
 		const services = envConfig.services
 		if (!Array.isArray(services)) {
 			fail(

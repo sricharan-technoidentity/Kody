@@ -407,6 +407,67 @@ Worker secrets:
   `/status.json`. Synced from the GitHub Actions secret of the same name on
   production deploy.
 
+## Temporal orchestration
+
+The local Temporal path uses two independently signed HTTPS directions. The
+Cloudflare workers and Node processes keep their settings in separate
+environment files:
+
+- `TEMPORAL_GATEWAY_URL` and `TEMPORAL_GATEWAY_SIGNING_KEYS` let the origin
+  smoke endpoint and jobs worker call the Node Temporal gateway. The signing
+  value is a JSON array containing the current key and optional previous key,
+  each with `id` and a secret of at least 32 characters.
+- `CLOUDFLARE_ACTIVITY_SIGNING_KEYS` lets Temporal Activities call the narrow
+  Cloudflare Activity Gateway. It uses the same current/previous JSON shape but
+  must be a separately scoped key set.
+- `CLOUDFLARE_ACTIVITY_GATEWAY_URL` is the Temporal worker's base URL for that
+  narrow gateway. In local development it normally points at the loopback origin
+  (for example, `http://127.0.0.1:3742`).
+
+The Temporal worker additionally reads:
+
+- `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_API_KEY`, and
+  `TEMPORAL_TLS` — standard `@temporalio/envconfig` connection settings used by
+  both the worker and gateway. A local development server defaults to
+  `localhost:7233` and namespace `default`; managed or self-hosted production
+  values depend on the production service selected later.
+- `TEMPORAL_METRICS_BIND_ADDRESS` — Prometheus exporter bind address. It
+  defaults to `127.0.0.1:9464` outside production and `0.0.0.0:9464` in
+  production. Any production worker-pool design must restrict this port to its
+  metrics collector; it is not a public application endpoint.
+- `TEMPORAL_TASK_QUEUE` — orchestration task queue; defaults to
+  `kody-foundation`.
+- `KODY_TEMPORAL_BUILD_ID` — pinned Worker Deployment build identifier; defaults
+  to `development` locally.
+- `TEMPORAL_PACKAGE_ACTIVITY_MAX_CONCURRENT_EXECUTIONS` — optional positive
+  integer limiting package Activity concurrency on the separate
+  `kody-package-activities` task queue. Invalid or non-positive values fail
+  startup.
+
+The Node gateway additionally reads:
+
+- `PORT` — HTTP listen port; defaults to `8080`.
+- `TEMPORAL_GATEWAY_REQUESTS_PER_MINUTE` — per-signing-key application rate
+  limit; defaults to `300`. Network ingress and coarse rate limiting remain a
+  deployment responsibility.
+
+The jobs worker uses `TEMPORAL_GATEWAY_URL` and `TEMPORAL_GATEWAY_SIGNING_KEYS`
+to synchronize its transactional schedule outbox with the configured Temporal
+service. Dynamic package workflows and the Stripe plan refresh coordinator use
+the same signed gateway. The checked-in implementation targets a local Temporal
+development server; production service selection, credentials, and deployment
+are outside this change.
+
+No Temporal setting changes the ordinary login, MCP, package browsing, or Kody
+request paths. `POST /__maintenance/temporal-foundation-smoke` uses
+`CAPABILITY_REINDEX_SECRET` for operator authentication and proves the signed
+Cloudflare → Temporal → Cloudflare round trip without enabling schedule traffic.
+
+See the [Temporal foundation](./architecture/temporal-foundation.md) and the
+[`temporal-worker`](../../packages/temporal-worker/readme.md) and
+[`temporal-gateway`](../../packages/temporal-gateway/readme.md) package notes
+for local startup and process boundaries.
+
 ## Cloudflare API (Worker + Email)
 
 Optional Worker secrets/vars (see `packages/worker/src/env-schema.ts` and

@@ -5,7 +5,7 @@ import {
 	e2eCloudflareMockAccountId,
 	writeE2eCloudflareMockState,
 } from './e2e-cloudflare-mock-state.ts'
-import { isExecutedDirectly, resolveNpmCommand } from './node-runtime.ts'
+import { isExecutedDirectly, resolveNpmInvocation } from './node-runtime.ts'
 import { spawnChildProcess, stopChildProcessTree } from './dev-process-utils.ts'
 
 function runSetup(command: string, args: Array<string>) {
@@ -19,7 +19,8 @@ function runSetup(command: string, args: Array<string>) {
 
 async function startE2eWebServer() {
 	runSetup(process.execPath, ['tools/prepare-e2e-env.ts'])
-	runSetup(resolveNpmCommand(), ['run', 'migrate:e2e'])
+	const npm = resolveNpmInvocation(process.env)
+	runSetup(npm.command, [...npm.argsPrefix, 'run', 'migrate:e2e'])
 
 	const mock = await startCloudflareMock(`e2e-cloudflare-${randomUUID()}`)
 	try {

@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from 'cloudflare:test'
+import { env } from 'cloudflare:test'
 import { expect, test, vi } from 'vitest'
 import { ensureEntitlementTestSchema } from '#worker/entitlements/test-schema.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
@@ -26,7 +26,8 @@ function createBillingEnv(
 		STRIPE_PRO_PRICE_ID?: string
 		STRIPE_PRO_YEARLY_PRICE_ID?: string
 		STRIPE_API_BASE_URL?: string
-		STRIPE_PLAN_REFRESH?: Env['STRIPE_PLAN_REFRESH']
+		TEMPORAL_GATEWAY_URL?: string
+		TEMPORAL_GATEWAY_SIGNING_KEYS?: string
 		DISCORD_BOT_TOKEN?: string
 		DISCORD_GUILD_ID?: string
 		DISCORD_MEMBER_ROLE_ID?: string
@@ -39,6 +40,10 @@ function createBillingEnv(
 		STRIPE_SECRET_KEY: 'sk_test_secret',
 		STRIPE_PRO_PRICE_ID: 'price_pro',
 		STRIPE_API_BASE_URL: 'https://stripe.mock',
+		TEMPORAL_GATEWAY_URL: 'https://temporal-gateway.test',
+		TEMPORAL_GATEWAY_SIGNING_KEYS: JSON.stringify([
+			{ id: 'current', secret: 'a-secure-test-secret-that-is-long-enough' },
+		]),
 		...overrides,
 	}
 }
@@ -110,6 +115,12 @@ function stubStripeFetch(input: {
 }) {
 	const fetchStub = vi.fn(async (request: RequestInfo | URL) => {
 		const url = String(request)
+		if (url.includes('/v1/workflows/signal-with-start')) {
+			return jsonResponse({
+				workflowId: 'stripe-plan-refresh-test',
+				signaledRunId: 'temporal-run-1',
+			})
+		}
 		if (url.includes('/v1/checkout/sessions/')) {
 			return jsonResponse(
 				input.checkout ?? {
@@ -161,7 +172,7 @@ test('linkStripeCustomerFromCheckoutSession links customer and refreshes stripe_
 	const email = `link-happy-${crypto.randomUUID()}@example.com`
 	const user = await seedUser({ email, plan: 'pro' })
 	const now = new Date('2026-07-19T12:00:00.000Z')
-	stubStripeFetch({
+	const fetchStub = stubStripeFetch({
 		checkout: {
 			id: 'cs_happy',
 			customer: 'cus_happy',
@@ -200,14 +211,11 @@ test('linkStripeCustomerFromCheckoutSession links customer and refreshes stripe_
 		stripe_price_id: 'price_pro',
 		stripe_plan_refreshed_at: now.toISOString(),
 	})
-	const refreshAlarm = env.STRIPE_PLAN_REFRESH.get(
-		env.STRIPE_PLAN_REFRESH.idFromName(user.stableUserId),
-	)
 	expect(
-		await runInDurableObject(refreshAlarm, async (_instance, state) =>
-			state.storage.getAlarm(),
+		fetchStub.mock.calls.some(([request]) =>
+			String(request).includes('/v1/workflows/signal-with-start'),
 		),
-	).toBeTypeOf('number')
+	).toBe(true)
 
 	vi.unstubAllGlobals()
 })
@@ -225,16 +233,8 @@ test('checkout linking surfaces Stripe failure when its retry alarm cannot be ar
 		subscriptionsStatus: 500,
 	})
 	consoleError.mockImplementation(() => {})
-	const schedule = vi.fn(async () => {
-		throw new Error('alarm unavailable')
-	})
 	const billingEnv = createBillingEnv({
-		STRIPE_PLAN_REFRESH: {
-			idFromName: env.STRIPE_PLAN_REFRESH.idFromName.bind(
-				env.STRIPE_PLAN_REFRESH,
-			),
-			get: () => ({ schedule }),
-		} as unknown as Env['STRIPE_PLAN_REFRESH'],
+		TEMPORAL_GATEWAY_URL: undefined,
 	})
 
 	await expect(
@@ -244,7 +244,6 @@ test('checkout linking surfaces Stripe failure when its retry alarm cannot be ar
 			sessionId: 'cs_no_backstop',
 		}),
 	).rejects.toBeInstanceOf(StripeApiError)
-	expect(schedule).toHaveBeenCalledTimes(1)
 	expect(consoleError).toHaveBeenCalledWith(
 		'stripe_plan_refresh_schedule_failed',
 		expect.objectContaining({ userId: user.stableUserId }),
@@ -395,6 +394,12 @@ test('checkout linking assigns the Discord Pro role when Discord is connected', 
 			if (url.includes('discord.com/api/v10/guilds/')) {
 				discordCalls.push({ url, method })
 				return new Response(null, { status: 204 })
+			}
+			if (url.includes('/v1/workflows/signal-with-start')) {
+				return jsonResponse({
+					workflowId: 'stripe-plan-refresh-test',
+					signaledRunId: 'temporal-run-1',
+				})
 			}
 			if (url.includes('/v1/checkout/sessions/')) {
 				return jsonResponse({

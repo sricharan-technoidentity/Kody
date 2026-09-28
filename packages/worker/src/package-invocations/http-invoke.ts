@@ -217,6 +217,7 @@ export async function invokePackageExportWithToolFactories(input: {
 	 */
 	ephemeral?: boolean
 	executorTimeoutMs?: number | null
+	signal?: AbortSignal
 }): Promise<PackageInvocationResponse> {
 	const packageIdOrKodyId = input.request.packageIdOrKodyId.trim()
 	if (!packageIdOrKodyId) {
@@ -296,6 +297,7 @@ export async function invokePackageExportWithToolFactories(input: {
 		toolFactories: input.toolFactories,
 		waitUntil: input.waitUntil,
 		executorTimeoutMs: input.executorTimeoutMs,
+		signal: input.signal,
 	}
 
 	if (!idempotencyKey) {

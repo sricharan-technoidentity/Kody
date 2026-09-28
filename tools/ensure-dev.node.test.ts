@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { expect, test } from 'vitest'
 import {
 	appendDevOutputChunk,
@@ -298,26 +299,73 @@ test('envWithPreferredNode26 prepends nvm Node 26 only when the current runtime 
 	expect(
 		envWithPreferredNode26(
 			{ PATH: '/exec-daemon:/usr/bin' },
-			{ nodeMajor: 26, homeDir, readDir, hasNodeBin },
+			{
+				nodeMajor: 26,
+				homeDir,
+				readDir,
+				hasNodeBin,
+				platform: 'linux',
+			},
 		).PATH,
 	).toBe('/exec-daemon:/usr/bin')
 	expect(
 		envWithPreferredNode26(
 			{ PATH: '/exec-daemon:/usr/bin' },
-			{ nodeMajor: 22, homeDir, readDir, hasNodeBin },
+			{
+				nodeMajor: 22,
+				homeDir,
+				readDir,
+				hasNodeBin,
+				platform: 'linux',
+			},
 		).PATH,
 	).toBe('/home/agent/.nvm/versions/node/v26.7.0/bin:/exec-daemon:/usr/bin')
 
 	const binDir = resolveNode26BinDir(homeDir, {
 		readDir: () => ['v26.7.0'],
 		hasNodeBin: () => true,
+		platform: 'linux',
 	})
 	expect(binDir).toBe('/home/agent/.nvm/versions/node/v26.7.0/bin')
 })
 
+test('envWithPreferredNode26 supports NVM for Windows Community Edition', () => {
+	const localAppData = String.raw`C:\Users\agent\AppData\Local`
+	const expectedBin = String.raw`C:\Users\agent\AppData\Local\Author Software\nvm\installs\v26.10.0`
+	const env = envWithPreferredNode26(
+		{
+			PATH: String.raw`C:\Program Files\nodejs;C:\Windows\System32`,
+			LOCALAPPDATA: localAppData,
+			npm_execpath: String.raw`C:\old-node\node_modules\npm\bin\npm-cli.js`,
+			npm_node_execpath: String.raw`C:\old-node\node.exe`,
+		},
+		{
+			nodeMajor: 24,
+			homeDir: String.raw`C:\Users\agent`,
+			platform: 'win32',
+			readDir: (dir) => {
+				expect(dir).toBe(
+					String.raw`C:\Users\agent\AppData\Local\Author Software\nvm\installs`,
+				)
+				return ['v24.18.0', 'v26.10.0']
+			},
+			hasNodeBin: (dir) => dir === expectedBin,
+		},
+	)
+	expect(env.PATH).toBe(
+		`${expectedBin};${String.raw`C:\Program Files\nodejs;C:\Windows\System32`}`,
+	)
+	expect(env.npm_node_execpath).toBe(`${expectedBin}\\node.exe`)
+	expect(env.npm_execpath).toBe(
+		`${expectedBin}\\node_modules\\npm\\bin\\npm-cli.js`,
+	)
+})
+
 test('ensureWorkerEnvFile copies .env.example once and refuses when both are missing', () => {
 	const copied: Array<string> = []
-	const present = new Set(['/repo/packages/worker/.env.example'])
+	const examplePath = path.join('/repo', 'packages/worker/.env.example')
+	const envPath = path.join('/repo', 'packages/worker/.env')
+	const present = new Set([examplePath])
 	const created = ensureWorkerEnvFile('/repo', {
 		exists: (file) => present.has(file),
 		copyFile: (from, to) => {
@@ -327,11 +375,9 @@ test('ensureWorkerEnvFile copies .env.example once and refuses when both are mis
 	})
 	expect(created).toEqual({
 		created: true,
-		path: '/repo/packages/worker/.env',
+		path: envPath,
 	})
-	expect(copied).toEqual([
-		'/repo/packages/worker/.env.example->/repo/packages/worker/.env',
-	])
+	expect(copied).toEqual([examplePath + '->' + envPath])
 	expect(
 		ensureWorkerEnvFile('/repo', {
 			exists: (file) => present.has(file),

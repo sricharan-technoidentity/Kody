@@ -1,6 +1,6 @@
 /**
  * Scheduled-lane names, queue message shape, and cron cadence shared between
- * the jobs worker (which owns the `*​/5 * * * *` cron trigger and the
+ * the jobs worker (which owns the five-minute cron trigger and the
  * scheduled dispatch queue, ADR 0016) and the main worker (which executes the
  * platform lanes via the `JobsHost` service binding).
  */
@@ -27,7 +27,7 @@ export const scheduledLaneNames = [
 	'kit_subscriber_sync',
 	'dr_export',
 	'dr_export_watchdog',
-	'job_schedule_watchdog',
+	'temporal_schedule_sync',
 ] as const
 
 export type ScheduledLaneName = (typeof scheduledLaneNames)[number]
@@ -99,7 +99,7 @@ export function resolveScheduledLaneQueueAction(input: {
  * Durable Objects). Every other lane is forwarded to the main worker's
  * `JobsHost.runScheduledLane`.
  */
-export const jobsWorkerLocalLanes = ['job_schedule_watchdog'] as const
+export const jobsWorkerLocalLanes = ['temporal_schedule_sync'] as const
 
 export type JobsWorkerLocalLane = (typeof jobsWorkerLocalLanes)[number]
 
@@ -226,12 +226,6 @@ export function shouldRunDrExportWatchdogCron(now: Date) {
 	return minutes >= 6 * 60 + 15 && minutes < 6 * 60 + 20
 }
 
-export const jobScheduleWatchdogIntervalMinutes = 15
-
-export function shouldRunJobScheduleWatchdogCron(now: Date) {
-	return now.getUTCMinutes() % jobScheduleWatchdogIntervalMinutes === 0
-}
-
 /**
  * Which lanes a cron tick at `scheduledAt` should dispatch. DR export lanes
  * are dispatched on cadence regardless of configuration; the main worker
@@ -283,9 +277,7 @@ export function getScheduledLaneCadence(
 	if (shouldRunDrExportWatchdogCron(scheduledAt)) {
 		lanes.push('dr_export_watchdog')
 	}
-	if (shouldRunJobScheduleWatchdogCron(scheduledAt)) {
-		lanes.push('job_schedule_watchdog')
-	}
+	lanes.push('temporal_schedule_sync')
 	return lanes
 }
 

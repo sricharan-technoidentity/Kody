@@ -11,7 +11,6 @@ const mockModule = vi.hoisted(() => ({
 	deleteEntitySource: vi.fn(),
 	deleteJobRow: vi.fn(),
 	listJobRowsByUserId: vi.fn(),
-	syncJobManagerAlarm: vi.fn(),
 	deleteSavedPackageVector: vi.fn(),
 	removePackageRetrieverManifestCacheEntries: vi.fn(),
 	deleteAllAppScopedValues: vi.fn(),
@@ -63,11 +62,6 @@ vi.mock('#worker/jobs/jobs-data.ts', () => ({
 		listJobsForUser: (...args: Array<unknown>) =>
 			mockModule.listJobRowsByUserId(...args),
 	}),
-}))
-
-vi.mock('#worker/jobs/manager-client.ts', () => ({
-	syncJobManagerAlarm: (...args: Array<unknown>) =>
-		mockModule.syncJobManagerAlarm(...args),
 }))
 
 vi.mock('#worker/repo/artifact-repo-cleanup.ts', () => ({

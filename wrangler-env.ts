@@ -264,9 +264,23 @@ const localWranglerPath = path.join(
 	'.bin',
 	process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler',
 )
-const wranglerCommand =
-	(existsSync(localWranglerPath) && localWranglerPath) ||
-	resolveLocalBinary('wrangler')
+const localWranglerScriptPath = path.join(
+	process.cwd(),
+	'node_modules',
+	'wrangler',
+	'bin',
+	'wrangler.js',
+)
+// Node 26 no longer spawns Windows .cmd shims directly. Invoke Wrangler's
+// JavaScript entrypoint with the current Node executable so every local script
+// keeps working without shell parsing or quoting differences.
+const useWranglerScript =
+	process.platform === 'win32' && existsSync(localWranglerScriptPath)
+const wranglerCommand = useWranglerScript
+	? process.execPath
+	: (existsSync(localWranglerPath) && localWranglerPath) ||
+		resolveLocalBinary('wrangler')
+if (useWranglerScript) commandArgs.unshift(localWranglerScriptPath)
 
 if (
 	args[0] === 'deploy' &&

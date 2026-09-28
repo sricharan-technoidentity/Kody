@@ -26,6 +26,7 @@ import { backfillStorageBucketEstimates } from '#worker/storage-buckets/estimate
 import { refreshAdminInsightsRunLogSnapshot } from '#worker/admin/insights-runlog-snapshot.ts'
 import { aggregateUsageRollups } from '#worker/usage/aggregate-rollups.ts'
 import { runComputeOverageBilling } from '#worker/billing/compute-overage-invoices.ts'
+import { reconcileTemporalWorkflowProjections } from '#worker/temporal/observability.ts'
 
 export {
 	isScheduledLaneName,
@@ -141,7 +142,24 @@ export async function runScheduledLane(input: {
 				console.warn('admin-insights-run-log-snapshot-lane-failed', error)
 				runLogSnapshot = { status: 'failed' }
 			}
-			return { ...result, fleetPackageErrorRate, runLogSnapshot }
+			let temporalReconciliation:
+				| Awaited<ReturnType<typeof reconcileTemporalWorkflowProjections>>
+				| { status: 'failed' }
+			try {
+				temporalReconciliation = await reconcileTemporalWorkflowProjections({
+					env: input.env,
+					now: input.scheduledAt,
+				})
+			} catch (error) {
+				console.warn('temporal-workflow-reconciliation-lane-failed', error)
+				temporalReconciliation = { status: 'failed' }
+			}
+			return {
+				...result,
+				fleetPackageErrorRate,
+				runLogSnapshot,
+				temporalReconciliation,
+			}
 		}
 		case 'compute_overage_billing':
 			return runComputeOverageBilling({

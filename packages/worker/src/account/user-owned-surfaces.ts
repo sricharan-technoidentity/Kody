@@ -1,6 +1,5 @@
 export type UserOwnedDurableObjectSurface = {
 	id:
-		| 'job_manager'
 		| 'storage_runner'
 		| 'repo_session'
 		| 'mcp_client_hub'
@@ -51,6 +50,7 @@ export type UserOwnedKvKeyScheme = {
 		| 'package_retriever_index_entry'
 		| 'package_retriever_index_prefix'
 		| 'webhook_dispatch_payload'
+		| 'temporal_stripe_plan_refresh_coordinator'
 	binding: 'BUNDLE_ARTIFACTS_KV'
 	sourceTable?: string
 	sourceColumn?: string
@@ -83,14 +83,6 @@ export type UserOwnedArtifactSurface = {
 
 export const accountUserOwnedDurableObjectSurfaces: ReadonlyArray<UserOwnedDurableObjectSurface> =
 	[
-		{
-			id: 'job_manager',
-			binding: 'JOBS',
-			deletionResultKey: 'jobManagers',
-			export: 'include',
-			notes:
-				'Job manager state lives in the jobs worker (ADR 0016) and is reached through the JOBS service binding; it is included in account export.',
-		},
 		{
 			id: 'storage_runner',
 			binding: 'STORAGE_RUNNER',
@@ -127,7 +119,7 @@ export const accountUserOwnedDurableObjectSurfaces: ReadonlyArray<UserOwnedDurab
 			deletionResultKey: 'runLogs',
 			export: 'include',
 			notes:
-				'Per-user RunLog DO (RUN_LOG binding; idFromName(userId)). Sole runtime authority for pruned run history (runs + run_logs), the keyed package-invocation idempotency ledger, and dedicated state: workflow_projections (binding_name, typically DYNAMIC_CALLABLE_WORKFLOWS; terminal rows age-prune after 90 days), job_run_observability (terminal outcomes/counters; D1 jobs keeps schedule + last_run_at/last_run_status for retention only), package_run_successes, and activation_milestones. There are no D1 tables workflow_runs, user_package_run_successes, or user_activation_milestones (pre-drop Time Travel bookmark 0000116d-000000d2-000050bd-c7ecd5892a189df7cda145af746bc9c9 on database 8c1014d1-6b41-4695-a0a2-159071f0f919). Run history self-prunes (~30 days / 2,000 runs); job/activation dedicated tables are never pruned. Account deletion clearAll deletes every DO table and reinitializes schema. Account export pages all tables through the run_records section (runs first, then ledger, then dedicated phases).',
+				'Per-user RunLog DO (RUN_LOG binding; idFromName(userId)). Sole runtime authority for pruned run history (runs + run_logs), the keyed package-invocation idempotency ledger, and dedicated state: Temporal workflow_projections (terminal rows age-prune after 90 days), job_run_observability (terminal outcomes/counters; D1 jobs keeps schedule + last_run_at/last_run_status for retention only), package_run_successes, and activation_milestones. There are no D1 tables workflow_runs, user_package_run_successes, or user_activation_milestones (pre-drop Time Travel bookmark 0000116d-000000d2-000050bd-c7ecd5892a189df7cda145af746bc9c9 on database 8c1014d1-6b41-4695-a0a2-159071f0f919). Run history self-prunes (~30 days / 2,000 runs); job/activation dedicated tables are never pruned. Account deletion clearAll deletes every DO table and reinitializes schema. Account export pages all tables through the run_records section (runs first, then ledger, then dedicated phases).',
 		},
 		{
 			id: 'user_meter',
@@ -136,16 +128,6 @@ export const accountUserOwnedDurableObjectSurfaces: ReadonlyArray<UserOwnedDurab
 			export: 'include',
 			notes:
 				'Per-user daily entitlement counters, storage-byte state, deletion-fence/write-lease state, and inbound MCP OAuth last-used stamps (one DO per stable userId). Daily counters and storage bytes are authoritative in UserMeter; users has no d1_storage_bytes mirror columns, and the reconcile lane sweeps users by stable_user_id keyset from the platform-owned d1_storage_reconcile_cursor row. UserMeter is the sole lease authority: all callers (including email paths) supply USER_METER via env; acquireWriteLease writes to the DO only and countActiveWriteLeases is a direct DO COUNT (no paging). There is no D1 account_write_leases table; D1 users.deleting_at remains the permanent point gate and account_write_lease_repairs remains the admin repair audit log. inbound_mcp_connection_last_used is keyed by inbound OAuth clientId and updated from successful /mcp bearer validation (5-minute debounce); Account → Connections joins it as last-used, and revoke deletes the row. Self-prunes stale UTC-day rows inside the DO rather than through a retention cron lane; account deletion purge clears counters, storage-byte state, write leases, and inbound last-used while preserving an existing deleting tombstone during cleanup, then origin drops that tombstone after the D1 user row is deleted so the email-derived stable_user_id can be reused; account export pages counters through the user_meter section via exportCounters and includes authoritative storageBytesState, sanitized deletionState without raw lease token/holder, and inboundConnectionLastUsed on the first page only.',
-		},
-		{
-			id: 'stripe_plan_refresh',
-			binding: 'STRIPE_PLAN_REFRESH',
-			deletionResultKey: 'stripePlanRefreshes',
-			export: 'exclude',
-			excludeReason:
-				'Ephemeral one-shot Stripe reconciliation alarm state. Billing columns remain canonical in D1 and are included in the users export.',
-			notes:
-				'One alarm object per stable userId. Account deletion cancels the alarm and clears its stored owner id.',
 		},
 		{
 			id: 'mailbox',
@@ -260,6 +242,14 @@ export const accountUserOwnedKvKeySchemes: ReadonlyArray<UserOwnedKvKeyScheme> =
 			notes: 'Deleted by deleteAllPackageRetrieverCacheEntriesForUser.',
 		},
 		{
+			id: 'temporal_stripe_plan_refresh_coordinator',
+			binding: 'BUNDLE_ARTIFACTS_KV',
+			prefixTemplate:
+				'temporal-coordinator:v1:stripe-plan-refresh:{temporalUserHash}',
+			notes:
+				'Owner mapping for the opaque Temporal StripePlanRefresh coordinator reference. Excluded from export as ephemeral orchestration metadata; account deletion removes the exact derived key.',
+		},
+		{
 			id: 'webhook_dispatch_payload',
 			binding: 'BUNDLE_ARTIFACTS_KV',
 			prefixTemplate: 'webhook-dispatch-payload:v1:{userId}:',
@@ -331,15 +321,11 @@ export const accountUserOwnedArtifactSurfaces: ReadonlyArray<UserOwnedArtifactSu
 	] as const
 
 const accountExportExcludedDurableObjectDisplayNames: Readonly<
-	Record<
-		'mcp' | 'repo_session' | 'package_realtime_session' | 'stripe_plan_refresh',
-		string
-	>
+	Record<'mcp' | 'repo_session' | 'package_realtime_session', string>
 > = {
 	mcp: 'MCP',
 	repo_session: 'RepoSession',
 	package_realtime_session: 'PackageRealtimeSession',
-	stripe_plan_refresh: 'StripePlanRefresh',
 } as const
 
 export function getAccountExportExcludedDurableObjects(): Array<{
@@ -347,12 +333,7 @@ export function getAccountExportExcludedDurableObjects(): Array<{
 	reason: string
 }> {
 	return (
-		[
-			'mcp',
-			'repo_session',
-			'package_realtime_session',
-			'stripe_plan_refresh',
-		] satisfies Array<
+		['mcp', 'repo_session', 'package_realtime_session'] satisfies Array<
 			keyof typeof accountExportExcludedDurableObjectDisplayNames
 		>
 	).map((id) => {

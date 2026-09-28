@@ -1,7 +1,7 @@
 {
 	"$schema": "../../node_modules/wrangler/config-schema.json",
-	// Jobs worker (ADR 0016): owns the JobManager Durable Object, the
-	// scheduled/cron dispatch lane, the scheduled dispatch queue, and the
+	// Jobs worker (ADR 0016): owns the jobs database, Temporal schedule sync,
+	// the scheduled/cron dispatch lane, the scheduled dispatch queue, and the
 	// dedicated jobs D1 database (`jobs` + `archived_job_artifacts`). Job
 	// execution and the platform scheduled lanes stay in the main worker and
 	// are reached through the HOST service binding (`JobsHost` entrypoint);
@@ -47,14 +47,6 @@
 	],
 	"env": {
 		"production": {
-			"durable_objects": {
-				"bindings": [
-					{
-						"class_name": "JobManager",
-						"name": "JOB_MANAGER",
-					},
-				],
-			},
 			"d1_databases": [
 				{
 					"binding": "JOBS_DB",
@@ -98,14 +90,6 @@
 			},
 		},
 		"preview": {
-			"durable_objects": {
-				"bindings": [
-					{
-						"class_name": "JobManager",
-						"name": "JOB_MANAGER",
-					},
-				],
-			},
 			"d1_databases": [
 				{
 					"binding": "JOBS_DB",
@@ -131,25 +115,6 @@
 			},
 		},
 		"test": {
-			// Local test workers are fresh scripts: they cannot run the
-			// production script-transfer migration (from_script
-			// "kody-production"), so the
-			// class is created fresh here (matching the generated preview
-			// config in tools/ci/jobs-worker-resources.ts).
-			"migrations": [
-				{
-					"tag": "v1",
-					"new_sqlite_classes": ["JobManager"],
-				},
-			],
-			"durable_objects": {
-				"bindings": [
-					{
-						"class_name": "JobManager",
-						"name": "JOB_MANAGER",
-					},
-				],
-			},
 			"d1_databases": [
 				{
 					"binding": "JOBS_DB",

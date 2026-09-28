@@ -952,8 +952,8 @@ plan-retaining subscription (or no customer at all) get a Checkout Session
 (prorated)", and `loadAccountBillingData` reports `stripeInterval` (from the
 configured monthly/yearly price ids) so the current tier can offer the other
 interval. The `?billing=updated` page view runs the usual on-view refresh and
-arms the `StripePlanRefresh` backstop; `customer.subscription.updated` webhooks
-refresh the plan independently.
+signals the Temporal Stripe plan refresh backstop;
+`customer.subscription.updated` webhooks refresh the plan independently.
 
 ### Account deletion refunds
 
@@ -1034,7 +1034,7 @@ inserting so Stripe can retry. Rows older than 30 days are pruned by retention.
 
 Billing refresh is activity-driven; there is no global hourly customer scan.
 Checkout completion and subscription/invoice webhooks refresh immediately and
-also arm the owning user's one-shot `StripePlanRefresh` Durable Object alarm for
+also signal an owning-user, coalescing Temporal Workflow refresh backstop for
 one hour later. That independent retry closes over transient Stripe failures
 without repeatedly enumerating inactive users. `/account/billing` arms the same
 backstop and still refreshes on every view so non-persisted `cancel_at` /
@@ -1043,8 +1043,8 @@ immediate refresh remains an error so the caller or Stripe webhook retries
 instead of acknowledging an unrecoverable stale projection. The
 `stripe_customer_id` (unique partial index), `stripe_plan`, and
 `stripe_plan_refreshed_at` columns ship in the squashed baseline;
-`stripe_price_id` ships in `0044-users-stripe-price-id.sql`. The alarm DO class
-exists without moving canonical billing data out of D1.
+`stripe_price_id` ships in `0044-users-stripe-price-id.sql`. Canonical billing
+data remains in D1; Temporal owns only coordination.
 
 Published prices: Free $0, Standard $12/mo or $120/year ($10/mo billed
 annually), Pro $49/mo or $480/year ($40/mo billed annually). Env vars and deploy

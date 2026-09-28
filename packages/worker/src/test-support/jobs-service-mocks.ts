@@ -12,11 +12,6 @@ export const repoMockModule = {
 	cleanupSessionBranch: vi.fn(async () => ({ ok: true })),
 }
 
-export const jobManagerMockModule = {
-	syncJobManagerAlarm: vi.fn(),
-	getJobManagerDebugState: vi.fn(),
-}
-
 export const storageRunnerMockModule = {
 	clearStorage: vi.fn(async () => ({ ok: true as const })),
 	getEstimatedBytes: vi.fn(async () => ({ estimatedBytes: 0 })),
@@ -67,15 +62,6 @@ export function repoSessionDoMock() {
 			cleanupSessionBranch: (...args: Array<unknown>) =>
 				repoMockModule.cleanupSessionBranch(...args),
 		}),
-	}
-}
-
-export function managerClientMock() {
-	return {
-		syncJobManagerAlarm: (...args: Array<unknown>) =>
-			jobManagerMockModule.syncJobManagerAlarm(...args),
-		getJobManagerDebugState: (...args: Array<unknown>) =>
-			jobManagerMockModule.getJobManagerDebugState(...args),
 	}
 }
 
@@ -141,17 +127,6 @@ export function resetJobServiceMocks() {
 	repoMockModule.deleteRepoSessionsBySourceForUser.mockResolvedValue(0)
 	repoMockModule.cleanupSessionBranch.mockClear()
 	repoMockModule.cleanupSessionBranch.mockResolvedValue({ ok: true })
-	jobManagerMockModule.syncJobManagerAlarm.mockClear()
-	jobManagerMockModule.getJobManagerDebugState.mockReset()
-	jobManagerMockModule.getJobManagerDebugState.mockResolvedValue({
-		bindingAvailable: false,
-		status: 'missing_binding',
-		storedUserId: null,
-		alarmScheduledFor: null,
-		nextRunnableJobId: null,
-		nextRunnableRunAt: null,
-		alarmInSync: null,
-	})
 	storageRunnerMockModule.clearStorage.mockClear()
 	storageRunnerMockModule.clearStorage.mockResolvedValue({ ok: true })
 	storageRunnerMockModule.getEstimatedBytes.mockClear()

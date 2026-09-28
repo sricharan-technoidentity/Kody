@@ -6,7 +6,6 @@ import {
 import { StorageRunner } from './storage-runner.ts'
 import { RunLog } from './run-records/run-log-do.ts'
 import { PackageRealtimeSession } from '#worker/package-runtime/realtime-session.ts'
-import { DynamicCallableWorkflow } from '#worker/package-runtime/package-workflows.ts'
 import { PackageAppRuntimeBridge } from '#worker/package-runtime/package-app.ts'
 import { KodyFetchGateway } from '#mcp/fetch-gateway.ts'
 import { getWorkerSentryOptions } from './sentry-options.ts'
@@ -28,8 +27,8 @@ import { runWithDynamicWorkerEvaluationBudget } from '#worker/dynamic-worker-eva
  *
  * Owns the untrusted-code execution lane extracted from the main `kody`
  * Worker per ADR 0016: the package-app origin (`PACKAGE_APP_BASE_URL`),
- * inline package-app serving, the package invocation API, dynamic callable
- * workflows, and the runtime Durable Objects exported below. The main Worker
+ * inline package-app serving, the package invocation API, and the runtime
+ * Durable Objects exported below. Temporal owns durable workflow orchestration.
  * forwards runtime-owned requests here over the `RUNTIME_WORKER` service
  * binding (see `runtime-worker-routing.ts` and
  * `@kody-internal/shared/runtime-worker.ts`).
@@ -43,7 +42,6 @@ export {
 	StorageRunner,
 	RunLog,
 	PackageRealtimeSession,
-	DynamicCallableWorkflow,
 	PackageAppRuntimeBridge,
 	KodyFetchGateway,
 }

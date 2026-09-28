@@ -267,6 +267,10 @@
 		{
 			"filename": "0066-users-first-activation-stamps.sql",
 			"sha256": "21d202ce5e1bd4f2db70f9e148710df1dd7d5ad5eedf2b427948e5bc6fe552d5"
+		},
+		{
+			"filename": "0067-temporal-gateway-nonces.sql",
+			"sha256": "0c677dbc8bebd12db2498beaac7747020b283177be1440300ce0d829e700033e"
 		}
 	]
 }

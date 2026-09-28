@@ -69,6 +69,11 @@ import { handleOidcLogoutRequest } from '#worker/oidc/logout.ts'
 import { enrichOAuthTokenResponse } from '#worker/oidc/token-enrichment.ts'
 import { handleMcpOAuthTokenRequest } from '#worker/oauth-refresh-family.ts'
 import { runWithDynamicWorkerEvaluationBudget } from '#worker/dynamic-worker-evaluation-budget.ts'
+import {
+	handleTemporalActivityRequest,
+	isTemporalActivityRequest,
+} from '#worker/temporal/activity-gateway.ts'
+import { handleTemporalFoundationSmokeRequest } from '#worker/temporal/maintenance.ts'
 
 // Immutable caching is only safe when asset URLs are versioned by a real
 // commit sha. In local dev the build id falls back to a constant ('dev'), so
@@ -168,6 +173,9 @@ const appHandler = withCors({
 	},
 	async handler(request, env, ctx) {
 		const url = new URL(request.url)
+		if (isTemporalActivityRequest(url.pathname)) {
+			return handleTemporalActivityRequest(request, env, undefined, ctx)
+		}
 
 		if (request.method === 'POST' && rateLimitedAuthPaths.has(url.pathname)) {
 			const ip = getRequestIp(request) ?? 'unknown'
@@ -244,6 +252,10 @@ const appHandler = withCors({
 			// Origin-only: proves this script's ctx.exports.KodyFetchGateway.
 			// MCP execute looks up the gateway on kody-platform.
 			return handleExecuteSmokeRequest(request, env)
+		}
+
+		if (url.pathname === '/__maintenance/temporal-foundation-smoke') {
+			return handleTemporalFoundationSmokeRequest(request, env)
 		}
 
 		if (url.pathname === executeHealthMaintenancePath) {

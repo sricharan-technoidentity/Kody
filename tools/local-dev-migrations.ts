@@ -12,8 +12,12 @@ type JsonRecord = Record<string, unknown>
  * elided: creating them only to delete them trips the same check when the
  * script no longer exports the class.
  */
-export function localizeMigrations(migrations: unknown): unknown {
+export function localizeMigrations(
+	migrations: unknown,
+	options: { excludedClasses?: ReadonlyArray<string> } = {},
+): unknown {
 	if (!Array.isArray(migrations)) return migrations
+	const excluded = new Set(options.excludedClasses ?? [])
 
 	const converted = migrations.map((migration) => {
 		if (!migration || typeof migration !== 'object') return migration
@@ -52,23 +56,25 @@ export function localizeMigrations(migrations: unknown): unknown {
 			continue
 		}
 		const record = { ...(migration as JsonRecord) }
-		stripDeletedClasses(record, 'new_sqlite_classes', deleted)
-		stripDeletedClasses(record, 'deleted_classes', deleted)
+		stripClasses(record, 'new_sqlite_classes', deleted, excluded)
+		stripClasses(record, 'deleted_classes', deleted, excluded)
 		if (!migrationHasOps(record)) continue
 		localized.push(record)
 	}
 	return localized
 }
 
-function stripDeletedClasses(
+function stripClasses(
 	record: JsonRecord,
 	key: 'new_sqlite_classes' | 'deleted_classes',
 	deleted: ReadonlySet<string>,
+	excluded: ReadonlySet<string>,
 ) {
 	const classes = record[key]
 	if (!Array.isArray(classes)) return
 	const kept = classes.filter(
-		(name) => typeof name !== 'string' || !deleted.has(name),
+		(name) =>
+			typeof name !== 'string' || (!deleted.has(name) && !excluded.has(name)),
 	)
 	if (kept.length === 0) delete record[key]
 	else record[key] = kept

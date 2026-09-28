@@ -39,11 +39,6 @@ vi.mock('#worker/repo/repo-session-do.ts', async () =>
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionDoMock(),
 )
-vi.mock('./manager-client.ts', async () =>
-	(
-		await import('#worker/test-support/jobs-service-mocks.ts')
-	).managerClientMock(),
-)
 vi.mock('#worker/identity/background-mcp-user.ts', async () =>
 	(
 		await import('#worker/test-support/jobs-service-mocks.ts')

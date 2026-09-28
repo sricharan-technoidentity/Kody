@@ -90,3 +90,23 @@ Prerequisites, install, and `npm run dev` notes. See the
   tab sees the edit on the next reload instead of a stored page.
 - Set `CLOUDFLARE_ENV` to switch Wrangler environments (defaults to
   `production`). Playwright sets this to `test`.
+
+## Temporal-backed jobs and workflows
+
+`npm run dev` starts the Cloudflare worker graph, but it does not start a
+Temporal server, the Node Temporal worker, or the signed control-plane gateway.
+Ordinary browsing, login, MCP, and package development do not require those
+processes. Scheduled-job reconciliation, `workflows.create`, and the Stripe plan
+refresh backstop require the complete local Temporal path.
+
+Start the local Temporal server, worker, Worker Deployment routing helper, and
+gateway in separate terminals as documented in
+[Temporal foundation](../architecture/temporal-foundation.md#local-development).
+The worker reads `packages/temporal-worker/.env`; the gateway reads
+`packages/temporal-gateway/.env`; Cloudflare-facing values remain in
+`packages/worker/.env`. Use distinct signing key sets for the two HTTPS
+directions.
+
+On Windows, select Node 26 before starting each long-running process and open a
+new terminal if NVM changed the active installation. Confirm with
+`node --version` before starting the worker or gateway.

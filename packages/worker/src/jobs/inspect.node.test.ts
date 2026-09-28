@@ -22,7 +22,6 @@ test('job list/get capabilities statically import slim inspect off the execution
 			expect.stringMatching(/entitlements\/service/),
 		]),
 	)
-	expect(inspectSpecs).toContain('./manager-client.ts')
 	expect(inspectSpecs).toContain('./jobs-data.ts')
 	expect(inspectSpecs).toContain('./job-run-observability-hydrate.ts')
 

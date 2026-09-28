@@ -330,8 +330,9 @@ committed Wrangler vars (same change as the Stripe catalog edit).
 
 Recovery: Stripe account login. Customers and subscriptions live in Stripe;
 `users.stripe_customer_id` / `users.stripe_plan` in D1 are a projection
-refreshed by webhooks and `StripePlanRefresh`. Losing `STRIPE_WEBHOOK_SECRET`
-returns 503 from `/webhooks/stripe` until it is replaced.
+refreshed by webhooks and the Temporal Stripe plan refresh coordinator. Losing
+`STRIPE_WEBHOOK_SECRET` returns 503 from `/webhooks/stripe` until it is
+replaced.
 
 `Password manager: Stripe webhook endpoint id; entry for STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET.`
 

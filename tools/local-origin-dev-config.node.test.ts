@@ -64,6 +64,12 @@ test('writes local-dev vars onto the selected env without dropping committed var
 			JSON.stringify({
 				name: 'kody',
 				main: './src/index.ts',
+				migrations: [
+					{
+						tag: 'v1',
+						new_sqlite_classes: ['Mailbox', 'StripePlanRefresh'],
+					},
+				],
 				env: {
 					production: {
 						vars: { SENTRY_ENVIRONMENT: 'production' },
@@ -82,8 +88,10 @@ test('writes local-dev vars onto the selected env without dropping committed var
 		expect(path.basename(outputPath)).toBe('wrangler-local-dev.generated.json')
 		const written = JSON.parse(await readFile(outputPath, 'utf8')) as {
 			vars: Record<string, string>
+			migrations: Array<{ new_sqlite_classes: Array<string> }>
 			env: { production: { vars: Record<string, string> } }
 		}
+		expect(written.migrations[0]?.new_sqlite_classes).toEqual(['Mailbox'])
 		expect(written.env.production.vars).toEqual({
 			SENTRY_ENVIRONMENT: 'production',
 			WRANGLER_IS_LOCAL_DEV: 'true',

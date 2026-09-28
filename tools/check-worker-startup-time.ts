@@ -6,7 +6,11 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { ensureGuideCatalogModules } from './build-guide-catalog-modules.ts'
 import { ensureWorkerBundlerModules } from './build-worker-bundler-modules.ts'
-import { isExecutedDirectly, resolveLocalBinary } from './node-runtime.ts'
+import {
+	type CommandInvocation,
+	isExecutedDirectly,
+	resolveWranglerInvocation,
+} from './node-runtime.ts'
 import { writeRuntimeStartupCheckConfig } from './local-runtime-dev-config.ts'
 import { buildOriginProductionViteBundle } from './origin-vite-startup-build.ts'
 
@@ -143,7 +147,7 @@ export async function readStartupBudget(
 async function profileStartupOnce(
 	target: StartupTimeTarget,
 	outputRoot: string,
-	wranglerBinary: string,
+	wrangler: CommandInvocation,
 	run: number,
 ): Promise<StartupProfileSummary> {
 	const outfile = path.join(
@@ -151,8 +155,15 @@ async function profileStartupOnce(
 		`${target.name}-${String(run)}.cpuprofile`,
 	)
 	const { stdout, stderr } = await execFileAsync(
-		wranglerBinary,
-		['check', 'startup', '--outfile', outfile, ...target.args],
+		wrangler.command,
+		[
+			...wrangler.argsPrefix,
+			'check',
+			'startup',
+			'--outfile',
+			outfile,
+			...target.args,
+		],
 		{
 			cwd: resolveStartupTimeCwd(target.packageDir),
 			env: { ...process.env, WRANGLER_SEND_METRICS: 'false' },
@@ -201,7 +212,7 @@ export async function checkWorkerStartupTime() {
 	await Promise.all([ensureWorkerBundlerModules(), ensureGuideCatalogModules()])
 	const budget = await readStartupBudget()
 	const outputRoot = await mkdtemp(path.join(tmpdir(), 'kody-startup-time-'))
-	const wranglerBinary = resolveLocalBinary('wrangler')
+	const wrangler = resolveWranglerInvocation(repoRoot)
 	const results: Array<StartupTimeResult> = []
 	try {
 		const originBuild = await buildOriginProductionViteBundle(
@@ -217,12 +228,7 @@ export async function checkWorkerStartupTime() {
 			const samples: Array<StartupProfileSummary> = []
 			for (let run = 0; run < budget.runs; run++) {
 				samples.push(
-					await profileStartupOnce(
-						resolvedTarget,
-						outputRoot,
-						wranglerBinary,
-						run,
-					),
+					await profileStartupOnce(resolvedTarget, outputRoot, wrangler, run),
 				)
 			}
 			results.push({

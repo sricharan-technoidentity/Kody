@@ -13,9 +13,9 @@ const d1CheckRetryOptions = {
 } as const
 const noStoreHeaders = { 'Cache-Control': 'no-store' } as const
 
-export type JobsHealthComponentId = 'jobs_db'
+type JobsHealthComponentId = 'jobs_db'
 
-export type JobsHealthComponentResult = {
+type JobsHealthComponentResult = {
 	id: JobsHealthComponentId
 	ok: boolean
 	latencyMs: number
@@ -27,11 +27,60 @@ export type JobsHealthComponentsReport = {
 	commit: string | null
 	checkedAt: string
 	components: Array<JobsHealthComponentResult>
+	temporalScheduleSync?: TemporalScheduleDiagnostics
+}
+
+type TemporalScheduleDiagnostics = {
+	bindings: number
+	pendingOperations: number
+	drifted: number
+	errors: number
+	actionsDetected: number
+	temporalBackends: number
+	activeTemporalClaims: number
 }
 
 type JobsHealthEnv = {
 	JOBS_DB?: D1Database
 	APP_COMMIT_SHA?: string
+}
+
+async function collectTemporalScheduleDiagnostics(
+	db: D1Database,
+): Promise<TemporalScheduleDiagnostics> {
+	const row = await db
+		.prepare(
+			`SELECT
+				(SELECT COUNT(*) FROM job_schedule_bindings) AS bindings,
+				(SELECT COUNT(*) FROM job_schedule_outbox WHERE state != 'applied') AS pending_operations,
+				(SELECT COUNT(*) FROM job_schedule_bindings WHERE state = 'drifted') AS drifted,
+				(SELECT COUNT(*) FROM job_schedule_bindings WHERE state = 'error') AS errors,
+				(SELECT COUNT(*) FROM job_schedule_bindings WHERE last_error LIKE '%actions_taken%') AS actions_detected,
+				(SELECT COUNT(*) FROM job_schedule_bindings WHERE backend = 'temporal') AS temporal_backends,
+				(SELECT COUNT(*) FROM jobs
+					JOIN job_schedule_bindings AS binding
+						ON binding.job_id = jobs.id AND binding.user_id = jobs.user_id
+					WHERE binding.backend = 'temporal' AND jobs.claim_token IS NOT NULL
+						AND jobs.lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) AS active_temporal_claims`,
+		)
+		.first<{
+			bindings: number
+			pending_operations: number
+			drifted: number
+			errors: number
+			actions_detected: number
+			temporal_backends: number
+			active_temporal_claims: number
+		}>()
+	return {
+		bindings: Number(row?.bindings ?? 0),
+		pendingOperations: Number(row?.pending_operations ?? 0),
+		drifted: Number(row?.drifted ?? 0),
+		errors: Number(row?.errors ?? 0),
+		actionsDetected: Number(row?.actions_detected ?? 0),
+		temporalBackends: Number(row?.temporal_backends ?? 0),
+		activeTemporalClaims: Number(row?.active_temporal_claims ?? 0),
+	}
 }
 
 async function checkJobsDb(
@@ -84,11 +133,16 @@ export async function collectJobsHealthComponents(
 	env: JobsHealthEnv,
 ): Promise<JobsHealthComponentsReport> {
 	const jobsDb = await checkJobsDb(env.JOBS_DB)
+	const temporalScheduleSync =
+		jobsDb.ok && env.JOBS_DB
+			? await collectTemporalScheduleDiagnostics(env.JOBS_DB)
+			: undefined
 	return {
 		ok: jobsDb.ok,
 		commit: env.APP_COMMIT_SHA ?? null,
 		checkedAt: new Date().toISOString(),
 		components: [jobsDb],
+		...(temporalScheduleSync ? { temporalScheduleSync } : {}),
 	}
 }
 

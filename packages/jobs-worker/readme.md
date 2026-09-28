@@ -2,8 +2,8 @@
 
 The jobs and scheduled lane extracted from the origin `kody` Worker per
 [ADR 0016](../../docs/contributing/decisions/0016-mono-worker-extraction.md):
-`JobManager`, the dedicated `JOBS_DB` D1 database, the five-minute cron trigger,
-and the `kody-scheduled-dispatch` queue.
+the dedicated `JOBS_DB` D1 database, Temporal Schedule synchronization, the
+five-minute cron trigger, and the `kody-scheduled-dispatch` queue.
 
 The Worker entry module is
 [`packages/jobs-worker/src/index.ts`](./src/index.ts). Cron and queue dispatch
@@ -16,5 +16,18 @@ workflow records.
   [`tools/ci/jobs-worker-resources.ts`](../../tools/ci/jobs-worker-resources.ts).
 - Build check: `npm run jobs:build` (part of `npm run validate`).
 - Deploys/previews: see `.github/workflows/deploy.yml` and `preview.yml`.
-- Production Durable Object and `JOBS_DB` ownership: see the
+- Historical Durable Object transfer and current `JOBS_DB` ownership: see the
   [migration runbook](../../docs/contributing/architecture/jobs-worker-migration-runbook.md).
+
+## Temporal schedules
+
+Job mutations write a transactional schedule outbox beside `jobs`. The
+`temporal_schedule_sync` lane runs every five minutes and applies those changes
+to the configured Temporal service through the signed gateway. The checked-in
+implementation uses a local Temporal development server; production service
+selection and deployment are outside this change. The lane requires
+`TEMPORAL_GATEWAY_URL` and `TEMPORAL_GATEWAY_SIGNING_KEYS`.
+
+`job_schedule_bindings` and `job_schedule_outbox` are the permanent,
+transactional handoff between authoritative `JOBS_DB.jobs` mutations and
+Temporal Schedules. They are not a shadow scheduler or fallback lane.

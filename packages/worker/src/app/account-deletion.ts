@@ -24,7 +24,7 @@ import {
 import { auditDatabaseFromEnv, logAuditEvent } from '#worker/audit-log.ts'
 import { purgeStripePlanRefreshForUser } from '#worker/billing/stripe-plan-refresh-client.ts'
 import { storageRunnerRpc } from '#worker/storage-runner.ts'
-import { purgeJobManagerForUser } from '#worker/jobs/manager-client.ts'
+import { purgeJobsForUser } from '#worker/jobs/client.ts'
 import { jobsService } from '#worker/jobs/jobs-data.ts'
 import { jobVectorId } from '#mcp/jobs-vectorize.ts'
 import { memoryVectorId } from '#mcp/memory/memory-vectorize.ts'
@@ -1029,7 +1029,7 @@ async function purgeStripePlanRefresh(input: {
 		})
 		if (!result.purged) {
 			input.warnings.push(
-				'STRIPE_PLAN_REFRESH binding was unavailable; the user Stripe refresh alarm was not purged.',
+				'Temporal Stripe plan refresh coordinator was not purged.',
 			)
 		}
 		return result.purged ? 1 : 0
@@ -1057,25 +1057,25 @@ async function purgeMailbox(input: {
 	}
 }
 
-async function purgeJobManager(input: {
+async function purgeJobs(input: {
 	env: Env
 	userId: string
 	warnings: Array<string>
 }): Promise<number> {
 	try {
-		const result = await purgeJobManagerForUser({
+		const result = await purgeJobsForUser({
 			env: input.env,
 			userId: input.userId,
 		})
 		if (!result.purged) {
 			input.warnings.push(
-				'JOBS service binding was unavailable; the user scheduler Durable Object was not purged.',
+				'JOBS service binding was unavailable; the user jobs and Temporal schedules were not purged.',
 			)
 		}
 		return result.purged ? 1 : 0
 	} catch (error) {
 		const message = getErrorMessage(error)
-		input.warnings.push(`Job manager purge failed: ${message}`)
+		input.warnings.push(`Jobs purge failed: ${message}`)
 		return 0
 	}
 }
@@ -1764,7 +1764,7 @@ export async function deleteUserAccount(input: {
 	// join the atomic APP_DB deletion below. Purge it fail-closed here, after
 	// every best-effort cleanup succeeded; a failure aborts before the user row
 	// is removed so a retry can purge again (purgeUser is idempotent).
-	result.clearedDurableObjects.jobManagers = await purgeJobManager({
+	result.clearedDurableObjects.jobs = await purgeJobs({
 		env: input.env,
 		userId: input.mcpUserId,
 		warnings,

@@ -459,6 +459,24 @@ primitives:
     docs:
       - docs/contributing/architecture/data-storage.md
 
+  - id: temporal-orchestration
+    group: runtime
+    name: Temporal orchestration
+    summary:
+      Durable control plane for job occurrences, package workflows, and
+      selectively migrated coordinators such as Stripe plan refresh. Temporal
+      owns orchestration history while Cloudflare remains the storage, realtime,
+      edge, and untrusted-code execution boundary.
+    code:
+      - packages/temporal-worker/
+      - packages/temporal-gateway/
+      - packages/shared/src/temporal/
+      - packages/worker/src/temporal/
+    docs:
+      - docs/contributing/decisions/0051-temporal-orchestration-boundary.md
+      - docs/contributing/architecture/temporal-migration-plan.md
+      - docs/contributing/architecture/temporal-foundation.md
+
   - id: repo-sessions
     group: runtime
     name: Repo sessions

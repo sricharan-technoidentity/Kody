@@ -28,7 +28,6 @@ const mockModule = vi.hoisted(() => ({
 	loadPackageManifestBySourceId: vi.fn(),
 	loadPackageSourceBySourceId: vi.fn(),
 	loadPackageSourceFromFiles: vi.fn(),
-	syncJobManagerAlarm: vi.fn(),
 	syncPackageJobsForPackage: vi.fn(),
 	updateSavedPackage: vi.fn(),
 	upsertSavedPackageVector: vi.fn(),
@@ -135,11 +134,6 @@ vi.mock('#worker/jobs/jobs-data.ts', () => ({
 	}),
 }))
 
-vi.mock('#worker/jobs/manager-client.ts', () => ({
-	syncJobManagerAlarm: (...args: Array<unknown>) =>
-		mockModule.syncJobManagerAlarm(...args),
-}))
-
 vi.mock('#worker/jobs/service.ts', () => ({
 	syncPackageJobsForPackage: (...args: Array<unknown>) =>
 		mockModule.syncPackageJobsForPackage(...args),
@@ -222,7 +216,6 @@ function setupDefaultMocks() {
 	mockModule.scheduleSavedPackageSearchIndexUpsert.mockResolvedValue(undefined)
 	mockModule.buildPublishedPackageArtifacts.mockResolvedValue(undefined)
 	mockModule.syncPackageJobsForPackage.mockResolvedValue(false)
-	mockModule.syncJobManagerAlarm.mockResolvedValue(undefined)
 	mockModule.refreshPackageRetrieverManifestCache.mockResolvedValue(undefined)
 	mockModule.removePackageRetrieverManifestCacheEntries.mockResolvedValue(
 		undefined,
@@ -358,7 +351,7 @@ test('refreshSavedPackageProjection uses caller-supplied source files instead of
 	expect(mockModule.buildPublishedPackageArtifacts).toHaveBeenCalled()
 })
 
-test('refreshSavedPackageProjection syncs the job manager only when package jobs change', async () => {
+test('refreshSavedPackageProjection synchronizes package jobs before rebuilding artifacts', async () => {
 	setupDefaultMocks()
 	mockModule.syncPackageJobsForPackage.mockResolvedValue(true)
 	const env = createEnv()
@@ -456,20 +449,10 @@ test('refreshSavedPackageProjection syncs the job manager only when package jobs
 		/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
 	)
 	expect(savedPackageArg?.updatedAt).not.toBe('2026-04-20T00:00:00.000Z')
-	expect(mockModule.syncJobManagerAlarm).toHaveBeenCalledWith({
-		env,
-		userId: 'user-1',
-	})
 	expect(mockModule.getSavedPackageById).toHaveBeenCalledTimes(1)
-	expect(
-		mockModule.syncJobManagerAlarm.mock.invocationCallOrder[0],
-	).toBeGreaterThan(
-		mockModule.syncPackageJobsForPackage.mock.invocationCallOrder[0],
-	)
 
 	setupDefaultMocks()
 	mockModule.syncPackageJobsForPackage.mockResolvedValue(false)
-	mockModule.syncJobManagerAlarm.mockClear()
 	const joblessManifest = {
 		name: '@kentcdodds/cloudflare',
 		kody: {
@@ -489,7 +472,6 @@ test('refreshSavedPackageProjection syncs the job manager only when package jobs
 		packageId: 'package-1',
 		sourceId: 'source-1',
 	})
-	expect(mockModule.syncJobManagerAlarm).not.toHaveBeenCalled()
 })
 
 test('refreshSavedPackageProjection omits files when artifact rebuild is skipped', async () => {
@@ -592,12 +574,11 @@ test('refreshSavedPackageProjection continues best-effort cleanup when dependent
 		sourceId: 'source-1',
 		manifest,
 	})
-	expect(mockModule.syncJobManagerAlarm).not.toHaveBeenCalled()
 	// The swallowed retriever-cache failure is still logged for operators.
 	expect(consoleError).toHaveBeenCalledTimes(1)
 })
 
-test('deleteSavedPackageProjection resyncs the job manager after removing package jobs', async () => {
+test('deleteSavedPackageProjection removes package jobs with the package', async () => {
 	setupDefaultMocks()
 	const env = createEnv()
 	mockModule.getSavedPackageById.mockResolvedValue({
@@ -670,13 +651,6 @@ test('deleteSavedPackageProjection resyncs the job manager after removing packag
 		env,
 		'package-1',
 	)
-	expect(mockModule.syncJobManagerAlarm).toHaveBeenCalledWith({
-		env,
-		userId: 'user-1',
-	})
-	expect(
-		mockModule.syncJobManagerAlarm.mock.invocationCallOrder[0],
-	).toBeGreaterThan(mockModule.deleteSavedPackage.mock.invocationCallOrder[0])
 	expect(mockModule.unpublishCommunityListing).not.toHaveBeenCalled()
 })
 
@@ -760,7 +734,6 @@ test('deleteSavedPackageProjection continues best-effort cleanup when dependent 
 		env,
 		'package-1',
 	)
-	expect(mockModule.syncJobManagerAlarm).not.toHaveBeenCalled()
 	// The swallowed entity source cleanup failure is still logged.
 	expect(consoleWarn).toHaveBeenCalledTimes(1)
 
@@ -783,7 +756,6 @@ test('deleteSavedPackageProjection continues best-effort cleanup when dependent 
 		env,
 		'package-1',
 	)
-	expect(mockModule.syncJobManagerAlarm).not.toHaveBeenCalled()
 })
 
 test('deleteSavedPackageProjection cleans secrets when package projection is missing', async () => {

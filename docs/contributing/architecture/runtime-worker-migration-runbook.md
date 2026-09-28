@@ -17,8 +17,8 @@ How the package runtime lane lives on the `kody-runtime` Worker
 | ------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | Package-app origin (`PACKAGE_APP_BASE_URL`, `kody.run`) zone routes | `kody-runtime`                                                              |
 | Inline package-app serving (`/apps/...` on the app origin)          | `kody-runtime` (forwarded by main via the `RUNTIME_WORKER` service binding) |
-| Package invocation API                                              | `kody-runtime` (forwarded by main)                                          |
-| `DynamicCallableWorkflow` (Cloudflare Workflow)                     | `kody-runtime` (main binds it cross-script)                                 |
+| Package invocation API and Cloudflare sandbox execution             | `kody-runtime` (forwarded by main)                                          |
+| Durable workflow orchestration                                      | Temporal worker and gateway; activity execution returns to Cloudflare       |
 | `StorageRunner`, `RunLog`, `PackageRealtimeSession`                 | `kody-runtime` (main binds them cross-script)                               |
 | Remaining platform Durable Objects (`UserMeter`, `MCP`, …)          | `kody-platform` (runtime binds them cross-script)                           |
 | `APP_DB` / `AUDIT_DB` / KV / R2 / queues / Vectorize / AI           | Shared resources; each worker binds directly (no RPC proxying)              |
@@ -47,9 +47,9 @@ deploy can publish" — that first publish already happened.
   never bootstraps: it uploads the slim entry after runtime and platform exist
   (see the
   [platform runbook](./platform-worker-migration-runbook.md#invariants)).
-- `DynamicCallableWorkflow` is a **new** Cloudflare Workflow on `kody-runtime`
-  (`kody-runtime-dynamic-callable-workflows`). Workflows cannot be transferred
-  between scripts. Do not try to move that workflow back onto origin.
+- The active runtime config has no Cloudflare Workflow binding. Package
+  workflows use the signed Temporal gateway and retain execution, results, and
+  logs inside the Cloudflare runtime boundary.
 - Cloudflare transfer rules that made the original move valid still apply to any
   future class move: the source script must still exist and still contain the
   migration history that created the class; the destination must export the `to`
@@ -64,10 +64,8 @@ Origin uploads use the same fail-closed classifier as the
 [platform runbook](./platform-worker-migration-runbook.md#later-deploys): a
 fresh origin script (or an origin that still owns the classes while this worker
 owns none) bootstraps with the full entry before this worker's
-`transferred_classes` tag runs; the bootstrap workflow uses a distinct name so
-it does not collide with `kody-runtime-dynamic-callable-workflows`. Steady-state
-origin uploads the slim entry and skip that bootstrap. Ambiguous Cloudflare
-state keeps the full entry and does not force a transfer.
+`transferred_classes` tag runs. Steady-state origin uploads the slim entry.
+Ambiguous Cloudflare state keeps the full entry and does not force a transfer.
 
 When runtime sources change on a steady-state script, the workflow deploys
 `kody-runtime` before origin so cross-script bindings stay valid. That order is
