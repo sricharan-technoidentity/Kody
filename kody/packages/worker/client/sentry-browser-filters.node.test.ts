@@ -1,0 +1,1306 @@
+import { expect, test } from 'vitest'
+import {
+	filterBrowserAbortSentryEvent,
+	filterBrowserInjectedGlobalNoiseSentryEvent,
+	filterBrowserSentryEvent,
+	filterFirefoxDomPermissionDeniedSentryEvent,
+} from './sentry-browser-filters.ts'
+
+test('browser Sentry filters drop AbortError and Firefox Xray noise and keep real errors', () => {
+	expect(
+		filterBrowserAbortSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'AbortError: The user aborted a request.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserAbortSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'Error', value: 'something else' }],
+				},
+			},
+			new DOMException('The user aborted a request.', 'AbortError'),
+		),
+	).toBeNull()
+	expect(
+		filterBrowserAbortSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'AbortError: The operation was aborted due to timeout.',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterFirefoxDomPermissionDeniedSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Permission denied to access property "childNodes"',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterFirefoxDomPermissionDeniedSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Permission denied',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserInjectedGlobalNoiseSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							"undefined is not an object (evaluating 'window.ethereum.selectedAddress = undefined')",
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserInjectedGlobalNoiseSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'ReferenceError',
+						value: "Can't find variable: __firefox__",
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserInjectedGlobalNoiseSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							"undefined is not an object (evaluating 'window.someAppApi.foo')",
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	const realBug = {
+		exception: {
+			values: [{ type: 'TypeError', value: 'TypeError: Failed to fetch' }],
+		},
+	}
+	expect(filterBrowserSentryEvent(realBug)).toBe(realBug)
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'AbortError: The user aborted a request.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+
+	// Composed filter: one drop + one keep per third-party noise family.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: "Cannot read properties of null (reading 'removeChild')",
+						stacktrace: {
+							frames: [
+								{
+									abs_path: 'https://cdn.usefathom.com/script.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: "Cannot read properties of null (reading 'removeChild')",
+						stacktrace: {
+							frames: [
+								{
+									abs_path: 'https://heykody.dev/assets/app-chunk.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'UnhandledRejection',
+						value:
+							'Non-Error promise rejection captured with value: Object Not Found Matching Id:3, MethodName:update, ParamCount:4',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'UnhandledRejection',
+						value: 'something else entirely',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value:
+							'Error: Could not establish connection. Receiving end does not exist.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Could not establish connection to the MCP server.',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Invalid call to runtime.sendMessage(). Tab not found.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value:
+							'Error: Invalid call to runtime.sendMessage(). Tab not found.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'Error', value: 'something else' }],
+				},
+			},
+			new Error('Invalid call to runtime.sendMessage(). Tab not found.'),
+		),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Invalid call to runtime.sendMessage(). Extension gone.',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'MetaMask extension not found',
+						stacktrace: {
+							frames: [
+								{
+									filename:
+										'chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/scripts/inpage.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Failed to connect to MetaMask',
+						stacktrace: {
+							frames: [{ abs_path: 'https://heykody.dev/assets/app-chunk.js' }],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	// MetaMask plain-object rejection (KODY-CLOUDFLARE-64): buffered
+	// unhandledrejection with { code: 4001, message: "wallet must has…" }.
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [
+						{
+							type: 'Error',
+							value: 'Object captured as exception with keys: code, message',
+						},
+					],
+				},
+			},
+			{ code: 4001, message: 'wallet must has at least one account' },
+		),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'wallet must has at least one account',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [
+						{
+							type: 'Error',
+							value: 'Object captured as exception with keys: code, message',
+						},
+					],
+				},
+			},
+			{ code: 4001, message: 'User rejected the request.' },
+		),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'WrappedError',
+						value: 'Client has been destroyed',
+						stacktrace: {
+							frames: [
+								{
+									filename:
+										'chrome-extension://iohjgamcilhbgmhbnllfolmkmmekfmci/injected-scripts/host-additional-hooks.js',
+								},
+								{
+									function: 'a6.send',
+									abs_path:
+										'chrome-extension://iohjgamcilhbgmhbnllfolmkmmekfmci/injected-scripts/host-additional-hooks.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'WrappedError',
+						value: 'Client has been destroyed',
+						stacktrace: {
+							frames: [
+								{
+									filename: 'https://kody.codes/assets/entry.js',
+									function: 'boot',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Client has been destroyed during hydrate',
+						stacktrace: {
+							frames: [
+								{
+									filename:
+										'chrome-extension://iohjgamcilhbgmhbnllfolmkmmekfmci/injected-scripts/host-additional-hooks.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'RangeError',
+						value: 'Maximum call stack size exceeded',
+						stacktrace: {
+							frames: [
+								{
+									function: 'Performance.get',
+									filename:
+										'chrome-extension://nmpbkbkalejlobohneicicgoojjokopi/data/content_script/page_context/inject.js',
+								},
+								{
+									function: 'Reflect.get',
+									filename: '<anonymous>',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'RangeError',
+						value: 'Maximum call stack size exceeded',
+						stacktrace: {
+							frames: [
+								{
+									function: 'Performance.get',
+									filename:
+										'chrome-extension://nmpbkbkalejlobohneicicgoojjokopi/data/content_script/page_context/inject.js',
+								},
+								{
+									function: 'boot',
+									filename: 'https://kody.codes/assets/entry.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'RangeError',
+						value: 'Maximum call stack size exceeded',
+						stacktrace: {
+							frames: [
+								{
+									function: 'scheduleNext',
+									filename: '../client/copy-text-button.tsx',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: "Cannot read properties of undefined (reading 'M_ID')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'E',
+									filename:
+										'chrome-extension://eppiocemhmnlbhjplcgkofciiegomcon/executors/200.js',
+								},
+								{
+									function: 'Y',
+									abs_path:
+										'chrome-extension://eppiocemhmnlbhjplcgkofciiegomcon/executors/200.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [
+						{
+							type: 'TypeError',
+							value: "Cannot read property 'M_ID' of undefined",
+							stacktrace: {
+								frames: [
+									{
+										function: 'E',
+										filename: 'chrome-extension://abcd/executors/200.js',
+									},
+								],
+							},
+						},
+					],
+				},
+			},
+			new TypeError("Cannot read property 'M_ID' of undefined"),
+		),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: "Cannot read properties of undefined (reading 'M_ID')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'readSession',
+									filename: 'https://kody.codes/assets/entry.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							"TypeError: Cannot read properties of undefined (reading 'M_ID')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'Y',
+									filename:
+										'chrome-extension://eppiocemhmnlbhjplcgkofciiegomcon/executors/200.js',
+								},
+								{
+									function: 'boot',
+									filename: 'https://kody.codes/assets/entry.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: "Cannot read properties of undefined (reading 'M_ID')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'Y',
+									filename:
+										'chrome-extension://eppiocemhmnlbhjplcgkofciiegomcon/executors/200.js',
+								},
+								{
+									function: 'boot',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: "Cannot read properties of undefined (reading 'url')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'Y',
+									filename:
+										'chrome-extension://eppiocemhmnlbhjplcgkofciiegomcon/executors/200.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'ReferenceError',
+						value: 'CONFIG is not defined',
+						stacktrace: {
+							frames: [
+								{
+									function: 'updateGapFiller',
+									abs_path: 'https://heykody.app/',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'ReferenceError',
+						value: "Can't find variable: CONFIG",
+						stacktrace: {
+							frames: [
+								{
+									function: 'boot',
+									filename: 'https://heykody.app/assets/entry.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							"undefined is not an object (evaluating 'window.webkit.messageHandlers')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'sendScrollEvent',
+									abs_path: 'https://kody.codes/@kentcdodds/origin',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							"undefined is not an object (evaluating 'window.webkit.messageHandlers')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'boot',
+									filename: 'https://kody.codes/assets/entry.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							"TypeError: null is not an object (evaluating 'document.querySelector(\"meta[property='og:type']\").content')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'global code',
+									absPath: 'https://heykody.app/guides/what-is-kody',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							"null is not an object (evaluating 'document.querySelector(\"meta[property='og:type']\").content')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'applyDocumentHead',
+									filename: 'https://heykody.app/assets/document-head.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})
+
+test('browser Sentry filters drop WorkerGlobalScope blob importScripts NetworkError (KODY-CLOUDFLARE-5G)', () => {
+	const blobImportScriptsMessage =
+		"Uncaught NetworkError: Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at 'blob:https://kody.codes/746a7af2-37c5-4c0d-953f-661052a239a3' failed to load."
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: blobImportScriptsMessage,
+						stacktrace: {
+							frames: [
+								{
+									filename:
+										'blob:https://kody.codes/da30da39-78fc-444b-abb1-01ebd8bfc126',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'NetworkError',
+						value: 'Failed to fetch',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})
+
+test('browser Sentry filters drop syntax-highlight-core dynamic import fetch failures (KODY-CLOUDFLARE-5W)', () => {
+	const highlightChunkMessage =
+		'Failed to fetch dynamically imported module: https://kody.codes/assets/syntax-highlight-core-VCFYP6MU.js'
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: highlightChunkMessage,
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'TypeError', value: 'something else' }],
+				},
+			},
+			new TypeError(highlightChunkMessage),
+		),
+	).toBeNull()
+	// Other hashed asset chunk misses must stay visible (boot reload path).
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							'Failed to fetch dynamically imported module: https://kody.codes/assets/blog-area-ABC123.js',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})
+
+test('browser Sentry filters drop resolveFrame fetch network TypeErrors (KODY-CLOUDFLARE-5Y)', () => {
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: 'Load failed',
+						stacktrace: {
+							frames: [
+								{
+									function: 'app.resolveFrame',
+									filename: '../client/entry.tsx',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'TypeError', value: 'Failed to fetch' }],
+				},
+			},
+			Object.assign(new TypeError('Failed to fetch'), {
+				stack: 'resolveFrame@https://kody.codes/client-entry.js:3:61347',
+			}),
+		),
+	).toBeNull()
+	// Safari often keeps only the immediate fetchFrameResolve caller.
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'TypeError', value: 'Load failed' }],
+				},
+			},
+			Object.assign(new TypeError('Load failed'), {
+				stack: 'fetchFrameResolve@https://kody.codes/client-entry.js:3:61000',
+			}),
+		),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: 'Load failed',
+						stacktrace: {
+							frames: [
+								{
+									function: 'fetchFrameResolve',
+									filename: '../client/frame-resolve.ts',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	// Generic fetch TypeErrors without resolveFrame must stay visible.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [{ type: 'TypeError', value: 'TypeError: Failed to fetch' }],
+			},
+		}),
+	).not.toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: 'Load failed',
+						stacktrace: {
+							frames: [{ function: 'someOtherFetch', filename: 'app.js' }],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})
+
+test('browser Sentry filters drop Chromium Failed to fetch (host) via createFrameResolveInit (KODY-6A)', () => {
+	// Production Chrome Mobile: exception value includes the origin, and
+	// sourcemapped frames name createFrameResolveInit / boot — not resolveFrame.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: 'Failed to fetch (kody.codes)',
+						stacktrace: {
+							frames: [
+								{
+									function: 'createFrameResolveInit',
+									filename: '../client/frame-resolve.ts',
+								},
+								{
+									function: 'boot',
+									filename: '../client/entry.tsx',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [
+						{
+							type: 'TypeError',
+							value: 'Failed to fetch (kody.codes)',
+						},
+					],
+				},
+			},
+			Object.assign(new TypeError('Failed to fetch (kody.codes)'), {
+				stack:
+					'TypeError: Failed to fetch\n    at Yn (https://kody.codes/client-entry.js:3:2497)\n    at Object.resolveFrame (https://kody.codes/client-entry.js:3:76468)',
+			}),
+		),
+	).toBeNull()
+	// Dynamic-import failures must stay visible even with a host-looking suffix.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value:
+							'Failed to fetch dynamically imported module: https://kody.codes/assets/blog-area-ABC123.js',
+						stacktrace: {
+							frames: [
+								{
+									function: 'createFrameResolveInit',
+									filename: '../client/frame-resolve.ts',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})
+
+test('browser Sentry filters drop Turnstile client load and challenge failures (KODY-6D / KODY-6E)', () => {
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Turnstile script failed to load.',
+						stacktrace: {
+							frames: [
+								{
+									function: 'r.addEventListener.once',
+									filename: '../../client/public-form-protection.ts',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'Error', value: 'something else' }],
+				},
+			},
+			new Error('Turnstile API did not initialize.'),
+		),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TurnstileError',
+						value: '[Cloudflare Turnstile] Error: 300010.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'Error', value: 'wrapped' }],
+				},
+			},
+			Object.assign(new Error('[Cloudflare Turnstile] Error: 300010.'), {
+				name: 'TurnstileError',
+			}),
+		),
+	).toBeNull()
+	// Unrelated Errors must stay visible.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Turnstile widget host missing in layout',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})
+
+test('browser Sentry filters drop local Vite HMR and loopback frame-resolve 500s (KODY-6Z)', () => {
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Frame resolve failed (500) for http://localhost:3742/',
+						stacktrace: {
+							frames: [
+								{
+									function: 'Object.resolveFrame',
+									filename: '/packages/worker/client/entry.tsx',
+									absPath:
+										'http://localhost:3742/packages/worker/client/entry.tsx',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: "Cannot read properties of undefined (reading 'url')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'Object.callComponentRenderForHmr',
+									filename:
+										'/node_modules/.vite/deps/remix_ui-hmr_runtime_browser.js',
+									absPath:
+										'http://localhost:3742/node_modules/.vite/deps/remix_ui-hmr_runtime_browser.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'Error', value: 'Client hydration error' }],
+				},
+			},
+			Object.assign(
+				new Error('Frame resolve failed (500) for http://127.0.0.1:3742/'),
+				{
+					stack:
+						'Error: Frame resolve failed (500) for http://127.0.0.1:3742/\n    at Object.resolveFrame (http://127.0.0.1:3742/packages/worker/client/entry.tsx:80:11)',
+				},
+			),
+		),
+	).toBeNull()
+	// Production homepage SSR 500s must stay visible.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: 'Frame resolve failed (500) for https://kody.codes/',
+						stacktrace: {
+							frames: [
+								{
+									function: 'Object.resolveFrame',
+									filename: '../client/entry.tsx',
+									absPath: 'https://kody.codes/client-entry.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+	// Production readRouterUrl crashes must stay visible.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: "Cannot read properties of undefined (reading 'url')",
+						stacktrace: {
+							frames: [
+								{
+									function: 'readRouterUrl',
+									filename: '../client/router-location.tsx',
+									absPath: 'https://kody.codes/assets/entry-abc.js',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})
+
+test('browser Sentry filters drop Remix reconcile insertBefore NotFoundError (KODY-7N)', () => {
+	const insertBeforeMessage =
+		"Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node."
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'NotFoundError',
+						value: insertBeforeMessage,
+						stacktrace: {
+							frames: [
+								{
+									function: 'moveDomRange',
+									filename: '@remix-run/ui/dist/runtime/reconcile',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [
+						{
+							type: 'NotFoundError',
+							value: `NotFoundError: ${insertBeforeMessage}`,
+						},
+					],
+				},
+			},
+			Object.assign(new DOMException(insertBeforeMessage, 'NotFoundError'), {
+				stack:
+					"NotFoundError: Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.\n    at ka (@remix-run/ui/dist/runtime/reconcile:1:1)",
+			}),
+		),
+	).toBeNull()
+	// Same insertBefore NotFoundError without Remix reconcile frames stays visible.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'NotFoundError',
+						value: insertBeforeMessage,
+						stacktrace: {
+							frames: [
+								{
+									function: 'boot',
+									filename: '../client/entry.tsx',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+	// KODY-5E-style HierarchyRequestError must stay visible.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'HierarchyRequestError',
+						value: insertBeforeMessage,
+						stacktrace: {
+							frames: [
+								{
+									function: 'moveDomRange',
+									filename: '@remix-run/ui/dist/runtime/reconcile',
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})
+
+test('browser Sentry filters drop CrabApple navigator.userAgent hard-spoof noise (KODY-80)', () => {
+	const crabAppleUserAgentSpoofMessage =
+		'Error: [CrabApple] Failed to hard-spoof navigator.userAgent: TypeError: Cannot redefine property: userAgent'
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'Error',
+						value: crabAppleUserAgentSpoofMessage,
+						stacktrace: {
+							frames: [
+								{ function: '<anonymous>' },
+								{ function: 'spoofBrowserAndPlatform' },
+							],
+						},
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterBrowserSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'Error', value: 'something else' }],
+				},
+			},
+			new Error(crabAppleUserAgentSpoofMessage),
+		),
+	).toBeNull()
+	// Same redefine TypeError without the CrabApple marker stays visible.
+	expect(
+		filterBrowserSentryEvent({
+			exception: {
+				values: [
+					{
+						type: 'TypeError',
+						value: 'TypeError: Cannot redefine property: userAgent',
+						stacktrace: {
+							frames: [
+								{ function: '<anonymous>' },
+								{ function: 'spoofBrowserAndPlatform' },
+							],
+						},
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+})

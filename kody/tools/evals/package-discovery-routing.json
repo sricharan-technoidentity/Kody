@@ -1,0 +1,135 @@
+{
+	"schemaVersion": 2,
+	"name": "package-discovery-routing",
+	"actionCardinality": {
+		"searchMinimum": 1,
+		"readOnlyMaximum": 3,
+		"authoringStepMaximum": 8
+	},
+	"cases": [
+		{
+			"id": "reuse-recurring-email-drafter",
+			"prompt": "Draft replies to these three customer messages in the voice I use for weekly follow-ups, and return the drafts for review.",
+			"inventory": {
+				"mode": "inventory-dependent",
+				"eligibility": "Run only when preflight search finds one saved result that explicitly supports recurring customer follow-up drafts in the user's established voice. Otherwise record skipped-no-eligible-match."
+			},
+			"expected": {
+				"route": "existing",
+				"requiredActions": ["search", "invoke-existing"],
+				"allowedActions": ["search", "invoke-existing"],
+				"terminalAction": "invoke-existing"
+			}
+		},
+		{
+			"id": "reuse-release-note-helper",
+			"prompt": "Turn these merged pull request notes into our standard release update and return the final text.",
+			"inventory": {
+				"mode": "inventory-dependent",
+				"eligibility": "Run only when preflight search finds one saved result that explicitly implements the account's standard release-update format. Otherwise record skipped-no-eligible-match."
+			},
+			"expected": {
+				"route": "existing",
+				"requiredActions": ["search", "invoke-existing"],
+				"allowedActions": ["search", "invoke-existing"],
+				"terminalAction": "invoke-existing"
+			}
+		},
+		{
+			"id": "one-off-saved-automation-count",
+			"prompt": "Give me a one-time count of my saved automations grouped by public or private visibility. I do not need this saved.",
+			"inventory": {
+				"mode": "controlled",
+				"precondition": "The evaluation account has no exact reusable result for this aggregation; an empty inventory is valid."
+			},
+			"expected": {
+				"route": "execute-one-off",
+				"requiredActions": ["search", "execute-one-off"],
+				"allowedActions": ["search", "execute-one-off"],
+				"terminalAction": "execute-one-off"
+			}
+		},
+		{
+			"id": "one-off-value-inventory",
+			"prompt": "Return a one-time alphabetical list of the names of my current non-secret saved settings. Do not save a helper.",
+			"inventory": {
+				"mode": "controlled",
+				"precondition": "The evaluation account has no exact reusable result for this listing; an empty value inventory is valid."
+			},
+			"expected": {
+				"route": "execute-one-off",
+				"requiredActions": ["search", "execute-one-off"],
+				"allowedActions": ["search", "execute-one-off"],
+				"terminalAction": "execute-one-off"
+			}
+		},
+		{
+			"id": "schedule-single-reminder",
+			"prompt": "At 4:00 PM tomorrow, remind me to review the launch checklist once.",
+			"inventory": {
+				"mode": "controlled",
+				"precondition": "The evaluation account has no exact reusable result for this reminder."
+			},
+			"expected": {
+				"route": "execute-one-off",
+				"requiredActions": ["search", "execute-one-off"],
+				"allowedActions": ["search", "execute-one-off"],
+				"terminalAction": "execute-one-off"
+			}
+		},
+		{
+			"id": "schedule-simple-recurring-reminder",
+			"prompt": "Every Friday at 3:00 PM, remind me to submit my timesheet. This is just a reminder with no shared logic or interface.",
+			"inventory": {
+				"mode": "controlled",
+				"precondition": "The evaluation account has no exact reusable result for this reminder."
+			},
+			"expected": {
+				"route": "package-authoring",
+				"requiredActions": ["search", "author-package"],
+				"allowedActions": [
+					"search",
+					"inspect-authoring-guidance",
+					"author-package"
+				],
+				"terminalAction": "author-package"
+			}
+		},
+		{
+			"id": "author-reusable-scheduled-brief",
+			"prompt": "Every Monday, turn the current items in my project-updates setting into a status brief, and keep the logic together so I can adjust it and trigger it from any assistant I use.",
+			"inventory": {
+				"mode": "controlled",
+				"precondition": "The evaluation account has the documented user-scoped project-updates value fixture and no exact reusable result for this workflow."
+			},
+			"expected": {
+				"route": "package-authoring",
+				"requiredActions": ["search", "author-package"],
+				"allowedActions": [
+					"search",
+					"inspect-authoring-guidance",
+					"author-package"
+				],
+				"terminalAction": "author-package"
+			}
+		},
+		{
+			"id": "author-validated-cleanup-automation",
+			"prompt": "This cleanup code has completed successfully on five runs: `export default function main({ names = [] }) { return [...new Set(names.map((name) => name.trim()).filter(Boolean))].sort() }`. Make it a maintained reusable automation that I can call from any connected assistant without pasting the code again.",
+			"inventory": {
+				"mode": "controlled",
+				"precondition": "The evaluation account has no exact reusable result for this source."
+			},
+			"expected": {
+				"route": "package-authoring",
+				"requiredActions": ["search", "author-package"],
+				"allowedActions": [
+					"search",
+					"inspect-authoring-guidance",
+					"author-package"
+				],
+				"terminalAction": "author-package"
+			}
+		}
+	]
+}

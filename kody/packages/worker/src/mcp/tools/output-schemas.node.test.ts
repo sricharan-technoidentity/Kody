@@ -1,0 +1,146 @@
+/**
+ * Advertising an MCP `outputSchema` makes the SDK validate every successful
+ * result's `structuredContent` against it server-side (v1 `McpServer` runs
+ * `safeParseAsync` on the zod object; v2 validates the converted JSON
+ * schema). A schema that rejects a real response would turn working calls
+ * into protocol errors, so these tests run representative structured
+ * responses from every return path through the advertised schemas exactly
+ * the way the SDK does.
+ */
+
+import { expect, test } from 'vitest'
+import { z } from 'zod'
+import { searchToolOutputSchema } from './search-tool-definition.ts'
+import { executeToolOutputSchema } from './execute.ts'
+
+const timing = {
+	startedAt: '2026-08-05T00:00:00.000Z',
+	endedAt: '2026-08-05T00:00:01.000Z',
+	durationMs: 1000,
+}
+
+const searchSchema = z.object(searchToolOutputSchema)
+const executeSchema = z.object(executeToolOutputSchema)
+
+test('search structured content passes advertised schema for all return paths', async () => {
+	const payloads = [
+		{
+			conversationId: 'c1',
+			timing,
+			result: {
+				offline: false,
+				warnings: [],
+				telemetry: { topResultTypes: ['capability'] },
+				phaseTimings: { formattingMs: 2 },
+				matches: [{ type: 'capability', name: 'emailSend' }],
+			},
+		},
+		{
+			conversationId: 'c1',
+			timing,
+			result: { entityRef: 'capability:x' },
+		},
+		{
+			conversationId: 'c1',
+			timing,
+			result: [{ entityRef: 'capability:a', error: 'not found' }],
+			error: 'All entity lookups failed.',
+		},
+		{ conversationId: 'c1', timing, error: 'Provide "query".' },
+		{
+			conversationId: 'c1',
+			timing,
+			error: 'Plan limit reached.',
+			entitlement: {
+				code: 'entitlement_limit_exceeded',
+				resource: 'execute_calls_per_day',
+				plan: 'free',
+				limit: 100,
+				current: 100,
+				used: 100,
+				remaining: 0,
+				upgradeHint: 'upgrade your plan at /account/billing.',
+			},
+		},
+	]
+	for (const payload of payloads) {
+		const parsed = await searchSchema.safeParseAsync(payload)
+		expect(parsed.success).toBe(true)
+	}
+})
+
+test('execute structured content passes advertised schema for all return paths', async () => {
+	const payloads = [
+		{
+			conversationId: 'c1',
+			timing: { ...timing, serverTiming: [{ name: 'registry', ms: 5 }] },
+			storage: { id: 'bucket-1' },
+			returnedBytes: 42,
+			result: { anything: ['goes', 1, null] },
+			logs: ['log line', { level: 'warn' }],
+			warnings: ['Consider integration auth helpers for api.example.com.'],
+			memories: { surfaced: [], suppressedCount: 0 },
+		},
+		{
+			conversationId: 'c1',
+			timing,
+			returnedBytes: 100000,
+			truncated: true,
+			note: 'Result truncated to fit responseLimit.',
+			result: 'partial…',
+			logs: [],
+		},
+		{
+			conversationId: 'c1',
+			timing,
+			returnedBytes: 0,
+			error: 'ReferenceError: foo is not defined',
+			errorDetails: { phase: 'sandbox' },
+			logs: [],
+		},
+		{
+			conversationId: 'c1',
+			timing,
+			returnedBytes: 0,
+			error:
+				'Plan limit reached: your "free" plan allows at most 10 saved packages and you currently have 10.',
+			errorDetails: { kind: 'entitlement_limit_exceeded' },
+			entitlement: {
+				code: 'entitlement_limit_exceeded',
+				resource: 'saved_packages',
+				plan: 'free',
+				limit: 10,
+				current: 10,
+				upgradeHint: 'upgrade your plan at /account/billing.',
+			},
+			logs: [],
+		},
+		{
+			conversationId: 'c1',
+			timing,
+			runId: 'run-1',
+			replayed: true,
+			returnedBytes: 0,
+			result: { ok: true },
+			logs: [],
+		},
+		{
+			conversationId: 'c1',
+			timing,
+			runId: 'run-1',
+			inProgress: true,
+			status: 'running',
+		},
+	]
+	for (const payload of payloads) {
+		const parsed = await executeSchema.safeParseAsync(payload)
+		expect(parsed.success).toBe(true)
+	}
+})
+
+test('schemas convert to JSON Schema without throwing', () => {
+	// The SDK advertises the zod schemas as JSON Schema on tools/list; a
+	// conversion failure would drop the advertisement or break listing.
+	expect(() => z.toJSONSchema(searchSchema, { io: 'output' })).not.toThrow()
+	expect(() => z.toJSONSchema(executeSchema, { io: 'output' })).not.toThrow()
+})

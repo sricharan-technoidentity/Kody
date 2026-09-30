@@ -1,0 +1,2541 @@
+import {
+	type OnboardingFeaturedListing,
+	type ProfileVisibility,
+	type PublicCommunityActivityItem,
+	type PublicCommunityListing,
+	type PublicCommunityProfile,
+	type PublicProfilePackageItem,
+	type ViewerListingInstall,
+} from '#universal/community-public-types.ts'
+import { type PermissionString, type RoleName } from '#universal/permissions.ts'
+import { type AdminFeatureFlag } from '#universal/feature-flags/types.ts'
+import { type OnboardingChecklistItemId } from '#universal/onboarding-checklist-types.ts'
+import {
+	type OnboardingCustomMcpServer,
+	type OnboardingFeaturedMcpServer,
+} from '#universal/onboarding-mcp-chooser.ts'
+import {
+	type CommunityCategoryCounts,
+	type CommunityListingCategory,
+} from '#universal/community-categories.ts'
+import { type CommunityListingSort } from '#universal/community-search.ts'
+import { type HighlightedCode } from '#universal/highlighted-code.ts'
+import { type PackageFilesContentKind } from '#universal/package-file-media.ts'
+import { type WalkthroughHostPick } from '#universal/walkthrough-hosts.ts'
+import { type LandingHeroVideo } from '#universal/landing-hero-copy.ts'
+import { type ConnectedMcpAgent } from '#universal/connected-mcp-agents.ts'
+import { type ReferralProgramSummary } from '#universal/referral-program.ts'
+import { type SecondAgentStandardGiftState } from '#universal/second-agent-standard-gift.ts'
+import { type OnboardingAgentChooserPick } from '#universal/onboarding-mcp-clients.ts'
+import { type EmailNotificationDestination } from '#universal/email-destinations.ts'
+import { type EmailVerificationDelivery } from '#universal/email-verification-delivery.ts'
+import { type IntegrationAuthFailureView } from '#universal/connection-trouble.ts'
+import { type WaitingItem } from '#universal/waiting.ts'
+import { type OnboardingFunnelStage } from '#universal/onboarding-funnel-point.ts'
+import {
+	type CreditWalletState,
+	type EntitlementLadder,
+} from '#universal/plans.ts'
+import {
+	type ComputeIncludeCreditsStatus,
+	type ComputeOverageWarningResource,
+} from '#universal/compute-overage.ts'
+import {
+	type AccountActivity,
+	type CreditsAlarm,
+	type IncludedComputeMeter,
+} from '#universal/usage-presentation.ts'
+import {
+	type AccountActivityStatusFilter,
+	type AccountActivitySurfaceFilter,
+	type AccountActivityTriageFilter,
+	type AccountActivityViewFilter,
+} from '#universal/account-activity-filters.ts'
+import { type FleetPackageErrorRateConcentration } from '#universal/fleet-package-error-rate-concentration.ts'
+import {
+	type SiteBannerRecord,
+	type SiteBannerView,
+	type SiteBannerViewer,
+} from '#universal/site-banners.ts'
+import {
+	type PackageShareFileChange,
+	type PackageShareGrantLoaderView,
+} from '#universal/package-share.ts'
+
+export type { ProfileVisibility }
+export type { AdminFeatureFlag }
+export type { OnboardingCustomMcpServer, OnboardingFeaturedMcpServer }
+
+export type BlogPostSummaryLoaderData = {
+	slug: string
+	title: string
+	date: string
+	description: string
+	order: number
+}
+
+export type BlogLoaderData = {
+	ok: true
+	posts: Array<BlogPostSummaryLoaderData>
+}
+
+export type BlogPostLoaderData = {
+	ok: true
+	slug: string
+	title: string
+	date: string
+	description: string
+	/** When true, the post page shows the AI-placeholder callout. */
+	placeholder: boolean
+	image: string | null
+	imageAlt: string | null
+	ogImage: string | null
+	body: string
+	/** Highlight tokens for fenced code in `body`, in lexer order. */
+	bodyFences?: Array<HighlightedCode>
+	/** Next post in catalog order for the post foot; null when alone. */
+	readNext: { slug: string; title: string } | null
+}
+
+export type DocSummaryLoaderData = {
+	slug: string
+	id: string
+	title: string
+	summary: string
+	category: 'platform' | 'provider'
+	audience: 'everyone' | 'agents'
+	/** `#universal/docs-nav.ts` section id; null for unadvertised docs. */
+	section: string | null
+	provider: string | null
+	lastVerified: string | null
+}
+
+/** Provider connection index (`/docs/connect`). */
+export type DocsConnectLoaderData = {
+	ok: true
+	guides: Array<DocSummaryLoaderData>
+}
+
+export type DocDetailLoaderData = {
+	ok: true
+	slug: string
+	id: string
+	title: string
+	summary: string
+	category: 'platform' | 'provider'
+	audience: 'everyone' | 'agents'
+	image: string | null
+	imageAlt: string | null
+	ogImage: string | null
+	provider: string | null
+	lastVerified: string | null
+	body: string
+	/** Highlight tokens for fenced code in `body`, in lexer order. */
+	bodyFences?: Array<HighlightedCode>
+	/** Highlight tokens for interactive walkthrough snippets, keyed by snippet. */
+	walkthroughHighlights?: Record<string, HighlightedCode>
+	/** How Kody works only: SSR host pick so hydrate shows the same marks. */
+	walkthroughHosts?: WalkthroughHostPick
+}
+
+export type CommunityIndexGroup = {
+	category: CommunityListingCategory
+	listings: Array<PublicCommunityListing>
+	total: number
+}
+
+export type CommunityIndexLoaderData = {
+	ok: true
+	listings: Array<PublicCommunityListing>
+	/**
+	 * Present on the unfiltered browse page so the catalog can open as a few
+	 * cards per category instead of one long shelf. Search and category
+	 * filters keep a flat `listings` grid and leave this null.
+	 */
+	groups: Array<CommunityIndexGroup> | null
+	/**
+	 * Catalog-wide active listing counts by stored category. Chips hide
+	 * empty buckets from this map so an empty shelf stays quiet and a
+	 * large catalog only shows categories that actually have packages.
+	 */
+	categoryCounts: CommunityCategoryCounts
+	query: string | null
+	sort: CommunityListingSort
+	category: CommunityListingCategory | null
+}
+
+export type CommunityDetailLoaderData = {
+	ok: true
+	listing: PublicCommunityListing | null
+	/** True when `/@owner` is publicly reachable. */
+	ownerProfilePublic: boolean
+	/** True when the signed-in viewer owns this listing. */
+	viewerIsOwner: boolean
+	loggedIn: boolean
+	viewerIsAdmin: boolean
+	forkPrompt: string
+	/** Existing fork/install for the signed-in viewer, when one exists. */
+	viewerInstall: ViewerListingInstall | null
+	readmeFences?: Array<HighlightedCode>
+	ownerPackage: AccountPackageDetail | null
+	username: string
+	invocationUrlOrigin: string
+}
+
+type PackageFilesChildLoaderData = {
+	name: string
+	path: string
+	kind: 'file' | 'directory'
+}
+
+export type PackageFilesLoaderData = {
+	ok: true
+	title: string
+	backHref: string
+	backLabel: string
+	filesBasePath: string
+	selectedPath: string
+	kind: 'file' | 'directory'
+	paths: Array<string>
+	children: Array<PackageFilesChildLoaderData>
+	content: string | null
+	contentPath: string | null
+	contentKind: PackageFilesContentKind | null
+	language: string | null
+	contentByteLength?: number | null
+	mediaHref?: string | null
+	contentHighlighted?: HighlightedCode | null
+	contentFences?: Array<HighlightedCode>
+	username?: string
+	kodyId?: string
+	viewerIsOwner?: boolean
+	isPrivate?: boolean
+	isListed?: boolean
+	iconUrl?: string | null
+	imageBaseHref?: string | null
+	description?: string
+	/** True when `/@owner` is publicly reachable. Omit to keep the owner link. */
+	ownerProfilePublic?: boolean
+}
+
+/** SSR-embedded shell data for client-only regions on the detail page. */
+type CommunityDetailShellLoaderData = {
+	ok: true
+	listingId: string | null
+	/** Git default-branch name for Files-tab `/tree/:ref` URLs. */
+	defaultBranch?: string | null
+	name: string
+	description: string
+	/** True when `/@owner` is publicly reachable. Omit to keep the owner link. */
+	ownerProfilePublic?: boolean
+	forkPrompt: string
+	loggedIn: boolean
+	viewerIsAdmin: boolean
+	trusted: boolean
+	featured: boolean
+	readmeContent: string | null
+	readmeFences?: Array<HighlightedCode>
+	hasAgentsDocs: boolean
+	imageBaseHref: string | null
+	viewerInstall: ViewerListingInstall | null
+	ownerPackage: AccountPackageDetail | null
+	username: string
+	kodyId: string
+	viewerIsOwner: boolean
+	isPrivate: boolean
+	invocationUrlOrigin: string
+	shareGrant?: PackageShareGrantLoaderView | null
+}
+
+type CommunityPackageUnauthorizedLoaderData = {
+	ok: false
+	unauthorized: true
+}
+
+type CommunityPackageNotFoundLoaderData = {
+	ok: false
+	notFound: true
+}
+
+export type ProfileLoaderData = {
+	ok: true
+	profile: PublicCommunityProfile
+	packages: Array<PublicProfilePackageItem>
+	activity: Array<PublicCommunityActivityItem>
+	query: string | null
+	isSelf: boolean
+	loggedIn: boolean
+}
+
+/** Package list + activity for `/@username`. Chips and search (`q`) apply client-side. */
+export type ProfileListLoaderData = {
+	profile: PublicCommunityProfile
+	packages: Array<PublicProfilePackageItem>
+	activity: Array<PublicCommunityActivityItem>
+}
+
+/** SSR-embedded shell data for the identity header on the profile page. */
+export type ProfileShellLoaderData = {
+	ok: true
+	username: string
+	displayName: string
+	bio: string | null
+	avatarUrl: string | null
+	joinedAt: string
+	isSelf: boolean
+	loggedIn: boolean
+	visibility: ProfileVisibility
+}
+
+export function toProfileShellLoaderData(
+	data: ProfileLoaderData,
+): ProfileShellLoaderData {
+	return {
+		ok: true,
+		username: data.profile.username,
+		displayName: data.profile.displayName,
+		bio: data.profile.bio,
+		avatarUrl: data.profile.avatarUrl,
+		joinedAt: data.profile.joinedAt,
+		isSelf: data.isSelf,
+		loggedIn: data.loggedIn,
+		visibility: data.profile.visibility,
+	}
+}
+
+export function toProfileListLoaderData(
+	data: ProfileLoaderData,
+): ProfileListLoaderData {
+	return {
+		profile: data.profile,
+		packages: data.packages,
+		activity: data.activity,
+	}
+}
+
+export type ProfileUnavailableLoaderData = {
+	ok: false
+	unavailable: true
+}
+
+/**
+ * Route-keyed loader payloads embedded in AppRoot props during SSR.
+ * Add a key here when converting a route; handlers and route components
+ * share these types with the JSON API response shapes.
+ */
+export type AdminUserListItem = {
+	stableUserId: string
+	username: string
+	email: string
+	email_verified: boolean
+	email_verified_at: string | null
+	/** Manual grant (`users.plan`). Manage plan writes this column. */
+	plan: AdminPlanName
+	manualPlan: AdminPlanName
+	stripePlan: AdminPlanName | null
+	effectivePlan: AdminPlanName
+	/** `legacy` keeps pre-cut Standard/Pro ceilings while paid access stays continuous. */
+	entitlementLadder: EntitlementLadder
+	stripeCustomerLinked: boolean
+	suspended_at: string | null
+	email_outbound_paused_at: string | null
+	email_verification_delivery: EmailVerificationDelivery | null
+	email_verification_delivery_detail: string | null
+	utm_source: string | null
+	utm_medium: string | null
+	utm_campaign: string | null
+	utm_content: string | null
+	utm_term: string | null
+	first_touch_landing_path: string | null
+	first_touch_referrer: string | null
+	first_mcp_connected_at: string | null
+	first_execute_at: string | null
+	first_search_at: string | null
+	first_saved_package_at: string | null
+	mcp_client_name: string | null
+	last_active_at: string | null
+	created_at: string
+	updated_at: string
+	roles: Array<RoleName>
+}
+
+export type AdminUsersLoaderData = {
+	ok: true
+	users: Array<AdminUserListItem>
+	/**
+	 * Resolved independently of the filtered/paginated list so a deep link
+	 * (or a selected user outside the current page) still has detail data.
+	 */
+	selectedUser: AdminUserListItem | null
+	page: number
+	pageSize: number
+	total: number
+	availableRoles: Array<RoleName>
+	availablePlans: Array<AdminPlanName>
+}
+
+export type AdminCreditLedgerItem = AccountCreditsLedgerItem & {
+	/** Admin who granted (admin grants only). */
+	grantedByUsername: string | null
+	note: string | null
+}
+
+/** Admin view of one account's credit wallet (grant panel + audit). */
+export type AdminCreditWalletSummary = {
+	ok: true
+	stableUserId: string
+	username: string
+	plan: AdminPlanName
+	/** Purchasable Pro: credits unlock limits and debit usage. */
+	eligible: boolean
+	/** `users.admin_credits_eligible`: admin-set, never touched by Stripe. */
+	adminCreditsEligible: boolean
+	unlocked: boolean
+	balanceMicroUsd: number
+	recent: Array<AdminCreditLedgerItem>
+}
+
+export type AdminCreatedUserSetup = {
+	stableUserId: string
+	email: string
+	username: string
+	setupLink: string
+	setupTokenExpiresAt: number
+}
+
+/**
+ * POST (mutation) responses also carry the updated target user so the
+ * client can patch it into an infinite-scroll list that may have scrolled
+ * past the first page.
+ */
+export type AdminUsersMutationData = AdminUsersLoaderData & {
+	updatedUser: AdminUserListItem | null
+	verifyUrl?: string | null
+	verifyUrlExpiresAt?: number | null
+	createdUser?: AdminCreatedUserSetup
+	/**
+	 * Create succeeded but `loadAdminUsersData` failed. The client must keep
+	 * the current list window and still show `createdUser` / the setup link.
+	 */
+	listRefreshFailed?: boolean
+	/**
+	 * The created row matches the request's active list filters. The client
+	 * only prepends `updatedUser` when this is true, so a search/role/
+	 * verification filter cannot gain a non-matching row.
+	 */
+	createdUserInFilteredList?: boolean
+}
+
+type AdminRoleListItem = {
+	name: string
+	description: string
+	permissions: Array<PermissionString>
+}
+
+export type AdminRolesLoaderData = {
+	ok: true
+	roles: Array<AdminRoleListItem>
+}
+
+type AdminCommunityReportListItem = {
+	id: string
+	listingId: string
+	listingName: string
+	listingOwnerUserId: string
+	reporterUserId: string
+	reason: string
+	status: 'open' | 'resolved' | 'dismissed'
+	createdAt: string
+	resolvedAt: string | null
+	resolutionNote: string | null
+}
+
+export type AdminCommunityReportsLoaderData = {
+	ok: true
+	reports: Array<AdminCommunityReportListItem>
+	statusFilter: string
+}
+
+type AdminReservedUsernameConflict = {
+	username: string
+	stableUserId: string
+}
+
+export type AdminReservedUsernamesLoaderData = {
+	ok: true
+	builtIn: Array<string>
+	added: Array<string>
+	removed: Array<string>
+	conflicts: Array<AdminReservedUsernameConflict>
+	updatedAt: string | null
+	updatedBy: string | null
+}
+
+export type AdminFeatureFlagsLoaderData = {
+	ok: true
+	featureFlags: Array<AdminFeatureFlag>
+}
+
+export type AdminBannersLoaderData = {
+	ok: true
+	banners: Array<SiteBannerRecord>
+	savedBannerId?: string
+}
+
+export type SiteBannerLoaderData = {
+	banner: SiteBannerView | null
+	candidates: Array<SiteBannerRecord>
+	dismissedIds: Array<string>
+	viewer: SiteBannerViewer
+}
+
+export type YoutubeWatchLoaderData = {
+	allowedVideoIds: Array<string>
+}
+
+/**
+ * Operator view of one platform (built-in) OAuth app. Never carries secret
+ * values — `hasClientSecret` is the only trace of the encrypted credential.
+ */
+export type AdminPlatformIntegrationApp = {
+	slug: string
+	provider: string
+	label: string | null
+	description: string | null
+	clientId: string
+	hasClientSecret: boolean
+	tokenUrl: string
+	authorizeUrl: string
+	apiBaseUrl: string | null
+	flow: 'pkce' | 'confidential'
+	usePkce: boolean | null
+	tokenExchangeStyle: 'form' | 'basic-json' | 'basic-form' | null
+	scopeSeparator: string | null
+	extraAuthorizeParams: Record<string, string>
+	allowedScopes: Array<string>
+	defaultScopes: Array<string>
+	requiredHosts: Array<string>
+	enabled: boolean
+	logoPath: string | null
+	connectionCount: number
+	createdAt: string
+	updatedAt: string
+}
+
+export type AdminPlatformIntegrationsLoaderData = {
+	ok: true
+	apps: Array<AdminPlatformIntegrationApp>
+}
+
+export type AdminProviderMark = {
+	slug: string
+	label: string
+	aliases: Array<string>
+	builtInAliases: Array<string>
+	logoPath: string | null
+	createdAt: string
+	updatedAt: string
+}
+
+export type AdminProviderMarksLoaderData = {
+	ok: true
+	marks: Array<AdminProviderMark>
+}
+
+export type AdminCodemodListItem = {
+	id: string
+	description: string
+}
+
+export type AdminCodemodRunListItem = {
+	id: string
+	codemodId: string
+	mode: string
+	scopeUserId: string | null
+	initiatedByUserId: string
+	filtersJson: string
+	status: 'running' | 'completed' | 'failed' | 'abandoned'
+	revertOfRunId: string | null
+	createdAt: string
+	updatedAt: string
+}
+
+export type AdminCodemodRunItemListItem = {
+	id: string
+	runId: string
+	userId: string
+	packageId: string
+	kodyId: string
+	status: string
+	beforeCommit: string | null
+	afterCommit: string | null
+	changedPaths: Array<string>
+	findings: Array<{ path: string | null; message: string }>
+	checkSummaryJson: string | null
+	error: string | null
+	createdAt: string
+	updatedAt: string
+}
+
+export type AdminCodemodsLoaderData = {
+	ok: true
+	codemods: Array<AdminCodemodListItem>
+	runs: Array<AdminCodemodRunListItem>
+}
+
+export type AdminCodemodRunItemsLoaderData = {
+	ok: true
+	run: AdminCodemodRunListItem | null
+	items: Array<AdminCodemodRunItemListItem>
+	nextAfterId: string | null
+}
+
+export type AdminUsageMetric =
+	| 'execute'
+	| 'package_export'
+	| 'package_static_call'
+	| 'job_run'
+	| 'workflow_run'
+	| 'outbound_fetch'
+	| 'email_send'
+	| 'email_received'
+	| 'dynamic_worker_day'
+	| 'dynamic_worker_cpu'
+	| 'durable_object_gb_seconds'
+	| 'durable_object_rows_read'
+	| 'durable_object_platform_rows_read'
+
+export type AdminUsageEntitlementResource =
+	| 'saved_packages'
+	| 'scheduled_jobs'
+	| 'repo_sessions'
+	| 'email_sends_per_day'
+	| 'email_receives_per_day'
+	| 'stored_email_messages'
+	| 'secrets'
+	| 'concurrent_workflows'
+	| 'storage_bytes'
+	| 'execute_calls_per_day'
+	| 'outbound_fetches_per_day'
+	| 'job_runs_per_day'
+	| 'automation_invocations_per_day'
+
+export type AdminPlanName = 'free' | 'standard' | 'pro' | 'max'
+
+export type AdminUsageRollup = {
+	metric: AdminUsageMetric
+	eventCount: number
+	errorCount: number
+	totalDurationMs: number
+	totalCpuMs: number
+	totalBytes: number
+}
+
+export type AdminUsageEntitlementConsumption = {
+	resource: AdminUsageEntitlementResource
+	label: string
+	current: number
+	limit: number
+	percentOfLimit: number | null
+	overEightyPercent: boolean
+}
+
+export type AdminUsageMonthRollup = {
+	month: string
+	usage: Array<AdminUsageRollup>
+}
+
+/**
+ * Per-user usage drill-down shown on the admin users page. Loaded lazily
+ * for one selected account at a time so admin reads stay O(1) per view
+ * regardless of how many users the deployment has.
+ */
+export type AdminUserUsageLoaderData = {
+	ok: true
+	stableUserId: string
+	username: string
+	plan: AdminPlanName
+	currentMonth: string
+	today: string
+	currentMonthUsage: Array<AdminUsageRollup>
+	monthUsage: Array<AdminUsageMonthRollup>
+	entitlementConsumption: Array<AdminUsageEntitlementConsumption>
+	warnings: Array<AdminUsageEntitlementConsumption>
+	dynamicWorkerCost: AdminDynamicWorkerCost
+	durableObjectDuration: AdminDurableObjectDuration
+	costVsPay: AdminCostVsPay
+}
+
+export type AdminPaidSource = 'stripe_catalog' | 'none'
+
+/**
+ * Operator cost-vs-pay risk. `underwater` is only paid catalog list MRR
+ * exceeded by estimated Dynamic Worker cost — not unpaid pennies.
+ */
+export type AdminCostRiskKind =
+	| 'none'
+	| 'paid_underwater'
+	| 'free_near_allotment'
+	| 'missing_price_id'
+
+/**
+ * Operator estimate: gross unique-worker-day cost vs catalog list MRR.
+ * Not an invoice and not a net Cloudflare bill share.
+ */
+export type AdminCostVsPay = AdminDynamicWorkerCost & {
+	estimatedPaidUsdCents: number
+	estimatedMarginUsd: number
+	/** True only for catalog-backed paid accounts over list MRR. */
+	underwater: boolean
+	paidSource: AdminPaidSource
+	risk: AdminCostRiskKind
+}
+
+export type AdminInsightsTotals = {
+	users: number
+	verifiedUsers: number
+	savedPackages: number
+	scheduledJobs: number
+	enabledJobs: number
+	workflowRuns: number
+	activeMemories: number
+	storedEmailMessages: number | null
+	secrets: number
+	activeCommunityListings: number
+	passkeys: number
+	oauthConnections: number
+}
+
+export type AdminInsightsSignupWeek = {
+	/** UTC Monday that starts the week, for example `2026-06-29`. */
+	weekStart: string
+	signups: number
+	/** Total registered users at the end of the week. */
+	cumulativeUsers: number
+}
+
+export type AdminInsightsUsageMonth = {
+	month: string
+	events: Record<AdminUsageMetric, number>
+	errorCount: number
+}
+
+export type AdminInsightsEmailDay = {
+	day: string
+	sends: number
+	receives: number
+}
+
+/**
+ * Platform-wide outbound delivery outcomes from provider delivery events.
+ * Bounce and complaint volume is the early-warning signal for shared
+ * sender-domain reputation trouble (all users send from one domain).
+ */
+export type AdminInsightsEmailDeliveryDay = {
+	day: string
+	delivered: number
+	deferred: number
+	bounced: number
+	failed: number
+	rejected: number
+	complained: number
+}
+
+export type AdminInsightsAuthDay = {
+	day: string
+	success: number
+	failure: number
+	rateLimited: number
+}
+
+export type AdminInsightsAuthCategory = {
+	category: string
+	count: number
+}
+
+export type AdminInsightsHeatmapCell = {
+	/** 0 = Sunday through 6 = Saturday, matching `Date#getUTCDay`. */
+	weekday: number
+	/** UTC hour of day, 0-23. */
+	hour: number
+	count: number
+}
+
+export type AdminInsightsPlanSlice = {
+	plan: string
+	count: number
+}
+
+export type AdminInsightsLaunchFunnelStep = {
+	step:
+		| 'signed_up'
+		| 'email_verified'
+		| 'first_mcp'
+		| 'first_search'
+		| 'first_execute'
+		| 'first_saved_package'
+	users: number
+}
+
+export type AdminInsightsPaidSlice = {
+	plan: 'standard' | 'pro'
+	interval: 'month' | 'year' | 'unknown'
+	subscribers: number
+	/** Monthly-equivalent list revenue in USD cents. Zero when the price is unknown. */
+	mrrUsdCents: number
+}
+
+export type AdminInsightsMcpClientSlice = {
+	kind: string | null
+	label: string
+	count: number
+}
+
+export type AdminInsightsLaunchSignals = {
+	openedAt: string
+	openedDay: string
+	mrrUsdCents: number
+	/** Paid Stripe Standard/Pro rows. Gift/referral overlays are not included. */
+	paidSubscribers: number
+	unpricedPaidSubscribers: number
+	paidSlices: Array<AdminInsightsPaidSlice>
+	manualPlans: Array<AdminInsightsPlanSlice>
+	stripePlans: Array<AdminInsightsPlanSlice>
+	effectivePlans: Array<AdminInsightsPlanSlice>
+	/** Effective Standard from an active gift or referral while manual+Stripe stay free. */
+	overlayPro: number
+	entitlementLadders: { public: number; legacy: number }
+	paidEntitlementLadders: { public: number; legacy: number }
+	activeUsers: { hours24: number; hours48: number; days7: number }
+	activation: {
+		overall: Array<AdminInsightsLaunchFunnelStep>
+		sinceOpen: Array<AdminInsightsLaunchFunnelStep>
+	}
+	mcpClients: Array<AdminInsightsMcpClientSlice>
+	openPlatformFeedback: number
+}
+
+export type AdminInsightsWorkflowStatus = {
+	status: string
+	count: number
+}
+
+export type AdminInsightsJobHealth = {
+	totalJobs: number
+	enabledJobs: number
+	successRuns: number
+	errorRuns: number
+}
+
+/**
+ * Ordered activation funnel. Each step counts users who ever reached it, so
+ * counts are monotonically non-increasing down the list.
+ */
+export type AdminInsightsActivationStep = {
+	step:
+		| 'signed_up'
+		| 'email_verified'
+		| 'agent_connected'
+		| 'package_forked'
+		| 'package_run_succeeded'
+		| 'package_activated'
+	users: number
+}
+
+export type AdminInsightsActivation = {
+	steps: Array<AdminInsightsActivationStep>
+	/**
+	 * Forks split by who caused them. Agent-driven forks are real usage but a
+	 * weaker activation signal than a person choosing to install something,
+	 * and rows predating the distinction are counted as unknown.
+	 */
+	forksByActor: { human: number; agent: number; unknown: number }
+	/**
+	 * Median hours from email verification to activation, over users who have
+	 * activated. Null when nobody has.
+	 */
+	medianHoursToActivation: number | null
+}
+
+export type AdminInsightsOnboardingFunnelWindow = {
+	days: 7 | 28
+	steps: Array<{ stage: OnboardingFunnelStage; users: number }>
+}
+
+/**
+ * Unique stable user ids per funnel stage from Analytics Engine. `available`
+ * is false when the SQL API cannot be queried (local dev, missing credentials).
+ * Counts are sampled, so they are a floor, not a ledger.
+ */
+export type AdminInsightsOnboardingFunnel = {
+	available: boolean
+	windows: {
+		days7: AdminInsightsOnboardingFunnelWindow
+		days28: AdminInsightsOnboardingFunnelWindow
+	}
+}
+
+/** Content-free status for the hourly RunLog snapshot that insights reads. */
+export type AdminInsightsRunLogCompleteness = {
+	usersAttempted: number
+	usersLoaded: number
+	complete: boolean
+	/** When the hourly snapshot was written. Null until the first refresh. */
+	snapshotUpdatedAt: string | null
+}
+
+export type AdminInsightsDurationConsumer = {
+	stableUserId: string
+	username: string
+	totalDurationMs: number
+}
+
+export type AdminInsightsEventCountConsumer = {
+	stableUserId: string
+	username: string
+	eventCount: number
+}
+
+type AdminDynamicWorkerCost = {
+	uniqueWorkerDays: number
+	estimatedGrossUsd: number
+	usdPerUniqueDay: number
+	includedPerAccountMonth: number
+}
+
+type AdminDurableObjectDuration = {
+	/** RPC wall-clock proxy (StorageRunner only). */
+	gbSeconds: number
+	durationMs: number
+	rpcCount: number
+	memoryGb: number
+	/** Cloudflare-measured active time attributed to this user, this month. */
+	measured: AdminMeasuredDurableObjectDuration
+}
+
+type AdminMeasuredDurableObjectDuration = {
+	activeMs: number
+	gbSeconds: number
+	/** Gross at Cloudflare list, before the account-wide include. */
+	estimatedUsd: number
+	/** Latest UTC day with attributed rows; null when none yet. */
+	lastDay: string | null
+	byClass: Array<{ doClass: string; activeMs: number; gbSeconds: number }>
+}
+
+export type AdminInsightsDynamicWorkerCostConsumer = {
+	stableUserId: string
+	username: string
+	uniqueWorkerDays: number
+	estimatedGrossUsd: number
+	estimatedPaidUsdCents: number
+	estimatedMarginUsd: number
+	/** True only for catalog-backed paid accounts over list MRR. */
+	underwater: boolean
+	paidSource: AdminPaidSource
+	risk: AdminCostRiskKind
+}
+
+export type AdminInsightsDynamicWorkerCost = AdminDynamicWorkerCost & {
+	topConsumers: Array<AdminInsightsDynamicWorkerCostConsumer>
+	riskConsumers: Array<AdminInsightsDynamicWorkerCostConsumer>
+}
+
+export type AdminInsightsMetricDurationConsumers = {
+	metric: AdminUsageMetric
+	consumers: Array<AdminInsightsDurationConsumer>
+}
+
+type AdminInsightsEntitlementPressureResource = {
+	resource: AdminUsageEntitlementResource
+	label: string
+	current: number
+	limit: number
+	percentOfLimit: number
+}
+
+export type AdminInsightsEntitlementPressureUser = {
+	stableUserId: string
+	username: string
+	plan: AdminPlanName
+	pressuredResources: Array<AdminInsightsEntitlementPressureResource>
+}
+
+export type AdminInsightsPackageErrorRateCounts = {
+	events: number
+	errors: number
+	rate: number | null
+}
+
+export type AdminInsightsPackageErrorRateMetricRow =
+	AdminInsightsPackageErrorRateCounts & {
+		metric:
+			| 'package_export'
+			| 'package_static_call'
+			| 'job_run'
+			| 'workflow_run'
+	}
+
+type AdminInsightsPackageErrorRateWindow = {
+	start: string
+	end: string
+	combined: AdminInsightsPackageErrorRateCounts
+	by_metric: Array<AdminInsightsPackageErrorRateMetricRow>
+}
+
+type AdminInsightsPackageErrorRateComparison = {
+	kind: 'hour' | 'day'
+	recent: AdminInsightsPackageErrorRateWindow
+	previous: AdminInsightsPackageErrorRateWindow
+}
+
+/** Fleet package-runtime error rates. Missing when AE/KV is empty. */
+export type AdminInsightsPackageErrorRate = {
+	available: boolean
+	updatedAt: string | null
+	environment: string | null
+	day: AdminInsightsPackageErrorRateComparison | null
+	hour: AdminInsightsPackageErrorRateComparison | null
+	lastAlertAt: string | null
+	concentration: FleetPackageErrorRateConcentration | null
+}
+
+export type AdminInsightsLoaderData = {
+	ok: true
+	generatedAt: string
+	totals: AdminInsightsTotals
+	signupsByWeek: Array<AdminInsightsSignupWeek>
+	usageByMonth: Array<AdminInsightsUsageMonth>
+	emailByDay: Array<AdminInsightsEmailDay>
+	emailDeliveryByDay: Array<AdminInsightsEmailDeliveryDay>
+	plans: Array<AdminInsightsPlanSlice>
+	authByDay: Array<AdminInsightsAuthDay>
+	authByCategory: Array<AdminInsightsAuthCategory>
+	authHeatmap: Array<AdminInsightsHeatmapCell>
+	workflowStatuses: Array<AdminInsightsWorkflowStatus>
+	jobHealth: AdminInsightsJobHealth
+	activation: AdminInsightsActivation
+	onboardingFunnel: AdminInsightsOnboardingFunnel
+	launchSignals: AdminInsightsLaunchSignals
+	runLogCompleteness: AdminInsightsRunLogCompleteness
+	topRuntimeDurationConsumers: Array<AdminInsightsDurationConsumer>
+	topEventCountConsumers: Array<AdminInsightsEventCountConsumer>
+	topDurationConsumersByMetric: Array<AdminInsightsMetricDurationConsumers>
+	entitlementPressure: Array<AdminInsightsEntitlementPressureUser>
+	dynamicWorkerCost: AdminInsightsDynamicWorkerCost
+	packageErrorRate: AdminInsightsPackageErrorRate
+}
+
+type AdminSystemEmailListItem = {
+	id: string
+	inbox_local_part: string
+	from_address: string | null
+	envelope_from: string | null
+	subject: string | null
+	processing_status: string
+	raw_size: number
+	received_at: string | null
+	created_at: string
+	to_addresses: Array<string>
+}
+
+type AdminSystemEmailDetail = AdminSystemEmailListItem & {
+	cc_addresses: Array<string>
+	reply_to_addresses: Array<string>
+	headers: Record<string, Array<string>>
+	text_body: string | null
+	html_body: string | null
+	raw_mime: string | null
+	attachments: Array<{
+		id: string
+		filename: string | null
+		content_type: string | null
+		content_id: string | null
+		disposition: string | null
+		size: number
+		storage_kind: string
+		created_at: string
+	}>
+}
+
+export type AdminSystemEmailLoaderData = {
+	ok: true
+	ownerId: string
+	systemLocals: Array<string>
+	limits: {
+		maxMessageBytes: number
+		maxReceivesPerDay: number
+		maxStoredMessages: number
+		retentionDays: number
+		pruneBatchSize: number
+	}
+	messages: Array<AdminSystemEmailListItem>
+	selectedMessage: AdminSystemEmailDetail | null
+	page: number
+	pageSize: number
+	total: number
+}
+
+export type AdminPlatformFeedbackListItem = {
+	id: string
+	submitter_user_id: string
+	category:
+		| 'friction'
+		| 'bug'
+		| 'experience'
+		| 'suggestion'
+		| 'cancellation'
+		| 'other'
+	summary_untrusted: string
+	status: 'open' | 'triaged' | 'resolved' | 'dismissed'
+	reviewed_by_user_id: string | null
+	reviewed_at: string | null
+	created_at: string
+	updated_at: string
+}
+
+export type AdminPlatformFeedbackDetail = AdminPlatformFeedbackListItem & {
+	details_untrusted: string
+	admin_note: string | null
+	submitter: {
+		user_id: string
+		username: string | null
+		email: string | null
+	} | null
+}
+
+export type AdminPlatformFeedbackLoaderData = {
+	ok: true
+	feedback: Array<AdminPlatformFeedbackListItem>
+	selectedFeedback: AdminPlatformFeedbackDetail | null
+	page: number
+	pageSize: number
+	total: number
+	statusFilter: AdminPlatformFeedbackListItem['status'] | null
+	categoryFilter: AdminPlatformFeedbackListItem['category'] | null
+}
+
+export type AccountEmailDestinationsLoaderData = {
+	ok: true
+	destinations: Array<EmailNotificationDestination>
+	additionalLimit: number
+	additionalRemaining: number
+	message?: string
+}
+
+export type AccountFormerEmail = {
+	email: string
+	claimedAt: string
+}
+
+export type AccountProfileLoaderData = {
+	ok: true
+	email: string
+	emailVerified: boolean
+	emailVerificationDelivery?: EmailVerificationDelivery | null
+	username: string
+	displayName: string
+	bio: string | null
+	avatarUrl: string | null
+	profileVisibility: ProfileVisibility
+	formerEmails: Array<AccountFormerEmail>
+}
+
+export type AccountConnectionListItem = {
+	provider: string
+	label: string
+	displayName: string | null
+	createdAt: string
+}
+
+export type AccountConnectionsLoaderData = {
+	ok: true
+	connections: Array<AccountConnectionListItem>
+	canDisconnect: boolean
+	hasUsablePassword: boolean
+	availableProviders: Array<{ id: string; label: string }>
+	/** True when Discord is connected and operator guild-role sync is configured. */
+	canSyncDiscordRoles: boolean
+}
+
+export type OnboardingLoaderData = {
+	ok: true
+	loggedIn: boolean
+	/** Signed-in package scope owner; null for public onboarding payloads. */
+	username: string | null
+	mcpServerUrl: string
+	/** Highlight tokens for MCP tab snippets, keyed by highlightSnippetKey. */
+	mcpHighlights?: Record<string, HighlightedCode>
+	setupPrompt: string
+	/** Pre-connection "is Kody for me?" prompt; usable in any tool-calling agent. */
+	discoveryPrompt: string
+	/** Step 3 paste: ad hoc execute, then persist as a package. */
+	persistPrompt: string
+	/** True when the account has a memory, execute, or saved package. */
+	hasAccessWin: boolean
+	/**
+	 * True when the account has two or more unique inbound MCP OAuth
+	 * `clientId`s. That is unique hosts, not raw grant count and not "the
+	 * selected Step 3 host connected."
+	 */
+	hasSecondMcpClient: boolean
+	hasMcpClient: boolean
+	/** Best-effort labeled inbound MCP hosts, unique by `clientId`. */
+	connectedAgents: Array<ConnectedMcpAgent>
+	/**
+	 * One-gift-per-user Standard overlay after unique inbound clients
+	 * first reach 2. Lifecycle email / PackagedSingleClient can read
+	 * `received` and `active` without re-deriving the ledger.
+	 */
+	secondAgentStandardGift: SecondAgentStandardGiftState
+	emailVerified: boolean
+	needsOnboarding: boolean
+	/** Admin-featured listings offered as one-click starter installs. */
+	featuredListings: Array<OnboardingFeaturedListing>
+	/** Official workspace MCP chooser cards, with viewer connection overlay. */
+	featuredMcpServers: Array<OnboardingFeaturedMcpServer>
+	/** Non-featured MCP servers the viewer added themselves. */
+	customMcpServers: Array<OnboardingCustomMcpServer>
+	/**
+	 * Most recently updated saved-package user-facing name (`@scope/kody-id`)
+	 * for Step 3 "You made …" chrome. Null when logged out, unverified, or
+	 * the listing fails open.
+	 */
+	persistedPackageName: string | null
+	/**
+	 * Most recently updated active memory subject for Step 3 "You made …"
+	 * chrome. Null when logged out, unverified, none exist, or the listing
+	 * fails open. The chip truncates long subjects; this field stays raw.
+	 */
+	accessWinMemorySubject: string | null
+	/** Derived progress checklist; null when logged out. */
+	checklist: OnboardingChecklistLoaderData | null
+}
+
+export type OnboardingChecklistLoaderData = {
+	username: string
+	items: Array<{
+		id: OnboardingChecklistItemId
+		done: boolean
+	}>
+	/** True when the user dismissed the checklist everywhere. */
+	dismissed: boolean
+}
+
+export type AccountTwoFactorLoaderData = {
+	ok: true
+	enabled: boolean
+}
+
+type AccountPasskeyListItem = {
+	id: string
+	name: string
+	deviceType: string
+	backedUp: boolean
+	createdAt: string
+	lastUsedAt: string | null
+}
+
+export type AccountPasskeysLoaderData = {
+	ok: true
+	passkeys: Array<AccountPasskeyListItem>
+}
+
+type AccountMcpOauthClientListItem = {
+	id: string
+	label: string
+	clientId: string
+	redirectUris: Array<string>
+	createdAt: string
+	revokedAt: string | null
+}
+
+export type AccountMcpOauthClientsLoaderData = {
+	ok: true
+	clients: Array<AccountMcpOauthClientListItem>
+}
+
+export type AccountConnectedAgentListItem = ConnectedMcpAgent & {
+	grantIds: Array<string>
+}
+
+export type AccountConnectedAgentsLoaderData = {
+	ok: true
+	agents: Array<AccountConnectedAgentListItem>
+	/**
+	 * This deployment's MCP URL for connecting another host. Empty until the
+	 * account email is verified, matching the onboarding payload, so the page
+	 * cannot send an unverified user into the authorize → 403 loop.
+	 */
+	mcpServerUrl: string
+}
+
+type PackageWebhookVerification = {
+	type: 'hmac-sha256' | 'hmac-sha1'
+	header: string
+	secretName: string
+	encoding: 'hex' | 'base64'
+	prefix?: string
+	signedPayload?: 'body' | 'timestamp.body'
+} | null
+
+type PackageWebhookReplay = {
+	timestampHeader?: string
+	timestampFormat?:
+		| 'unix-seconds'
+		| 'unix-millis'
+		| 'iso-8601'
+		| 'stripe-signature'
+	toleranceSeconds?: number
+	deliveryIdHeader?: string
+} | null
+
+type PackageWebhookChallenge = {
+	type: 'x-activity-crc' | 'websub-hub' | 'meta-hub' | 'slack-url-verification'
+	secretName?: string
+} | null
+
+/**
+ * One declared package webhook joined with its minted URL state. Never
+ * carries the credential URL or `url_secret`: the settings section fetches
+ * those on demand through the `reveal` intent so they are not embedded in
+ * SSR HTML or any list payload.
+ */
+export type PackageWebhookListItem = {
+	/** `${packageKodyId}/${name}` — stable across list and reveal payloads. */
+	id: string
+	packageId: string
+	packageKodyId: string
+	packageName: string
+	name: string
+	exportName: string
+	description: string | null
+	responseMode: 'ack' | 'sync'
+	inputMode: 'request' | 'params'
+	rateLimitPerMinute: number
+	verification: PackageWebhookVerification
+	replay: PackageWebhookReplay
+	challenge: PackageWebhookChallenge
+	minted: boolean
+	handle: string | null
+	urlHost: string | null
+	enabled: boolean | null
+	/**
+	 * False for mints that predate encrypted secret storage. The UI offers
+	 * Rotate instead of Reveal for those, since the hash cannot rebuild the
+	 * URL.
+	 */
+	urlRecoverable: boolean
+	createdAt: string | null
+	rotatedAt: string | null
+	/** ISO timestamp while the previous URL still accepts deliveries after rotate. */
+	previousUrlActiveUntil: string | null
+}
+
+/** `/account/webhooks.json`: every declared webhook across the owner's packages. */
+
+export type ConnectWebhookApplyLoaderData =
+	| {
+			ok: true
+			handle: string
+			fingerprint: string
+			packageId: string
+			packageKodyId: string
+			packageName: string
+			webhookName: string
+			destination: {
+				method: string
+				url: string
+				headers: Array<{ name: string; value: string }>
+				body: string
+				secretName: string | null
+				integration: string | null
+				injectionSites: Array<string>
+				auth: string
+			}
+			alreadyGranted: boolean
+	  }
+	| {
+			ok: false
+			error: string
+			handle: string | null
+			fingerprint: string | null
+	  }
+
+export type AccountWebhooksLoaderData = {
+	ok: true
+	username: string
+	webhooks: Array<PackageWebhookListItem>
+}
+
+/** `/profiles/:username/packages/:kodyId/webhooks.json`: one package's webhooks. */
+export type PackageWebhooksLoaderData = {
+	ok: true
+	username: string
+	kodyId: string
+	webhooks: Array<PackageWebhookListItem>
+}
+
+/** Owner-only reveal result attached to mint / rotate / reveal responses. */
+export type PackageWebhookRevealedUrl = {
+	id: string
+	handle: string
+	url: string
+}
+
+export type PackageWebhooksActionPayload = PackageWebhooksLoaderData & {
+	revealed?: PackageWebhookRevealedUrl
+}
+
+export type PendingVerificationLoaderData = {
+	ok: true
+	email: string
+	emailVerificationDelivery?: EmailVerificationDelivery | null
+}
+
+export type EmailVerificationLoaderData =
+	| {
+			ok: true
+			kind:
+				| 'email_verify'
+				| 'email_change'
+				| 'email_claim_release'
+				| 'email_destination'
+			message: string
+			ctaHref?: string
+			ctaLabel?: string
+	  }
+	| {
+			ok: false
+			error: string
+			kind?:
+				| 'email_verify'
+				| 'email_change'
+				| 'email_claim_release'
+				| 'email_destination'
+			reason?: 'missing_token' | 'invalid_token' | 'expired_token'
+			ctaHref?: string
+			ctaLabel?: string
+	  }
+
+export type TipsUnsubscribeLoaderData =
+	| {
+			ok: true
+			alreadyOptedOut: boolean
+			message: string
+	  }
+	| {
+			ok: false
+			error: string
+	  }
+
+export type AccountIntegrationListItem = {
+	name: string
+	appSlug: string
+	provider: string
+	appLabel: string | null
+	accountLabel: string | null
+	/** Empty when a provider-family prefill could not agree on token URL. */
+	tokenUrl: string
+	apiBaseUrl?: string | null
+	/**
+	 * Omitted when a provider-family prefill could not agree on flow so the
+	 * connect UI keeps the query/default flow instead of inventing one.
+	 */
+	flow?: 'pkce' | 'confidential'
+	usePkce?: boolean | null
+	/** Empty when a provider-family prefill could not agree on client id. */
+	clientId: string
+	hasClientSecret?: boolean | null
+	requiredHosts?: Array<string>
+	tokenExchangeStyle?: 'form' | 'basic-json' | 'basic-form' | null
+	authorization?: {
+		authorizeUrl: string
+		scopes: Array<string>
+		scopeSeparator?: string | null
+		extraAuthorizeParams?: Record<string, string>
+	} | null
+	/**
+	 * True when this connection (or prefill) uses a platform built-in OAuth
+	 * app: the operator owns the client registration, the shared client secret
+	 * stays server-side, and the connect UI skips the client-credentials setup
+	 * step entirely.
+	 */
+	platform?: boolean
+	/** Scope menu for platform apps: the superset an operator verified. */
+	platformAllowedScopes?: Array<string>
+	/** Relative serving path of the operator-uploaded provider logo. */
+	platformLogoPath?: string | null
+	/** Explicit user-uploaded OAuth app logo (beats catalog and favicon). */
+	logoPath?: string | null
+	/** Auto-fetched favicon (loses to an explicit upload or catalog mark). */
+	autoLogoPath?: string | null
+	/** Operator-curated provider mark (after upload, before favicon). */
+	catalogLogoPath?: string | null
+	/** Operator-authored provider note for platform apps (limitations, caveats). */
+	platformDescription?: string | null
+	createdAt: string
+	updatedAt: string
+	/** Omitted or `any` is execute plus every package. */
+	usageMode?: 'any' | 'packages'
+	allowedPackageIds?: Array<string>
+	/** Last classified OAuth refresh outcome. Absent when the sign-in is healthy. */
+	lastAuthFailure?: IntegrationAuthFailureView
+}
+
+type AccountOauthAppConnectionRef = {
+	name: string
+	accountLabel: string | null
+}
+
+/**
+ * Shared OAuth app projection for the account UI. Includes sibling
+ * connection refs only — never secret or token values.
+ */
+export type AccountOauthAppListItem = {
+	slug: string
+	provider: string
+	label: string | null
+	clientId: string
+	hasClientSecret: boolean
+	tokenUrl: string
+	authorizeUrl: string | null
+	apiBaseUrl: string | null
+	flow: 'pkce' | 'confidential'
+	usePkce: boolean | null
+	tokenExchangeStyle: 'form' | 'basic-json' | 'basic-form' | null
+	scopeSeparator: string | null
+	extraAuthorizeParams: Record<string, string>
+	connectionCount: number
+	connections: Array<AccountOauthAppConnectionRef>
+	/**
+	 * True when this row is a platform (built-in) app the user connected to,
+	 * not a user-registered OAuth app.
+	 */
+	platform?: boolean
+	/** Relative serving path of the operator-uploaded provider logo. */
+	platformLogoPath?: string | null
+	/** Explicit user-uploaded OAuth app logo (beats catalog and favicon). */
+	logoPath?: string | null
+	/** Auto-fetched favicon (loses to an explicit upload or catalog mark). */
+	autoLogoPath?: string | null
+	/** Operator-curated provider mark (after upload, before favicon). */
+	catalogLogoPath?: string | null
+	createdAt: string
+	updatedAt: string
+}
+
+export type AccountIntegrationsLoaderData = {
+	ok: true
+	email: string
+	username: string
+	integrations: Array<AccountIntegrationListItem>
+	apps: Array<AccountOauthAppListItem>
+	savedPackages?: Array<{ id: string; kodyId: string }>
+	approval?: {
+		name: string
+		packageId: string
+		packageKodyId: string | null
+		usageMode: 'any' | 'packages'
+		alreadyGranted: boolean
+	} | null
+}
+
+export type AccountIntegrationDetailLoaderData = {
+	ok: true
+	integration: AccountIntegrationListItem | null
+	/**
+	 * Always false. Platform connect is retired; the field stays so older
+	 * clients keep a stable loader shape.
+	 */
+	builtInAvailable?: boolean
+	/** See {@link ConnectOauthExistingConnection}. */
+	existingConnection?: ConnectOauthExistingConnection | null
+	/**
+	 * True when the user already stores the client-secret secret the connect
+	 * page would use for this name (the stored integration's secret name,
+	 * else `<providerKey>ClientSecret`). Lets the page render its setup /
+	 * ready state without a follow-up secrets fetch.
+	 */
+	hasStoredClientSecret?: boolean
+}
+
+/**
+ * The connection currently stored under a requested name — enough for the
+ * connect page to warn before an OAuth flow replaces it with a different app.
+ */
+export type ConnectOauthExistingConnection = {
+	lane: 'user' | 'platform'
+	appSlug: string
+}
+
+/**
+ * /connect/oauth prefill for `?provider=` visits: the stored bring-your-own
+ * record the page merges into its config. `provider` is the normalized key
+ * the record was resolved for; null on callback visits, which restore config
+ * from sessionStorage instead.
+ */
+export type ConnectOauthLoaderData = {
+	ok: true
+	provider: string | null
+	integration: AccountIntegrationListItem | null
+	/** See {@link AccountIntegrationDetailLoaderData.builtInAvailable}. */
+	builtInAvailable?: boolean
+	/** See {@link ConnectOauthExistingConnection}. */
+	existingConnection?: ConnectOauthExistingConnection | null
+	/** See {@link AccountIntegrationDetailLoaderData.hasStoredClientSecret}. */
+	hasStoredClientSecret?: boolean
+	/**
+	 * Absolute redirect (callback) URI for this deployment — the page URL
+	 * without query — so SSR can render the Redirect URI card before the
+	 * browser can compute it from `window.location`.
+	 */
+	redirectUri?: string
+	/**
+	 * Signed-in bare `/connect/oauth` visits: saved connections that can
+	 * start from `?provider=` alone. Omitted on provider/callback visits.
+	 */
+	chooser?: {
+		options: Array<{
+			id: string
+			href: string
+			label: string
+			detail: string
+			providerKey: string
+			logoPath: string | null
+			autoLogoPath: string | null
+			catalogLogoPath: string | null
+			kind: 'connection'
+		}>
+	}
+}
+
+type AccountMcpServerListItem = {
+	id: string
+	name: string
+	url: string
+	enabled: boolean
+	state: string
+	connected: boolean
+	toolCount: number
+	authUrl: string | null
+	error: string | null
+	hasRefreshToken: boolean
+	tools: Array<string>
+	createdAt: string
+	updatedAt: string
+	/** Auto-fetched registrable-domain favicon for the server URL. */
+	autoLogoPath: string | null
+	/** Operator-curated catalog mark (before favicon). */
+	catalogLogoPath: string | null
+	usageMode: 'any' | 'packages'
+	allowedPackageIds: Array<string>
+}
+
+export type AccountMcpServersLoaderData = {
+	ok: true
+	email: string
+	username: string
+	/** Canonical origin Kody registers as the OAuth client_uri. */
+	oauthClientOrigin: string
+	/** Exact redirect URI remote authorization servers must allow. */
+	oauthCallbackUrl: string
+	/** HTTPS CIMD URL Kody presents as client_id, or null on http origins. */
+	oauthClientMetadataUrl: string | null
+	servers: Array<AccountMcpServerListItem>
+	savedPackages: Array<{ id: string; kodyId: string }>
+}
+
+export type AccountPackageToken = {
+	id: string
+	name: string
+	exportNames: Array<string>
+	createdAt: string
+	updatedAt: string
+	lastUsedAt: string | null
+	revokedAt: string | null
+}
+
+export type AccountPackageListingAhead = {
+	listingId: string
+	listingName: string
+	listingHref: string
+	originCommit: string
+	listingPinnedCommit: string
+	listingPublishedAt: string | null
+	prompt: string
+	diffHref: string
+}
+
+export type AccountPackageForkAhead = {
+	listingId: string
+	listingName: string
+	listingHref: string
+	diffHref: string
+}
+
+export type AccountPackageListItem = {
+	id: string
+	name: string
+	kodyId: string
+	description: string
+	tags: Array<string>
+	hasApp: boolean
+	sourceId: string
+	lockedAt: string | null
+	createdAt: string
+	updatedAt: string
+	hidden: boolean
+	isPrivate: boolean
+	hasCommunityListing: boolean
+	listingAhead: AccountPackageListingAhead | null
+	forkAhead: AccountPackageForkAhead | null
+}
+
+export type AccountPackageCommunityFork = {
+	listingName: string | null
+	adoptedAt: string | null
+	adoptionNote: string | null
+}
+
+export type AccountPackageDetail = AccountPackageListItem & {
+	searchText: string | null
+	exports: Array<string> | null
+	tokens: Array<AccountPackageToken>
+	publishedCommit: string | null
+	/** Null for self-authored packages (no `community_forks` row). */
+	communityFork: AccountPackageCommunityFork | null
+}
+
+type AccountPackagePublishDiffFile = {
+	path: string
+	status: 'added' | 'removed' | 'modified'
+	patch: string | null
+}
+
+export type AccountPackageApprovePublishLoaderData = {
+	ok: true
+	email: string
+	package: {
+		id: string
+		name: string
+		kodyId: string
+		sourceId: string
+		lockedAt: string | null
+	}
+	publishedCommit: string | null
+	pendingCommit: string | null
+	alreadyPublished: boolean
+	filesHref: string
+	packageHref: string
+	diff: {
+		files: Array<AccountPackagePublishDiffFile>
+		omittedCount: number
+	}
+}
+
+export type AccountPackagesSort = 'updated' | 'created' | 'name'
+
+export type AccountPackagesAppFilter = 'all' | 'with' | 'without'
+
+export type AccountPackagesLoaderData = {
+	ok: true
+	email: string
+	username: string
+	invocationUrlOrigin: string
+	packages: Array<AccountPackageListItem>
+	selectedPackage: AccountPackageDetail | null
+	page: number
+	pageSize: number
+	total: number
+	query: string
+	appFilter: AccountPackagesAppFilter
+	sort: AccountPackagesSort
+}
+
+export type AccountSecretListItem = {
+	id: string
+	name: string
+	scope: 'package' | 'user'
+	description: string
+	packageId: string | null
+	packageTitle: string | null
+	allowedHosts: Array<string>
+	allowedPackages: Array<string>
+	createdAt: string
+	updatedAt: string
+	expiresAt: string | null
+	ttlMs: number | null
+}
+
+export type AccountSecretDetail = AccountSecretListItem & {
+	value: string
+}
+
+type AccountSecretProviderBindingItem = {
+	provider: string
+	packageId: string
+	kodyId: string
+	doorSecretName: string
+	config: Record<string, string>
+	updatedAt: string
+}
+
+type AccountSecretProviderApproval = {
+	provider: string
+	canonicalRef: string
+	packageId: string
+	kodyId: string
+	alreadyGranted: boolean
+	error?: string
+}
+
+type AccountSecretProviderGrantItem = {
+	provider: string
+	canonicalRef: string
+	packageId: string
+	kodyId: string
+	createdAt: string
+}
+
+export type AccountSecretProvidersLoaderData = {
+	ok: true
+	email: string
+	bindings: Array<AccountSecretProviderBindingItem>
+	grants: Array<AccountSecretProviderGrantItem>
+	packages: Array<{
+		id: string
+		kodyId: string
+		name: string
+	}>
+	doorSecrets: Array<string>
+	approval: AccountSecretProviderApproval | null
+}
+
+export type AccountSecretsLoaderData = {
+	ok: true
+	email: string
+	packageOptions: Array<{
+		id: string
+		title: string
+		updatedAt: string
+	}>
+	packages: Array<{
+		id: string
+		kodyId: string
+		name: string
+	}>
+	secrets: Array<AccountSecretListItem>
+	selectedSecret: AccountSecretDetail | null
+	approval: {
+		name: string
+		names: Array<string>
+		scope: 'package' | 'session' | 'user'
+		requestedHost: string
+		requestedHosts: Array<string>
+		rejectedHosts: Array<{
+			host: string
+			reason: 'malformed' | 'unknown_suffix'
+			message: string
+		}>
+		requestedPackageId: string | null
+		currentAllowedHosts: Array<string>
+		currentAllowedPackages: Array<string>
+	} | null
+	approvalError: string | null
+}
+
+export type AccountValueListItem = {
+	id: string
+	name: string
+	description: string
+	valuePreview: string
+	updatedAt: string
+	ttlMs: number | null
+}
+
+export type AccountValueDetail = {
+	id: string
+	name: string
+	description: string
+	value: string
+	createdAt: string
+	updatedAt: string
+	ttlMs: number | null
+	scope: 'user'
+}
+
+export type AccountValuesLoaderData = {
+	ok: true
+	values: Array<AccountValueListItem>
+	selectedValue: AccountValueDetail | null
+	selectedValueId: string | null
+}
+
+type AccountJobOwnership = 'ad-hoc' | 'package'
+
+/**
+ * JSON-safe blob for job params (and similar free-form payloads). Remix
+ * entry props require SerializableValue; `unknown` is not allowed.
+ */
+type AccountLoaderJsonValue =
+	| string
+	| number
+	| boolean
+	| null
+	| Array<AccountLoaderJsonValue>
+	| { [key: string]: AccountLoaderJsonValue }
+
+type AccountJobSchedule =
+	| { type: 'once'; runAt: string }
+	| { type: 'interval'; every: string }
+	| { type: 'cron'; expression: string }
+
+export type AccountJobListItem = {
+	id: string
+	name: string
+	ownership: AccountJobOwnership
+	packageId: string | null
+	packageName: string | null
+	packageKodyId: string | null
+	scheduleSummary: string
+	scheduleType: AccountJobSchedule['type']
+	timezone: string
+	enabled: boolean
+	killSwitchEnabled: boolean
+	preserved: boolean
+	expiresAt: string | null
+	expired: boolean
+	dueNow: boolean
+	lastRunStatus: 'success' | 'error' | null
+	nextRunAt: string
+	lastRunAt: string | null
+	runCount: number
+	successCount: number
+	errorCount: number
+}
+
+type AccountJobRecentRun = {
+	id: string
+	startedAt: string
+	finishedAt: string
+	status: 'success' | 'error' | 'running'
+	durationMs: number
+	error: string | null
+}
+
+export type AccountJobDetail = AccountJobListItem & {
+	params: { [key: string]: AccountLoaderJsonValue } | null
+	paramsHighlighted?: HighlightedCode
+	schedule: AccountJobSchedule
+	lastRunError: string | null
+	lastDurationMs: number | null
+	recentRuns: Array<AccountJobRecentRun>
+	storageId: string
+	sourceId: string
+	publishedCommit: string | null
+	createdAt: string
+	updatedAt: string
+}
+
+type AccountJobsAlarm = {
+	bindingAvailable: boolean
+	status: string
+	storedUserId: string | null
+	alarmScheduledFor: string | null
+	nextRunnableJobId: string | null
+	nextRunnableRunAt: string | null
+	alarmInSync: boolean | null
+}
+
+export type AccountJobsLoaderData = {
+	ok: true
+	username: string
+	jobs: Array<AccountJobListItem>
+	selectedJob: AccountJobDetail | null
+	selectedJobId: string | null
+	alarm?: AccountJobsAlarm
+	retention: {
+		successOnceDays: number
+		failedOrNeverRanOnceDays: number
+		disabledRecurringDays: number
+		defaults: {
+			successOnce: number
+			failedOrNeverRanOnce: number
+			disabledRecurring: number
+		}
+	}
+}
+
+type AccountWorkflowSourceType = 'package' | 'inline'
+
+export type AccountWorkflowRunStatus =
+	| 'queued'
+	| 'running'
+	| 'paused'
+	| 'waiting'
+	| 'waitingForPause'
+	| 'unknown'
+	| 'complete'
+	| 'errored'
+	| 'terminated'
+	| 'cancelled'
+
+export type AccountWorkflowListItem = {
+	id: string
+	sourceType: AccountWorkflowSourceType
+	packageId: string | null
+	kodyId: string | null
+	sourceId: string | null
+	workflowName: string
+	exportName: string | null
+	idempotencyKey: string
+	runAt: string
+	planDate: string | null
+	status: AccountWorkflowRunStatus | null
+	createdAt: string
+	updatedAt: string
+	completedAt: string | null
+	lastError: string | null
+}
+
+export type AccountWorkflowDetail = AccountWorkflowListItem
+
+export type AccountWorkflowsLoaderData = {
+	ok: true
+	username: string
+	workflows: Array<AccountWorkflowListItem>
+	selectedWorkflow: AccountWorkflowDetail | null
+	selectedWorkflowId: string | null
+}
+
+export type AccountActivityRunListItem = {
+	id: string
+	surface: Exclude<AccountActivitySurfaceFilter, 'all'>
+	status: 'running' | 'success' | 'error'
+	name: string | null
+	startedAt: string
+	finishedAt: string | null
+	durationMs: number | null
+	errorName: string | null
+	errorMessage: string | null
+	errorTriage: 'ignored' | 'resolved' | null
+	packageId: string | null
+	jobId: string | null
+	logCount: number
+	idempotencyKey: string | null
+}
+
+type AccountActivityRunLog = {
+	sequence: number
+	level: 'debug' | 'info' | 'log' | 'warn' | 'error'
+	message: string
+	fields: { [key: string]: AccountLoaderJsonValue } | null
+}
+
+export type AccountActivityRunDetail = AccountActivityRunListItem & {
+	kodyId: string | null
+	sourceId: string | null
+	publishedCommit: string | null
+	storageId: string | null
+	workflowId: string | null
+	invocationId: string | null
+	sessionId: string | null
+	parentRunId: string | null
+	triageNote: string | null
+	triagedAt: string | null
+	triagedBy: string | null
+	metadata: { [key: string]: AccountLoaderJsonValue }
+	metadataHighlighted?: HighlightedCode
+	logs: Array<AccountActivityRunLog>
+}
+
+export type AccountActivitySummary = {
+	since: string
+	total: number
+	errors: number
+	ignored: number
+	resolved: number
+	running: number
+}
+
+export type AccountActivityLoaderData = {
+	ok: true
+	viewFilter: AccountActivityViewFilter
+	statusFilter: AccountActivityStatusFilter
+	surfaceFilter: AccountActivitySurfaceFilter
+	triageFilter: AccountActivityTriageFilter
+	summary: AccountActivitySummary
+	runs: Array<AccountActivityRunListItem>
+	nextCursor: string | null
+	selectedRun: AccountActivityRunDetail | null
+	selectedRunId: string | null
+	retentionDays: number
+}
+
+type AccountMemoryStatus = 'active' | 'archived' | 'deleted'
+
+export type AccountMemoryListItem = {
+	id: string
+	subject: string
+	category: string | null
+	status: AccountMemoryStatus
+	tags: Array<string>
+	summary: string
+	updatedAt: string
+}
+
+export type AccountMemoryDetail = AccountMemoryListItem & {
+	details: string
+	sourceUris: Array<string>
+	dedupeKey: string | null
+	createdAt: string
+	lastAccessedAt: string | null
+	deletedAt: string | null
+}
+
+export type AccountMemoriesLoaderData = {
+	ok: true
+	email: string
+	username: string
+	memories: Array<AccountMemoryListItem>
+	selectedMemory: AccountMemoryDetail | null
+	query: string
+	includeDeleted: boolean
+}
+
+type AccountEmailUsageEntry = {
+	count: number
+	limit: number
+}
+
+type AccountEmailUsage = {
+	plan: AdminPlanName
+	day: string
+	stored_messages: AccountEmailUsageEntry
+	sends_today: AccountEmailUsageEntry
+	receives_today: AccountEmailUsageEntry
+	max_message_bytes: number
+}
+
+type AccountEmailInboxAddress = {
+	id: string
+	address: string
+	enabled: boolean
+	created_at: string
+}
+
+type AccountEmailInbox = {
+	id: string
+	name: string
+	description: string
+	enabled: boolean
+	addresses: Array<AccountEmailInboxAddress>
+	created_at: string
+	updated_at: string
+}
+
+export type AccountEmailMessageListItem = {
+	id: string
+	direction: 'inbound' | 'outbound'
+	inbox_id: string | null
+	thread_id: string | null
+	from_address: string | null
+	envelope_from: string | null
+	to_addresses: Array<string>
+	subject: string | null
+	message_id_header: string | null
+	processing_status: string
+	classification: 'accepted' | 'quarantined'
+	classification_reason: string | null
+	provider_message_id: string | null
+	delivery_status: string | null
+	delivery_status_at: string | null
+	error: string | null
+	received_at: string | null
+	sent_at: string | null
+	created_at: string
+	updated_at: string
+}
+
+type AccountEmailAttachment = {
+	id: string
+	filename: string | null
+	content_type: string | null
+	content_id: string | null
+	disposition: string | null
+	size: number | null
+	storage_kind: string
+	storage_key: string | null
+	created_at: string
+}
+
+type AccountEmailDeliveryEvent = {
+	id: string
+	event_type: string
+	provider: string | null
+	provider_message_id: string | null
+	provider_event_id: string | null
+	detail_json: string
+	created_at: string
+}
+
+export type AccountEmailMessageDetail = AccountEmailMessageListItem & {
+	cc_addresses: Array<string>
+	bcc_addresses: Array<string>
+	reply_to_addresses: Array<string>
+	in_reply_to_header: string | null
+	references: Array<string>
+	headers: { [key: string]: AccountLoaderJsonValue } | null
+	auth_results: string | null
+	text_body: string | null
+	html_body: string | null
+	raw_size: number | null
+	attachments: Array<AccountEmailAttachment>
+	delivery_events: Array<AccountEmailDeliveryEvent>
+}
+
+export type AccountEmailLoaderData = {
+	ok: true
+	emailVerified: boolean
+	email: string
+	username: string
+	inboxAddress: string | null
+	verificationMessage: string | null
+	inboxes: Array<AccountEmailInbox>
+	messages: Array<AccountEmailMessageListItem>
+	selectedMessage: AccountEmailMessageDetail | null
+	usage: AccountEmailUsage | null
+	page: number
+	pageSize: number
+	total: number
+	query: string
+	/** `null` means no classification filter (all messages). */
+	classification: 'accepted' | 'quarantined' | null
+}
+
+type AuthProvidersLoaderData = {
+	ok: true
+	providers: Array<{ id: string; label: string }>
+	turnstileSiteKey: string | null
+}
+
+export type OAuthAuthorizeLoaderData =
+	| {
+			ok: true
+			client: { id: string; name: string }
+			scopes: Array<string>
+			emailVerified: boolean | null
+			/** When true, authorize UI must collect credentials (prompt=login / max_age). */
+			requireCredentials: boolean
+	  }
+	| {
+			ok: false
+			error: string
+			allowClientReset: boolean
+			code?: 'email_verification_required'
+	  }
+
+export type DiscordPageLoaderData = {
+	ok: true
+	signedIn: boolean
+	discordConnected: boolean
+	discordDisplayName: string | null
+	discordProviderAvailable: boolean
+	canSyncDiscordRoles: boolean
+	inviteUrl: string
+	turnstileSiteKey: string | null
+}
+
+export type AppLoaderData = {
+	blog?: BlogLoaderData
+	blogPost?: BlogPostLoaderData
+	docsConnect?: DocsConnectLoaderData
+	docDetail?: DocDetailLoaderData
+	communityDetailShell?:
+		| CommunityDetailShellLoaderData
+		| CommunityPackageUnauthorizedLoaderData
+		| CommunityPackageNotFoundLoaderData
+	packageFiles?: PackageFilesLoaderData
+	profileShell?: ProfileShellLoaderData | ProfileUnavailableLoaderData
+	profileList?: ProfileListLoaderData
+	adminUsers?: AdminUsersLoaderData
+	adminRoles?: AdminRolesLoaderData
+	adminCommunityReports?: AdminCommunityReportsLoaderData
+	adminReservedUsernames?: AdminReservedUsernamesLoaderData
+	adminFeatureFlags?: AdminFeatureFlagsLoaderData
+	adminBanners?: AdminBannersLoaderData
+	siteBanner?: SiteBannerLoaderData
+	youtubeWatch?: YoutubeWatchLoaderData
+	landingHeroVideos?: Array<LandingHeroVideo>
+	adminPlatformIntegrations?: AdminPlatformIntegrationsLoaderData
+	adminProviderMarks?: AdminProviderMarksLoaderData
+	adminCodemods?: AdminCodemodsLoaderData
+	adminInsights?: AdminInsightsLoaderData
+	adminPlatformFeedback?: AdminPlatformFeedbackLoaderData
+	adminSystemEmail?: AdminSystemEmailLoaderData
+	accountProfile?: AccountProfileLoaderData
+	accountConnections?: AccountConnectionsLoaderData
+	accountEmailDestinations?: AccountEmailDestinationsLoaderData
+	accountConnectedAgents?: AccountConnectedAgentsLoaderData
+	accountWebhooks?: AccountWebhooksLoaderData
+	connectWebhookApply?: ConnectWebhookApplyLoaderData
+	onboarding?: OnboardingLoaderData
+	connectOauth?: ConnectOauthLoaderData
+	pendingVerification?: PendingVerificationLoaderData
+	accountTwoFactor?: AccountTwoFactorLoaderData
+	accountPasskeys?: AccountPasskeysLoaderData
+	accountMcpOauthClients?: AccountMcpOauthClientsLoaderData
+	accountIntegrations?: AccountIntegrationsLoaderData
+	accountMcpServers?: AccountMcpServersLoaderData
+	accountPackages?: AccountPackagesLoaderData
+	accountPackageApprovePublish?: AccountPackageApprovePublishLoaderData
+	accountSecrets?: AccountSecretsLoaderData
+	accountSecretProviders?: AccountSecretProvidersLoaderData
+	accountValues?: AccountValuesLoaderData
+	accountJobs?: AccountJobsLoaderData
+	accountWorkflows?: AccountWorkflowsLoaderData
+	accountActivity?: AccountActivityLoaderData
+	accountMemories?: AccountMemoriesLoaderData
+	accountEmail?: AccountEmailLoaderData
+	authProviders?: AuthProvidersLoaderData
+	emailVerification?: EmailVerificationLoaderData
+	tipsUnsubscribe?: TipsUnsubscribeLoaderData
+	oauthAuthorize?: OAuthAuthorizeLoaderData
+	accountBilling?: AccountBillingLoaderData
+	accountBillingSuccess?: AccountBillingSuccessLoaderData
+	accountUsage?: AccountUsageLoaderData
+	accountWaiting?: AccountWaitingLoaderData
+	accountExperiments?: AccountExperimentsLoaderData
+	accountShared?: AccountSharedLoaderData
+	packageShareApproveChanges?: PackageShareApproveChangesLoaderData
+	discord?: DiscordPageLoaderData
+	walkthroughHosts?: WalkthroughHostPick
+	onboardingAgentChooser?: OnboardingAgentChooserPick
+}
+
+export type AccountBillingLoaderData = {
+	ok: true
+	configured: boolean
+	manualPlan: AdminPlanName
+	stripePlan: AdminPlanName | null
+	/**
+	 * Billing interval of the active Stripe subscription when it uses a
+	 * configured price; null when unknown (retired price, no refresh).
+	 */
+	stripeInterval: 'month' | 'year' | null
+	effectivePlan: AdminPlanName
+	hasStripeCustomer: boolean
+	cancelAt: string | null
+	/** Stripe subscription status from on-page refresh; null if unknown/unavailable. */
+	subscriptionStatus: string | null
+	purchasablePlans: Array<'pro'>
+	/** Stripe subscription uses the purchasable Pro price (credit wallet). */
+	creditsEligible: boolean
+	/** Deep link to the Credits section of the usage page. */
+	creditsHref: '/account/usage#credits'
+	/** Deep link to the account usage page (limits / consumption). */
+	usageHref: '/account/usage'
+	referralProgram: ReferralProgramSummary | null
+	error?: string
+	/** Success notice mapped from `?billing=<code>` (e.g. a completed plan change). */
+	notice?: string
+}
+
+export type AccountCreditsLimit = {
+	resource: string
+	label: string
+	/** Included with the Pro subscription. */
+	included: number
+	/** How far credits can carry usage past the include. */
+	creditsCeiling: number
+}
+
+export type AccountCreditsLedgerItem = {
+	id: string
+	kind: 'top_up' | 'auto_refill' | 'admin_grant' | 'debit'
+	amountMicroUsd: number
+	description: string
+	createdAt: string
+}
+
+/**
+ * One credit-debit meter in the usage page's Credits section (rate card +
+ * this-period usage). Same meter path as included compute. Customer labels
+ * only (Worker compute / Rows read) — never UWD / Max jargon.
+ */
+export type AccountCreditsDebitMeter = {
+	meter: string
+	label: string
+	/** Published unit rate from `creditDebitRates`. */
+	unitRateLabel: string
+	/** Monthly include for the account's plan / wallet state. */
+	include: number
+	/** Usage this UTC month. */
+	used: number
+	/** Units past the include (billable when the wallet is funded). */
+	pastInclude: number
+	/** `used / include` (same as usage-page meter percent). */
+	percentOfInclude: number
+	/** Estimated credits for `pastInclude` at the published rate. */
+	estCreditsMicroUsd: number
+}
+
+/**
+ * Activity, included compute, and the credits alarm on `/account/usage`.
+ * The entitlement-warning emails share the same presentation helpers.
+ */
+export type AccountUsageStoryData = {
+	/** This UTC month's code executions and runs (the primary busy signal). */
+	activity: AccountActivity
+	/** Worker compute + Rows read vs the monthly include, ready to render. */
+	includedCompute: Array<IncludedComputeMeter>
+	includedComputeSummary: string
+	/** Set only when the wallet or access is actually at risk. */
+	creditsAlarm: CreditsAlarm | null
+}
+
+/**
+ * Credits section of `/account/usage`. Without a wallet (Free, retired
+ * Standard/Pro, gift/referral overlays, manual grants) it is only the
+ * switch-to-Pro prompt: no balance, no purchase UI.
+ */
+export type AccountUsageCredits =
+	| {
+			eligible: false
+			/** Checkout for the purchasable Pro is configured. */
+			canSwitchToPro: boolean
+			billingHref: '/account/billing'
+	  }
+	| AccountUsageCreditsWallet
+
+export type AccountUsageCreditsWallet = {
+	/** Purchasable Pro (or admin-eligible Pro) with the credit wallet. */
+	eligible: true
+	configured: boolean
+	/** Checkout for the purchasable Pro is configured. */
+	canSwitchToPro: boolean
+	/**
+	 * Subscribed on the purchasable Pro price with a Stripe customer, on a
+	 * deployment with billing configured.
+	 */
+	canBuyCredits: boolean
+	balanceMicroUsd: number
+	/**
+	 * Eligible wallet with credits left: usage past the include runs on
+	 * credits. False means usage past the include stops.
+	 */
+	hasCredits: boolean
+	packsCents: Array<number>
+	customMinCents: number
+	customMaxCents: number
+	autoRefill: {
+		enabled: boolean
+		thresholdCents: number | null
+		amountCents: number | null
+		monthlyCapCents: number | null
+		minThresholdCents: number
+		refilledThisMonthCents: number
+		/** A top-up saved a card for off-session refills. */
+		hasPaymentMethod: boolean
+	}
+	notify: {
+		autoRefilled: boolean
+		monthlyCap: boolean
+		lowBalance: boolean
+	}
+	limits: Array<AccountCreditsLimit>
+	/** Worker compute + Rows read rate card and this-period usage. */
+	debitMeters: Array<AccountCreditsDebitMeter>
+	recent: Array<AccountCreditsLedgerItem>
+}
+
+export type AccountBillingSuccessLoaderData = {
+	ok: true
+	needsOnboarding: boolean
+}
+
+export type AccountUsageWeekWindow = {
+	current: number
+	limit: number
+	percentOfLimit: number | null
+	overEightyPercent: boolean
+}
+
+export type AccountUsageEntitlementConsumption = {
+	resource: string
+	label: string
+	group: 'daily' | 'counts' | 'storage' | 'limits' | 'monthly'
+	kind: 'counter' | 'per_unit_max'
+	whatCounts: string
+	howToReduce: string
+	current: number
+	limit: number
+	percentOfLimit: number | null
+	overEightyPercent: boolean
+	week?: AccountUsageWeekWindow
+}
+
+type AccountUsageComputeMeter = {
+	resource: ComputeOverageWarningResource
+	label: string
+	whatCounts: string
+	howToReduce: string
+	current: number
+	include: number
+	percentOfLimit: number
+	overEightyPercent: boolean
+	creditsStatus: ComputeIncludeCreditsStatus
+}
+
+export type AccountUsageComputeOverage = {
+	meters: Array<AccountUsageComputeMeter>
+	creditWallet: CreditWalletState
+	/** Past-include state across both meters (worst meter wins). */
+	creditsStatus: ComputeIncludeCreditsStatus
+	/** This month's above-include usage at credit debit rates. */
+	creditsCostMicroUsd: number
+}
+
+export type AccountUsageLoaderData = AccountUsageStoryData & {
+	ok: true
+	plan: AdminPlanName
+	manualPlan: AdminPlanName
+	stripePlan: AdminPlanName | null
+	today: string
+	weekStart: string
+	entitlementConsumption: Array<AccountUsageEntitlementConsumption>
+	warnings: Array<AccountUsageEntitlementConsumption>
+	computeOverage: AccountUsageComputeOverage
+	/** True only for the purchasable Pro with a Stripe customer. */
+	canBuyCredits: boolean
+	/** Null for operator plans, which have no credits story. */
+	credits: AccountUsageCredits | null
+	/** Credits outcome (top-up added, settings saved) shown in that section. */
+	notice?: string
+	error?: string
+}
+
+export type AccountWaitingLoaderData = {
+	ok: true
+	items: Array<WaitingItem>
+}
+
+export type AccountExperimentsLoaderData = {
+	ok: true
+	experimentsOptIn: boolean
+}
+
+export type AccountSharedLoaderData = {
+	ok: true
+	outbound: Array<PackageShareGrantLoaderView>
+	inbound: Array<PackageShareGrantLoaderView>
+}
+
+export type PackageShareApproveChangesLoaderData = {
+	ok: true
+	grant: PackageShareGrantLoaderView
+	acceptedCommit: string
+	currentCommit: string
+	files: Array<PackageShareFileChange>
+}

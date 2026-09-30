@@ -1,0 +1,1891 @@
+import {
+	normalizeCode,
+	sanitizeToolName,
+	ToolDispatcher,
+	type ExecuteResult,
+	type ResolvedProvider,
+} from '@cloudflare/codemode'
+import {
+	getErrorCauseChain,
+	getErrorMessage,
+} from '@kody-internal/shared/error-message.ts'
+import { type ContentBlock } from '@modelcontextprotocol/sdk/types.js'
+import { exports as workerExports } from 'cloudflare:workers'
+import {
+	dynamicWorkerUsageTailLoaderIdSuffix,
+	type DynamicWorkerUsageTailProps,
+} from '#worker/usage/dynamic-worker-cpu.ts'
+import {
+	outboundFetchTimeoutMsForExecutor,
+	retrieverOutboundFetchDeniedMessage,
+	type FetchGatewayProps,
+} from '#mcp/fetch-gateway.ts'
+import {
+	readBaseUrlHostname,
+	type RawFetchHostSink,
+} from '#mcp/raw-fetch-host-nudge.ts'
+import { extractMcpPassthrough } from '#mcp/downstream-mcp-result.ts'
+import { recordUsage, type UsageEnv } from '#worker/usage/record-usage.ts'
+import { recordUniqueDynamicWorkerDay } from '#worker/usage/dynamic-worker-day.ts'
+import {
+	countDynamicWorkerModuleGraphChars,
+	countEvaluateInvocationParamsChars,
+	recordDynamicWorkerInvoke,
+} from '#worker/usage/dynamic-worker-invoke.ts'
+import { type DynamicWorkerDaySurface } from '#worker/usage/dynamic-worker-day-surface.ts'
+import { type ExecuteThinGlueClass } from '#worker/usage/execute-thin-glue.ts'
+import { type UserMeterEnv } from '#worker/entitlements/user-meter-client.ts'
+import { type WorkerLoaderModules } from '#worker/worker-loader-types.ts'
+import {
+	isSecretAuthRequiredMessage,
+	parseHostApprovalRequiredBatchMessage,
+	parseHostApprovalRequiredMessage,
+	parseMissingSecretMessage,
+	parsePackageAccessRequiredBatchMessage,
+	parsePackageAccessRequiredMessage,
+	parseSecretScopeUnavailableMessage,
+} from '#mcp/secrets/errors.ts'
+import { type SecretScope } from '#mcp/secrets/types.ts'
+import {
+	isComputeOverageLimitError,
+	isEntitlementLimitError,
+	isJobIntervalFloorError,
+	parseComputeOverageLimitMessage,
+	parseEntitlementLimitMessage,
+	parseJobIntervalFloorMessage,
+	type ComputeOverageLimitErrorDetails,
+	type EntitlementLimitErrorDetails,
+} from '#worker/entitlements/errors.ts'
+import { buildIntegrationReconnectHref } from '#universal/connection-trouble.ts'
+import { isIntegrationTokenRefreshCallerMessage } from '#worker/integrations/token-refresh.ts'
+import {
+	type KodyMcpServerMetadata,
+	type KodyResolvedProvider,
+} from '#mcp/kody-remote-types.ts'
+import {
+	createKodyProviderProxySource,
+	projectKodyRemoteProxyMetadata,
+	type KodyRemoteProxyEvaluateMetadata,
+} from '#mcp/kody-provider-proxy-source.ts'
+import {
+	grantedSecretAuthorityPackageIdSet,
+	runWithCurrentSecretAuthority,
+	runWithSecretAuthorityScope,
+	secretAuthorityHeaderName,
+	takeSecretAuthorityFromCapabilityArgs,
+} from '#mcp/secrets/secret-authority.ts'
+import { parseUnboundRuntimeHelperMessage } from '#worker/package-runtime/unbound-runtime-helpers.ts'
+import { createDynamicWorkerCompatibilityOptions } from '#worker/dynamic-worker-compatibility.ts'
+import {
+	getDynamicWorkerEvaluationContext,
+	isDynamicWorkerCapacityErrorMessage,
+	maxConcurrentDynamicWorkerEvaluationsPerRequest,
+	runWithCapturedDynamicWorkerEvaluationContext,
+	withDynamicWorkerEvaluationPermit,
+} from '#worker/dynamic-worker-evaluation-budget.ts'
+import {
+	executorSandboxTimeoutMessage,
+	executorSandboxTimeoutMessageExplanation,
+	executorSandboxTimeoutMessagePrefix,
+	isExecutorSandboxTimeoutMessage,
+} from '#worker/sentry-options.ts'
+import {
+	callerDisconnectedSandboxLog,
+	callerDisconnectedSandboxMessage,
+	createCallerDisconnectedExecutionError,
+	isCallerDisconnectedSandboxMessage,
+} from '#worker/caller-disconnect.ts'
+import { parseStorageEstimateReadErrorMessage } from '#worker/storage-estimate-error.ts'
+import {
+	kodyCallDispatcherName,
+	kodyProviderEvaluateBindingName,
+} from '#worker/kody-evaluate-bindings.ts'
+import { isTransientDurableObjectResetError } from '#worker/durable-object-reset-retry.ts'
+import { createStableDynamicWorkerId } from '#mcp/dynamic-worker-id.ts'
+import {
+	createEvaluationSideEffectTracker,
+	createHostSideEffectProvider,
+	hostSideEffectProviderName,
+	isPlatformOnlyHostSideEffectProvider,
+	type EvaluationHostSideEffects,
+	type EvaluationSideEffectTracker,
+} from '#mcp/evaluation-side-effects.ts'
+
+type WorkerLoopbackExports = Exclude<typeof workerExports, undefined>
+
+export { runWithDynamicWorkerEvaluationBudget } from '#worker/dynamic-worker-evaluation-budget.ts'
+
+export const defaultExecutionResponseLimitBytes = 102_400
+const maxSupportedExecutorTimeoutMs = 2_147_483_647
+const dynamicWorkerMainModule = 'executor.js'
+const hostEvaluationDrainGraceMs = 100
+const reservedProviderNames = new Set([
+	'__dispatchers',
+	'__invocation',
+	'__logs',
+	hostSideEffectProviderName,
+])
+const validProviderNamePattern = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/
+const javascriptReservedWords = new Set([
+	'arguments',
+	'async',
+	'await',
+	'break',
+	'case',
+	'catch',
+	'class',
+	'const',
+	'continue',
+	'debugger',
+	'default',
+	'delete',
+	'do',
+	'else',
+	'enum',
+	'export',
+	'extends',
+	'false',
+	'finally',
+	'for',
+	'function',
+	'if',
+	'implements',
+	'import',
+	'in',
+	'interface',
+	'instanceof',
+	'let',
+	'new',
+	'null',
+	'package',
+	'private',
+	'protected',
+	'public',
+	'return',
+	'static',
+	'super',
+	'switch',
+	'this',
+	'throw',
+	'true',
+	'try',
+	'typeof',
+	'var',
+	'void',
+	'while',
+	'with',
+	'yield',
+	'eval',
+])
+
+type DynamicWorkerExecutorInput = {
+	loader: Env['LOADER']
+	timeout: number
+	signal?: AbortSignal
+	globalOutbound: Fetcher | null
+	/**
+	 * Builds the tail worker that records Cloudflare-measured CPU for this
+	 * isolate (`dynamic_worker_cpu`). Omitted when the loopback export is not
+	 * available; the run is unaffected either way.
+	 */
+	createUsageTail?: (props: DynamicWorkerUsageTailProps) => Fetcher
+	modules?: WorkerLoaderModules
+	gatewayProps: FetchGatewayProps
+	usageEnv: UsageEnv & UserMeterEnv
+	rawFetchHostSink?: RawFetchHostSink
+	/**
+	 * When false, skip the `execute` usage event. Job, package-export, and
+	 * other nested surfaces record their own metrics; only MCP execute-tool
+	 * runs (and ad-hoc executor callers) should emit `execute`.
+	 */
+	recordExecuteUsage?: boolean
+	/**
+	 * Surface that minted this Dynamic Worker. Defaults to `execute` for
+	 * ad-hoc executor callers. Nested surfaces pass the mapped UWD tag.
+	 */
+	surface?: DynamicWorkerDaySurface
+	/**
+	 * Host-side thin/glue class for ad-hoc execute usage events. Omit on
+	 * nested surfaces.
+	 */
+	executeShape?: ExecuteThinGlueClass | null
+	/**
+	 * When set, unique-worker-day metering and the first-execute activation
+	 * stamp run on `waitUntil` instead of the sandbox critical path. Without
+	 * an execution context the writes stay awaited so they are not dropped.
+	 */
+	waitUntil?: (promise: Promise<unknown>) => void
+}
+
+export type DynamicWorkerEvaluatePackageContext = {
+	packageId: string
+	kodyId: string
+	sourceId?: string | null
+} | null
+
+/**
+ * Per-evaluate payload. Must stay out of WorkerCode so LOADER ids reuse
+ * across different `params` / `packageContext` / live MCP status.
+ */
+export type DynamicWorkerEvaluateInvocation = {
+	params?: unknown
+	packageContext?: DynamicWorkerEvaluatePackageContext
+	mcpServers?: Array<KodyRemoteProxyEvaluateMetadata>
+}
+
+type DynamicWorkerEntrypoint = {
+	evaluate(
+		dispatchers: Record<string, ToolDispatcher>,
+		invocation?: DynamicWorkerEvaluateInvocation,
+	): Promise<{
+		result: unknown
+		error?: string
+		logs?: Array<string>
+		rawFetchHosts?: Array<string>
+	}>
+}
+
+function cloneEvaluateJsonValue<T>(value: T): T {
+	if (value === undefined) return value
+	return JSON.parse(JSON.stringify(value)) as T
+}
+
+function resolveEvaluateInvocation(
+	providers: Array<ResolvedProvider>,
+	invocation?: DynamicWorkerEvaluateInvocation,
+): DynamicWorkerEvaluateInvocation {
+	const kodyProvider = providers.find(
+		(provider) => provider.name === 'kody',
+	) as KodyResolvedProvider | undefined
+	const packageContext =
+		cloneEvaluateJsonValue(invocation?.packageContext ?? null) ?? null
+	return {
+		params: cloneEvaluateJsonValue(invocation?.params),
+		packageContext:
+			packageContext == null ? null : Object.freeze({ ...packageContext }),
+		mcpServers: projectKodyRemoteProxyMetadata(
+			invocation?.mcpServers ?? kodyProvider?.kodyMcpServers ?? [],
+		),
+	}
+}
+
+export type ExecuteResultWithHostSideEffects = ExecuteResult & {
+	hostMediatedSideEffects: EvaluationHostSideEffects
+}
+
+function attachHostSideEffects(
+	result: ExecuteResult,
+	sideEffects: EvaluationSideEffectTracker,
+): ExecuteResultWithHostSideEffects {
+	return {
+		...result,
+		hostMediatedSideEffects: sideEffects.snapshot(),
+	}
+}
+
+class HostEvaluationTimeoutError<T> extends Error {
+	name = 'TimeoutError'
+	evaluationResult?: T
+}
+
+/**
+ * The executor is the only component that knows the enforced budget at the
+ * moment a timeout fires, so it bakes the budget into the message
+ * (`Execution timed out after 90s: …`). The string is the part of the result
+ * that survives every boundary the error crosses (dynamic worker RPC,
+ * persisted invocation responses, `UserCodeError` rethrows), so downstream
+ * consumers can report the actual budget without guessing the run context.
+ */
+export function createExecutorSandboxTimeoutMessage(timeoutMs: number) {
+	return `${executorSandboxTimeoutMessagePrefix} after ${formatTimeoutBudget(timeoutMs)}${executorSandboxTimeoutMessageExplanation}`
+}
+
+function throwIfEvaluationDeadlineAborted(signal?: AbortSignal) {
+	if (!signal?.aborted) return
+	const reason = signal.reason
+	if (reason instanceof Error) throw reason
+	throw new Error(executorSandboxTimeoutMessage)
+}
+
+/**
+ * Host-side deadline around Worker Loader `evaluate` (and its permit wait).
+ * The sandbox also races an internal timer, but that only helps once the
+ * dynamic worker is running and can schedule timers. If `evaluate` never
+ * returns (or never starts), this host race is what bounds the request and
+ * lets run-record finish write an error instead of leaving `running` forever.
+ *
+ * The AbortSignal is shared with the permit queue so a timed-out waiter is
+ * removed and cannot start `evaluate` after `execute` has already returned.
+ */
+export async function raceWithHostEvaluationDeadline<T>(
+	evaluate: (signal: AbortSignal) => Promise<T>,
+	timeoutMs: number,
+	externalSignal?: AbortSignal,
+): Promise<T> {
+	if (
+		!externalSignal &&
+		(!Number.isFinite(timeoutMs) || timeoutMs >= maxSupportedExecutorTimeoutMs)
+	) {
+		return await evaluate(new AbortController().signal)
+	}
+	const controller = new AbortController()
+	let timeoutId: ReturnType<typeof setTimeout> | undefined
+	let rejectDeadline: ((error: Error) => void) | undefined
+	const abortWith = (error: Error) => {
+		if (controller.signal.aborted) return
+		controller.abort(error)
+		rejectDeadline?.(error)
+	}
+	const onExternalAbort = () => {
+		const reason = externalSignal?.reason
+		// A caller disconnect must not be relabeled as the sandbox wall-clock
+		// timeout. Only a real Error reason (AbortError, or an upstream
+		// timeout) is forwarded; a bare abort is the inbound request ending.
+		if (reason instanceof Error) {
+			abortWith(reason)
+			return
+		}
+		abortWith(new DOMException(callerDisconnectedSandboxMessage, 'AbortError'))
+	}
+	const timeoutPromise = new Promise<never>((_resolve, reject) => {
+		rejectDeadline = reject
+		if (
+			Number.isFinite(timeoutMs) &&
+			timeoutMs < maxSupportedExecutorTimeoutMs
+		) {
+			timeoutId = setTimeout(
+				() =>
+					abortWith(
+						new HostEvaluationTimeoutError<T>(
+							createExecutorSandboxTimeoutMessage(timeoutMs),
+						),
+					),
+				Math.max(1, timeoutMs),
+			)
+		}
+		if (externalSignal) {
+			externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+			if (externalSignal.aborted) onExternalAbort()
+		}
+	})
+	const evaluationPromise = Promise.resolve().then(
+		async () => await evaluate(controller.signal),
+	)
+	try {
+		return await Promise.race([evaluationPromise, timeoutPromise])
+	} catch (error) {
+		if (error instanceof HostEvaluationTimeoutError) {
+			const drained = await settleWithin(
+				evaluationPromise,
+				hostEvaluationDrainGraceMs,
+			)
+			if (drained.status === 'fulfilled') {
+				error.evaluationResult = drained.value
+			}
+		}
+		throw error
+	} finally {
+		if (timeoutId !== undefined) {
+			clearTimeout(timeoutId)
+		}
+		externalSignal?.removeEventListener('abort', onExternalAbort)
+		rejectDeadline = undefined
+	}
+}
+
+async function settleWithin<T>(
+	promise: Promise<T>,
+	timeoutMs: number,
+): Promise<PromiseSettledResult<T> | { status: 'timed-out' }> {
+	let timeoutId: ReturnType<typeof setTimeout> | undefined
+	try {
+		return await Promise.race([
+			promise.then(
+				(value): PromiseFulfilledResult<T> => ({
+					status: 'fulfilled',
+					value,
+				}),
+				(reason): PromiseRejectedResult => ({
+					status: 'rejected',
+					reason,
+				}),
+			),
+			new Promise<{ status: 'timed-out' }>((resolve) => {
+				timeoutId = setTimeout(
+					() => resolve({ status: 'timed-out' }),
+					timeoutMs,
+				)
+			}),
+		])
+	} finally {
+		if (timeoutId !== undefined) clearTimeout(timeoutId)
+	}
+}
+
+export function createNamedExecutionError(error: unknown) {
+	const message = getErrorMessage(error)
+	if (isCallerDisconnectedSandboxMessage(message)) {
+		return createCallerDisconnectedExecutionError()
+	}
+	const namedError = new Error(message)
+	if (isExecutorSandboxTimeoutMessage(message)) {
+		namedError.name = 'TimeoutError'
+	}
+	return namedError
+}
+
+export function createKodyRemoteProxy(input: {
+	entries: Array<
+		Pick<KodyMcpServerMetadata, 'name' | 'status' | 'capabilities'>
+	>
+	callTool: (dispatchName: string, args: unknown) => Promise<unknown>
+	entityLabel?: string
+	shortEntityLabel?: string
+	capabilityLabel?: string
+}) {
+	const entityLabel = input.entityLabel ?? 'MCP server'
+	const shortEntityLabel = input.shortEntityLabel ?? 'MCP server'
+	const capabilityLabel = input.capabilityLabel ?? 'MCP tool'
+	type ConnectorEntry = (typeof input.entries)[number] & {
+		capabilitiesByName: Map<
+			string,
+			(typeof input.entries)[number]['capabilities'][number]
+		>
+	}
+	const connectors = new Map<string, ConnectorEntry>(
+		input.entries.map((connector) => [
+			connector.name,
+			{
+				...connector,
+				capabilitiesByName: new Map(
+					connector.capabilities.map((capability) => [
+						capability.name,
+						capability,
+					]),
+				),
+			} satisfies ConnectorEntry,
+		]),
+	)
+	const formatNames = (names: Array<string>) =>
+		names.length > 0
+			? names.map((name) => JSON.stringify(name)).join(', ')
+			: 'none'
+	const isProxyLookupKey = (name: string | symbol) =>
+		typeof name === 'symbol' || name === 'then'
+	const createReflectingProxy = (
+		knownKeys: Array<string>,
+		getValue: (name: string) => unknown,
+	) =>
+		new Proxy(
+			{},
+			{
+				get(_target, name) {
+					if (isProxyLookupKey(name)) return undefined
+					return getValue(String(name))
+				},
+				has(_target, name) {
+					if (isProxyLookupKey(name)) return false
+					return knownKeys.includes(String(name))
+				},
+				ownKeys() {
+					return [...knownKeys]
+				},
+				getOwnPropertyDescriptor(_target, name) {
+					if (isProxyLookupKey(name)) return undefined
+					return {
+						configurable: true,
+						enumerable: true,
+						writable: true,
+						value: getValue(String(name)),
+					}
+				},
+			},
+		)
+
+	const createCapabilityProxy = (
+		connector: ConnectorEntry,
+		connectorName: string,
+	) =>
+		createReflectingProxy(
+			connector.capabilities.map((capability) => capability.name),
+			(capabilityName) => {
+				const capability = connector.capabilitiesByName.get(capabilityName)
+				if (!capability) {
+					if (!connector.status.connected || connector.status.toolCount === 0) {
+						throw new Error(connector.status.unavailableMessage)
+					}
+					throw new Error(
+						`Unknown ${capabilityLabel} "${capabilityName}" for ${shortEntityLabel} "${connectorName}". Available capabilities: ${formatNames(connector.capabilities.map((entry) => entry.name))}.`,
+					)
+				}
+				return async (args: unknown) => {
+					if (!connector.status.connected || connector.status.toolCount === 0) {
+						throw new Error(connector.status.unavailableMessage)
+					}
+					return await input.callTool(capability.dispatchName, args)
+				}
+			},
+		)
+
+	return createReflectingProxy([...connectors.keys()], (connectorName) => {
+		const connector = connectors.get(connectorName)
+		if (!connector) {
+			throw new Error(
+				`Unknown ${entityLabel} "${connectorName}". Available ${entityLabel}s: ${formatNames([...connectors.keys()])}.`,
+			)
+		}
+		return createCapabilityProxy(connector, connectorName)
+	})
+}
+
+export { retrieverOutboundFetchDeniedMessage }
+
+export function createExecuteExecutor(input: {
+	env: Env
+	exports?: WorkerLoopbackExports
+	gatewayProps: FetchGatewayProps
+	modules?: WorkerLoaderModules
+	timeoutMs?: number | null
+	signal?: AbortSignal
+	/**
+	 * Optional sink for literal hostnames observed on ad hoc execute raw
+	 * `fetch` traffic. Counting happens inside the sandbox (so LOADER keeps a
+	 * real Fetcher for globalOutbound). Package-context runs should omit this
+	 * so saved-package outbound requests are not counted.
+	 */
+	rawFetchHostSink?: RawFetchHostSink
+	/**
+	 * When false, skip the `execute` usage event. Nested surfaces (jobs,
+	 * package exports, workflows) already record their own metrics.
+	 * Defaults to true for ad-hoc executor callers.
+	 */
+	recordExecuteUsage?: boolean
+	/**
+	 * Surface that minted this Dynamic Worker. Defaults to `execute` for
+	 * ad-hoc executor callers. Nested surfaces pass the mapped UWD tag.
+	 */
+	surface?: DynamicWorkerDaySurface
+	/**
+	 * Host-side thin/glue class for ad-hoc execute usage events. Omit on
+	 * nested surfaces.
+	 */
+	executeShape?: ExecuteThinGlueClass | null
+	/**
+	 * When false, sandbox `fetch` is rejected. Retriever runs use this to stay
+	 * closed-world. Defaults to true.
+	 */
+	allowOutboundFetch?: boolean
+	/**
+	 * When set, unique-worker-day metering and the first-execute activation
+	 * stamp run on `waitUntil` instead of the sandbox critical path.
+	 */
+	waitUntil?: (promise: Promise<unknown>) => void
+}) {
+	const allowOutboundFetch = input.allowOutboundFetch !== false
+	const loopbackExports = input.exports ?? workerExports
+	if (!loopbackExports?.KodyFetchGateway) {
+		throw new Error(
+			'KodyFetchGateway export is required for execute-time fetch.',
+		)
+	}
+	const timeout =
+		input.timeoutMs === null
+			? maxSupportedExecutorTimeoutMs
+			: (input.timeoutMs ?? 90_000)
+	const gatewayProps = {
+		...input.gatewayProps,
+		outboundFetchTimeoutMs: outboundFetchTimeoutMsForExecutor(timeout),
+		allowOutboundFetch,
+	}
+	return createStableDynamicWorkerExecutor({
+		loader: input.env.LOADER,
+		timeout,
+		signal: input.signal,
+		globalOutbound: loopbackExports.KodyFetchGateway({
+			props: gatewayProps,
+		}),
+		// Tails only run where Analytics Engine is bound (deployed Workers).
+		// Open-source workerd reports zero CPU, and a local tail would outlive
+		// the run with a D1 write per invocation.
+		...('DynamicWorkerUsageTail' in loopbackExports && input.env.USAGE_EVENTS
+			? {
+					createUsageTail: (props: DynamicWorkerUsageTailProps) =>
+						loopbackExports.DynamicWorkerUsageTail({ props }),
+				}
+			: {}),
+		modules: input.modules,
+		gatewayProps,
+		usageEnv: input.env,
+		rawFetchHostSink: input.rawFetchHostSink,
+		recordExecuteUsage: input.recordExecuteUsage,
+		surface: input.surface ?? 'execute',
+		executeShape: input.executeShape,
+		waitUntil: input.waitUntil,
+	})
+}
+
+function createStableDynamicWorkerExecutor(input: DynamicWorkerExecutorInput) {
+	const modules = removeReservedExecutorModule(input.modules)
+	return {
+		async execute(
+			code: string,
+			providers: Array<ResolvedProvider>,
+			invocation?: DynamicWorkerEvaluateInvocation,
+		): Promise<ExecuteResultWithHostSideEffects> {
+			const sideEffects = createEvaluationSideEffectTracker()
+			const validationError = validateProviders(providers)
+			if (validationError) {
+				return attachHostSideEffects(
+					{
+						result: undefined,
+						error: validationError,
+					},
+					sideEffects,
+				)
+			}
+			const excludedHostname = readBaseUrlHostname(input.gatewayProps.baseUrl)
+			const evaluateInvocation = resolveEvaluateInvocation(
+				providers,
+				invocation,
+			)
+			const executorModule = createExecutorModule({
+				code,
+				providers,
+				shadowGlobalThis: Object.keys(modules).length === 0,
+				timeoutMs: input.timeout,
+				excludedHostname,
+				allowOutboundFetch: input.gatewayProps.allowOutboundFetch !== false,
+			})
+			const workerOptions = {
+				...createDynamicWorkerCompatibilityOptions(),
+				mainModule: dynamicWorkerMainModule,
+				modules: {
+					...modules,
+					[dynamicWorkerMainModule]: executorModule,
+				},
+				globalOutbound: input.globalOutbound,
+			}
+			const workerId = await createStableDynamicWorkerId({
+				userId: input.gatewayProps.userId,
+				storageContext: input.gatewayProps.storageContext,
+				workerOptions,
+			})
+			const claimedDay = recordUniqueDynamicWorkerDay({
+				env: input.usageEnv,
+				userId: input.gatewayProps.userId,
+				workerId,
+				surface: input.surface ?? 'execute',
+			})
+			await runExecuteBookkeeping(
+				claimedDay,
+				input.waitUntil,
+				'dynamic-worker-day-record-failed',
+			)
+			const codeChars = countDynamicWorkerModuleGraphChars(
+				workerOptions.modules,
+			)
+			const paramsChars = countEvaluateInvocationParamsChars(
+				evaluateInvocation.params,
+			)
+			const executionState = { active: true }
+			const startedAtMs = Date.now()
+			let outcome: 'success' | 'error' = 'success'
+			try {
+				const usageUserId = input.gatewayProps.userId
+				const usageTail =
+					usageUserId && input.createUsageTail
+						? input.createUsageTail({ userId: usageUserId, workerId })
+						: null
+				// LOADER.get keeps the first WorkerCode cached for an id, so an
+				// isolate loaded without a tail would never gain one under the
+				// same id. Tailed isolates get their own cache id; metering keeps
+				// `workerId`.
+				const loaderId = usageTail
+					? `${workerId}${dynamicWorkerUsageTailLoaderIdSuffix}`
+					: workerId
+				const entrypoint = input.loader
+					.get(loaderId, () =>
+						usageTail
+							? { ...workerOptions, tails: [usageTail] }
+							: workerOptions,
+					)
+					.getEntrypoint() as unknown as DynamicWorkerEntrypoint
+				let response: Awaited<ReturnType<DynamicWorkerEntrypoint['evaluate']>>
+				try {
+					response = await raceWithHostEvaluationDeadline(
+						async (signal) =>
+							await withDynamicWorkerEvaluationPermit(async () => {
+								throwIfEvaluationDeadlineAborted(signal)
+								const dispatchers = createToolDispatchers(
+									[...providers, createHostSideEffectProvider(sideEffects)],
+									executionState,
+									signal,
+									sideEffects,
+								)
+								const grantedSecretAuthorityPackageIds =
+									grantedSecretAuthorityPackageIdSet(
+										input.gatewayProps.grantedSecretAuthorityPackageIds,
+									)
+								const evaluate = () =>
+									entrypoint.evaluate(dispatchers, evaluateInvocation)
+								return grantedSecretAuthorityPackageIds
+									? await runWithSecretAuthorityScope(
+											grantedSecretAuthorityPackageIds,
+											evaluate,
+										)
+									: await evaluate()
+							}, signal),
+						input.timeout,
+						input.signal,
+					)
+				} catch (error) {
+					const message = getErrorMessage(error)
+					if (isExecutorSandboxTimeoutMessage(message)) {
+						outcome = 'error'
+						const drainedResponse =
+							error instanceof HostEvaluationTimeoutError
+								? (error.evaluationResult as
+										| Awaited<ReturnType<DynamicWorkerEntrypoint['evaluate']>>
+										| undefined)
+								: undefined
+						return attachHostSideEffects(
+							{
+								result: undefined,
+								error: drainedResponse?.error ?? message,
+								logs: drainedResponse?.logs ?? [],
+							},
+							sideEffects,
+						)
+					}
+					if (error instanceof Error && error.name === 'AbortError') {
+						outcome = 'error'
+						return attachHostSideEffects(
+							{
+								result: undefined,
+								error: callerDisconnectedSandboxMessage,
+								logs: [callerDisconnectedSandboxLog],
+							},
+							sideEffects,
+						)
+					}
+					if (isTransientDurableObjectResetError(error)) {
+						outcome = 'error'
+						return attachHostSideEffects(
+							{
+								result: undefined,
+								error: message,
+								logs: [],
+							},
+							sideEffects,
+						)
+					}
+					throw error
+				}
+				if (input.rawFetchHostSink) {
+					for (const hostname of response.rawFetchHosts ?? []) {
+						input.rawFetchHostSink.add(hostname)
+					}
+				}
+				if (response.error) {
+					outcome = 'error'
+					return attachHostSideEffects(
+						{
+							result: undefined,
+							error: response.error,
+							logs: response.logs,
+						},
+						sideEffects,
+					)
+				}
+				return attachHostSideEffects(
+					{
+						result: response.result,
+						logs: response.logs,
+					},
+					sideEffects,
+				)
+			} catch (error) {
+				outcome = 'error'
+				if (isTransientDurableObjectResetError(error)) {
+					return attachHostSideEffects(
+						{
+							result: undefined,
+							error: getErrorMessage(error),
+							logs: [],
+						},
+						sideEffects,
+					)
+				}
+				throw error
+			} finally {
+				executionState.active = false
+				const durationMs = Date.now() - startedAtMs
+				if (input.gatewayProps.userId) {
+					await runExecuteBookkeeping(
+						claimedDay.then(async (claimed) => {
+							if (!claimed) return
+							await recordDynamicWorkerInvoke({
+								env: input.usageEnv,
+								userId: input.gatewayProps.userId,
+								durationMs,
+								outcome,
+								surface: input.surface ?? 'execute',
+								cacheReuse: claimed.created ? 'miss' : 'hit',
+								codeChars,
+								paramsChars,
+								executeShape: input.executeShape,
+								waitUntil: input.waitUntil,
+							})
+						}),
+						input.waitUntil,
+						'dynamic-worker-invoke-record-failed',
+					)
+				}
+				if (input.recordExecuteUsage !== false && input.gatewayProps.userId) {
+					await recordUsage(
+						input.usageEnv,
+						{
+							userId: input.gatewayProps.userId,
+							eventType: 'execute',
+							durationMs,
+							outcome,
+							surface: 'execute',
+							...(input.executeShape
+								? { executeShape: input.executeShape }
+								: {}),
+						},
+						{ waitUntil: input.waitUntil },
+					)
+				}
+			}
+		},
+	}
+}
+
+async function runExecuteBookkeeping(
+	work: Promise<unknown>,
+	waitUntil: ((promise: Promise<unknown>) => void) | undefined,
+	warnKey: string,
+) {
+	const tracked = work.catch((error: unknown) => {
+		console.warn(warnKey, error)
+	})
+	if (waitUntil) {
+		waitUntil(tracked)
+		return
+	}
+	await tracked
+}
+
+function validateProviders(providers: Array<ResolvedProvider>) {
+	const seenNames = new Set<string>()
+	for (const provider of providers) {
+		if (reservedProviderNames.has(provider.name)) {
+			return `Provider name "${provider.name}" is reserved`
+		}
+		if (!validProviderNamePattern.test(provider.name)) {
+			return `Provider name "${provider.name}" is not a valid JavaScript identifier`
+		}
+		if (javascriptReservedWords.has(provider.name)) {
+			return `Provider name "${provider.name}" is a JavaScript reserved word`
+		}
+		if (seenNames.has(provider.name)) {
+			return `Duplicate provider name "${provider.name}"`
+		}
+		seenNames.add(provider.name)
+	}
+	return null
+}
+
+function createSandboxRunFetchSource(allowOutboundFetch: boolean) {
+	if (!allowOutboundFetch) {
+		return [
+			'    const __kodyRunFetch = () => {',
+			`      throw new Error(${JSON.stringify(retrieverOutboundFetchDeniedMessage)});`,
+			'    };',
+		]
+	}
+	return [
+		'    const __kodyRunFetch = (input, init) => {',
+		"      // Capture stamp synchronously while the caller's ALS is still",
+		'      // active. Host `recordFetch` RPC awaits below; reading after',
+		'      // that await can lose ALS (ad-hoc execute has no run packageId',
+		'      // fallback).',
+		'      const __kodyGetSecretAuthority =',
+		'        globalThis[Symbol.for("kody.getSecretAuthority")];',
+		'      const __kodySecretAuthority =',
+		'        typeof __kodyGetSecretAuthority === "function"',
+		'          ? String(__kodyGetSecretAuthority() ?? "").trim()',
+		'          : "";',
+		'      try {',
+		'        let url = "";',
+		'        if (typeof input === "string") url = input;',
+		'        else if (input instanceof URL) url = input.toString();',
+		'        else if (input && typeof input.url === "string") url = input.url;',
+		'        const hostname = new URL(url).hostname.trim().toLowerCase();',
+		'        // Stamped package modules are already on the packages-first path.',
+		'        if (hostname && hostname !== __kodyExcludedFetchHost && !__kodySecretAuthority) {',
+		'          __kodyRawFetchHosts.push(hostname);',
+		'        }',
+		'      } catch {',
+		'        // Ignore unparseable / relative URLs; only literal hosts count.',
+		'      }',
+		'      return (async () => {',
+		`        if (__dispatchers.${hostSideEffectProviderName}) {`,
+		`          const resJson = await __dispatchers.${hostSideEffectProviderName}.call("recordFetch", "[]");`,
+		'          const data = JSON.parse(resJson);',
+		'          if (data.error) throw new Error(data.error);',
+		'        }',
+		'        const __kodyFetchHeaders = new Headers(',
+		'          init?.headers ??',
+		'            (input && typeof input === "object" && "headers" in input',
+		'              ? input.headers',
+		'              : undefined),',
+		'        );',
+		`        __kodyFetchHeaders.delete(${JSON.stringify(secretAuthorityHeaderName)});`,
+		'        if (__kodySecretAuthority) {',
+		`          __kodyFetchHeaders.set(${JSON.stringify(secretAuthorityHeaderName)}, __kodySecretAuthority);`,
+		'        }',
+		'        return __kodyNativeFetch(input, {',
+		'          ...init,',
+		'          headers: __kodyFetchHeaders,',
+		'        });',
+		'      })();',
+		'    };',
+	]
+}
+
+function createExecutorModule(input: {
+	code: string
+	providers: Array<ResolvedProvider>
+	shadowGlobalThis: boolean
+	timeoutMs: number
+	excludedHostname?: string
+	allowOutboundFetch?: boolean
+}) {
+	const normalized = normalizeCode(input.code)
+	const excludedHostname = JSON.stringify(input.excludedHostname ?? '')
+	const sandboxGlobalLines = input.shadowGlobalThis
+		? [
+				'    const __kodySandboxGlobalValues = Object.create(null);',
+				'    const __kodySandboxGlobal = new Proxy(globalThis, {',
+				'      get(target, property) {',
+				'        return property in __kodySandboxGlobalValues ? __kodySandboxGlobalValues[property] : target[property];',
+				'      },',
+				'      set(_target, property, value) {',
+				'        __kodySandboxGlobalValues[property] = value;',
+				'        return true;',
+				'      },',
+				'      has(target, property) {',
+				'        return property in __kodySandboxGlobalValues || property in target;',
+				'      },',
+				'    });',
+			]
+		: []
+	// Empty module graphs inline the snippet into evaluate(). Shadow the
+	// capability dispatcher (and the RPC bag it closes over) so that snippet
+	// cannot call tools. Do not shadow `kody`: a bare reference must stay a
+	// ReferenceError so the import hint still fires. Bundled executes skip
+	// this wrapper; their host prelude calls the dispatcher from the outer
+	// scope.
+	const oneFileHiddenBindings = [
+		kodyCallDispatcherName,
+		kodyProviderEvaluateBindingName,
+		'__kodyMcp',
+		'__kodyCreateRemoteProxy',
+		'__dispatchers',
+	]
+	const userCodeInvocation = input.shadowGlobalThis
+		? [
+				`        (async (globalThis, self, global, ${oneFileHiddenBindings.join(', ')}) => (`,
+				normalized,
+				')(__invocation))(__kodySandboxGlobal, __kodySandboxGlobal, __kodySandboxGlobal),',
+			]
+		: ['        (', normalized, ')(__invocation),']
+	return [
+		'import { WorkerEntrypoint } from "cloudflare:workers";',
+		'import { AsyncLocalStorage } from "node:async_hooks";',
+		'',
+		'const __kodyEvaluateFetchStorageSymbol = Symbol.for("kody.evaluateFetchStorage");',
+		'const __kodyEvaluateFetchPatchedSymbol = Symbol.for("kody.evaluateFetchPatched");',
+		'const __kodyRuntimeStorageSymbol = Symbol.for("kody.runtimeStorage");',
+		'const __kodyNativeFetch = globalThis.fetch.bind(globalThis);',
+		'const __kodyEvaluateFetchStorage =',
+		'  globalThis[__kodyEvaluateFetchStorageSymbol] ??',
+		'  (globalThis[__kodyEvaluateFetchStorageSymbol] = new AsyncLocalStorage());',
+		'if (!globalThis[__kodyEvaluateFetchPatchedSymbol]) {',
+		'  globalThis.fetch = (input, init) => {',
+		'    const ctx = __kodyEvaluateFetchStorage.getStore();',
+		'    if (ctx) return ctx.fetch(input, init);',
+		'    return __kodyNativeFetch(input, init);',
+		'  };',
+		'  globalThis[__kodyEvaluateFetchPatchedSymbol] = true;',
+		'}',
+		'',
+		'export default class CodeExecutor extends WorkerEntrypoint {',
+		'  async evaluate(__dispatchers = {}, __invocation = {}) {',
+		'    const __logs = [];',
+		'    const __kodyRawFetchHosts = [];',
+		`    const __kodyExcludedFetchHost = ${excludedHostname};`,
+		...createSandboxRunFetchSource(input.allowOutboundFetch !== false),
+		'    return __kodyEvaluateFetchStorage.run({ fetch: __kodyRunFetch }, async () => {',
+		'    const __kodyNativeConsole = globalThis.console;',
+		'    globalThis.console = {',
+		'      ...__kodyNativeConsole,',
+		'      log: (...a) => { __logs.push(a.map(String).join(" ")); },',
+		'      info: (...a) => { __logs.push("[info] " + a.map(String).join(" ")); },',
+		'      debug: (...a) => { __logs.push("[debug] " + a.map(String).join(" ")); },',
+		'      warn: (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); },',
+		'      error: (...a) => { __logs.push("[error] " + a.map(String).join(" ")); },',
+		'    };',
+		...sandboxGlobalLines,
+		// Keep this aligned with upstream kody's sandbox dispatcher shape:
+		// the dynamic worker source only names provider namespaces, while the
+		// actual per-invocation tool implementations arrive through RPC dispatchers.
+		...input.providers.map((provider) => createProviderProxySource(provider)),
+		'',
+		'    let __timeoutId;',
+		'    try {',
+		'      const __timeoutPromise = new Promise((_, reject) => {',
+		`        __timeoutId = setTimeout(() => reject(new Error(${JSON.stringify(createExecutorSandboxTimeoutMessage(input.timeoutMs))})), ${input.timeoutMs});`,
+		'      });',
+		'      const result = await Promise.race([',
+		...userCodeInvocation,
+		'        __timeoutPromise',
+		'      ]);',
+		'      return { result, logs: __logs, rawFetchHosts: __kodyRawFetchHosts };',
+		'    } catch (err) {',
+		'      return { result: undefined, error: err.message, logs: __logs, rawFetchHosts: __kodyRawFetchHosts };',
+		'    } finally {',
+		'      clearTimeout(__timeoutId);',
+		'      globalThis.console = __kodyNativeConsole;',
+		'    }',
+		'    });',
+		'  }',
+		'}',
+	].join('\n')
+}
+
+export function createExecutorModuleSource(input: {
+	code: string
+	providers: Array<ResolvedProvider>
+	shadowGlobalThis: boolean
+	timeoutMs: number
+	excludedHostname?: string
+	allowOutboundFetch?: boolean
+}) {
+	return createExecutorModule(input)
+}
+
+function createProviderProxySource(provider: ResolvedProvider) {
+	if (provider.name === 'kody') {
+		return createKodyProviderProxySource({
+			providerName: provider.name,
+		})
+	}
+	return `    const ${provider.name} = new Proxy({}, {\n      get: (_, toolName) => async (...args) => {\n        const resJson = await __dispatchers.${provider.name}.call(String(toolName), JSON.stringify(args));\n        const data = JSON.parse(resJson);\n        if (data.error) throw new Error(data.error);\n        return data.result;\n      }\n    });`
+}
+
+export function createToolDispatchers(
+	providers: Array<ResolvedProvider>,
+	executionState: { active: boolean },
+	signal?: AbortSignal,
+	sideEffects?: EvaluationSideEffectTracker,
+) {
+	const capturedEvaluationContext = getDynamicWorkerEvaluationContext()
+	const dispatchers: Record<string, ToolDispatcher> = {}
+	for (const provider of providers) {
+		const sanitizedFns: Record<
+			string,
+			(...args: Array<unknown>) => Promise<unknown>
+		> = {}
+		const rawNamesBySanitizedName = new Map<string, string>()
+		const abortSignalToolNames = new Set(
+			(
+				provider as ResolvedProvider & {
+					abortSignalToolNames?: Array<string>
+				}
+			).abortSignalToolNames ?? [],
+		)
+		for (const [name, fn] of Object.entries(provider.fns)) {
+			const sanitizedName = sanitizeToolName(name)
+			if (rawNamesBySanitizedName.has(sanitizedName)) {
+				const existingName = rawNamesBySanitizedName.get(sanitizedName) ?? ''
+				throw new Error(
+					`Provider "${provider.name}" has tool names "${existingName}" and "${name}" that both sanitize to "${sanitizedName}".`,
+				)
+			}
+			rawNamesBySanitizedName.set(sanitizedName, name)
+			sanitizedFns[sanitizedName] = async (...rawArgs) => {
+				const { args, requestedPackageId } =
+					takeSecretAuthorityFromCapabilityArgs(rawArgs)
+				return await runWithCapturedDynamicWorkerEvaluationContext(
+					capturedEvaluationContext,
+					async () => {
+						if (!executionState.active) {
+							throw new Error('Execution has already completed.')
+						}
+						if (
+							sideEffects &&
+							!isPlatformOnlyHostSideEffectProvider(provider.name)
+						) {
+							sideEffects.recordDispatcherAttempt()
+						}
+						const invoke = () =>
+							abortSignalToolNames.has(name) ? fn(...args, signal) : fn(...args)
+						return await runWithCurrentSecretAuthority(
+							requestedPackageId,
+							invoke,
+						)
+					},
+				)
+			}
+		}
+		dispatchers[provider.name] = new ToolDispatcher(sanitizedFns)
+	}
+	return dispatchers
+}
+
+function removeReservedExecutorModule(
+	modules: WorkerLoaderModules | undefined,
+) {
+	const { [dynamicWorkerMainModule]: _ignored, ...safeModules } = modules ?? {}
+	return safeModules
+}
+
+export type ExecutionErrorDetails =
+	| {
+			kind: 'host_approval_required'
+			message: string
+			nextStep: string
+			approvalUrl: string | null
+			host: string | null
+			secretNames: Array<string>
+			suggestedAction: {
+				type: 'approve_secret_host'
+			}
+	  }
+	| {
+			kind: 'host_approval_required_batch'
+			message: string
+			nextStep: string
+			missingApprovals: Array<{
+				secretName: string
+				host: string
+				approvalUrl: string
+			}>
+			bulkApprovalUrl: string | null
+			suggestedAction: {
+				type: 'approve_secret_host'
+			}
+	  }
+	| {
+			kind: 'secret_package_access_required'
+			message: string
+			nextStep: string
+			secretNames: Array<string>
+			packageName: string
+			approvalUrl: string | null
+			suggestedAction: {
+				type: 'edit_secret_policy'
+				policyField: 'allowed_packages'
+			}
+	  }
+	| {
+			kind: 'secret_package_access_required_batch'
+			message: string
+			nextStep: string
+			missingApprovals: Array<{
+				secretName: string
+				packageId: string
+				kodyId: string | null
+				approvalUrl: string
+			}>
+			bulkApprovalUrl: string | null
+			suggestedAction: {
+				type: 'edit_secret_policy'
+				policyField: 'allowed_packages'
+			}
+	  }
+	| {
+			kind: 'secret_scope_unavailable'
+			message: string
+			nextStep: string
+			secretNames: Array<string>
+			scope: SecretScope
+			packageName: string | null
+			packageId: string | null
+			editorUrl: string | null
+			suggestedAction: {
+				type: 'edit_secret_policy'
+				policyField: 'scope'
+			}
+	  }
+	| {
+			kind: 'secret_required'
+			message: string
+			nextStep: string
+			secretNames: Array<string>
+			suggestedAction: {
+				type: 'connect_secret'
+				reason: 'collect_secret'
+			}
+	  }
+	| {
+			kind: 'integration_auth_failed'
+			message: string
+			nextStep: string
+			integrationName: string | null
+			reconnectHref: string | null
+			suggestedAction: {
+				type: 'reconnect_integration'
+			}
+	  }
+	| {
+			kind: 'auth_required'
+			message: string
+			nextStep: string
+			suggestedAction: {
+				type: 'sign_in'
+			}
+	  }
+	| {
+			kind: 'runtime_import_missing'
+			message: string
+			nextStep: string
+			exportName: string
+			suggestedAction: {
+				type: 'fix_code'
+			}
+	  }
+	| {
+			kind: 'runtime_helper_unbound'
+			message: string
+			nextStep: string
+			helperName: string
+			suggestedAction: {
+				type: 'fix_code'
+			}
+	  }
+	| {
+			kind: 'entitlement_limit_exceeded'
+			message: string
+			nextStep: string
+			details: EntitlementLimitErrorDetails
+			suggestedAction: {
+				type: 'review_plan_limit'
+				resource: EntitlementLimitErrorDetails['resource']
+			}
+	  }
+	| {
+			kind: 'compute_overage_include_reached'
+			message: string
+			nextStep: string
+			details: ComputeOverageLimitErrorDetails
+			suggestedAction: {
+				type: 'review_plan_limit'
+				resource: ComputeOverageLimitErrorDetails['resource']
+			}
+	  }
+	| {
+			kind: 'job_interval_floor'
+			message: string
+			nextStep: string
+			suggestedAction: {
+				type: 'review_plan_limit'
+				resource: 'scheduled_jobs'
+			}
+	  }
+	| {
+			kind: 'sandbox_runtime_stale'
+			message: string
+			nextStep: string
+			suggestedAction: {
+				type: 'report_bug'
+			}
+	  }
+	| {
+			kind: 'dynamic_worker_capacity_exceeded'
+			message: string
+			nextStep: string
+			limit: number
+			suggestedAction: {
+				type: 'retry'
+			}
+	  }
+	| {
+			kind: 'storage_estimate_unavailable'
+			message: string
+			nextStep: string
+			storageId: string
+			attempts: number
+			suggestedAction: {
+				type: 'retry'
+			}
+	  }
+	| {
+			kind: 'execution_timed_out'
+			message: string
+			nextStep: string
+			/** Enforced budget parsed from the message; null for legacy budget-less messages. */
+			timedOutAfterMs: number | null
+			suggestedAction: {
+				type: 'fix_code'
+			}
+	  }
+
+function parseIntegrationTokenRefreshCallerMessage(message: string) {
+	const nameMatch = /[Ii]ntegration "([^"]+)"/.exec(message)
+	const integrationName = nameMatch?.[1] ?? null
+	if (!integrationName) {
+		return { integrationName: null, reconnectHref: null }
+	}
+	return {
+		integrationName,
+		reconnectHref: buildIntegrationReconnectHref({
+			name: integrationName,
+			accountLabel: parseTrustedReconnectLoginHint(message, integrationName),
+		}),
+	}
+}
+
+/**
+ * Provider `error_description` is interpolated before our generated
+ * `Reconnect at /connect/oauth?...` suffix. Only the last root-relative
+ * connect path whose provider matches the named integration is trusted.
+ */
+function parseTrustedReconnectLoginHint(
+	message: string,
+	integrationName: string,
+) {
+	let loginHint: string | null = null
+	for (const match of message.matchAll(/Reconnect at (\S+)/g)) {
+		const raw = match[1]?.replace(/[.)]+$/, '') ?? ''
+		if (!raw.startsWith('/connect/oauth?')) continue
+		let parsed: URL
+		try {
+			parsed = new URL(raw, 'https://kody.invalid')
+		} catch {
+			continue
+		}
+		if (parsed.origin !== 'https://kody.invalid') continue
+		if (parsed.pathname !== '/connect/oauth') continue
+		if (parsed.searchParams.get('provider') !== integrationName) continue
+		loginHint = parsed.searchParams.get('loginHint')
+	}
+	return loginHint
+}
+
+export function getExecutionErrorDetails(
+	error: unknown,
+): ExecutionErrorDetails | null {
+	const message = getErrorMessage(error)
+
+	if (isEntitlementLimitError(error)) {
+		return toEntitlementExecutionErrorDetails(message, error.details)
+	}
+
+	if (isComputeOverageLimitError(error)) {
+		return toComputeOverageExecutionErrorDetails(message, error.details)
+	}
+
+	if (isJobIntervalFloorError(error)) {
+		return {
+			kind: 'job_interval_floor',
+			message,
+			nextStep: error.details.upgradeHint,
+			suggestedAction: {
+				type: 'review_plan_limit',
+				resource: 'scheduled_jobs',
+			},
+		}
+	}
+
+	const entitlementDetails = parseEntitlementLimitMessage(message)
+	if (entitlementDetails) {
+		return toEntitlementExecutionErrorDetails(message, entitlementDetails)
+	}
+
+	const computeDetails = parseComputeOverageLimitMessage(message)
+	if (computeDetails) {
+		return toComputeOverageExecutionErrorDetails(message, computeDetails)
+	}
+
+	const intervalDetails = parseJobIntervalFloorMessage(message)
+	if (intervalDetails) {
+		return {
+			kind: 'job_interval_floor',
+			message,
+			nextStep: intervalDetails.upgradeHint,
+			suggestedAction: {
+				type: 'review_plan_limit',
+				resource: 'scheduled_jobs',
+			},
+		}
+	}
+
+	const causeMessages = getErrorCauseChain(error).map(getErrorMessage)
+	if (causeMessages.some(isDynamicWorkerCapacityErrorMessage)) {
+		return {
+			kind: 'dynamic_worker_capacity_exceeded',
+			message,
+			nextStep:
+				'Retry the execution. Kody limits dynamic worker evaluations to the platform maximum for each request; if this repeats, report the platform-capacity error.',
+			limit: maxConcurrentDynamicWorkerEvaluationsPerRequest,
+			suggestedAction: {
+				type: 'retry',
+			},
+		}
+	}
+
+	for (const causeMessage of causeMessages) {
+		const timeoutDetails = parseExecutorSandboxTimeoutErrorMessage(causeMessage)
+		if (timeoutDetails) {
+			return {
+				kind: 'execution_timed_out',
+				message,
+				nextStep: createExecutionTimedOutNextStep(
+					timeoutDetails.timedOutAfterMs,
+				),
+				timedOutAfterMs: timeoutDetails.timedOutAfterMs,
+				suggestedAction: {
+					type: 'fix_code',
+				},
+			}
+		}
+	}
+
+	for (const causeMessage of causeMessages) {
+		const storageEstimateDetails =
+			parseStorageEstimateReadErrorMessage(causeMessage)
+		if (storageEstimateDetails) {
+			return {
+				kind: 'storage_estimate_unavailable',
+				message,
+				nextStep: `Retry the storage write. Kody could not verify current usage for storageId ${JSON.stringify(storageEstimateDetails.storageId)} after ${storageEstimateDetails.attempts} attempts, so the write was safely blocked.`,
+				storageId: storageEstimateDetails.storageId,
+				attempts: storageEstimateDetails.attempts,
+				suggestedAction: {
+					type: 'retry',
+				},
+			}
+		}
+	}
+
+	const hostApprovalDetails = parseHostApprovalRequiredMessage(message)
+	if (hostApprovalDetails) {
+		return {
+			kind: 'host_approval_required',
+			message,
+			nextStep:
+				'Ask the user whether they want to approve this host in the account web UI, then retry after approval.',
+			approvalUrl: extractFirstUrl(message),
+			host: hostApprovalDetails.host,
+			secretNames: [hostApprovalDetails.secretName],
+			suggestedAction: {
+				type: 'approve_secret_host',
+			},
+		}
+	}
+
+	const hostApprovalBatch = parseHostApprovalRequiredBatchMessage(message)
+	if (hostApprovalBatch) {
+		return {
+			kind: 'host_approval_required_batch',
+			message,
+			nextStep: hostApprovalBatch.bulkApprovalUrl
+				? 'Send the user the bulk secret host approval link, wait for them to approve, then retry.'
+				: 'Ask the user whether they want to approve these hosts for the listed secrets in the account web UI, then retry after approval.',
+			missingApprovals: hostApprovalBatch.entries,
+			bulkApprovalUrl: hostApprovalBatch.bulkApprovalUrl,
+			suggestedAction: {
+				type: 'approve_secret_host',
+			},
+		}
+	}
+
+	const packageAccessBatch = parsePackageAccessRequiredBatchMessage(message)
+	if (packageAccessBatch) {
+		return {
+			kind: 'secret_package_access_required_batch',
+			message,
+			nextStep: packageAccessBatch.bulkApprovalUrl
+				? 'Send the user the bulk package secret approval link, wait for them to approve in the account secrets UI, then retry.'
+				: 'Ask the user whether they want to approve these packages for the listed secrets in the account secrets UI, then retry after approval.',
+			missingApprovals: packageAccessBatch.entries,
+			bulkApprovalUrl: packageAccessBatch.bulkApprovalUrl,
+			suggestedAction: {
+				type: 'edit_secret_policy',
+				policyField: 'allowed_packages',
+			},
+		}
+	}
+
+	const packageAccessDetails = parsePackageAccessRequiredMessage(message)
+	if (packageAccessDetails) {
+		return {
+			kind: 'secret_package_access_required',
+			message,
+			nextStep:
+				"Ask the user whether this package should be allowed to use the secret. If they approve, help them add this package to the secret's allowed packages in the account secrets UI, then retry.",
+			secretNames: [packageAccessDetails.secretName],
+			packageName: packageAccessDetails.packageName,
+			approvalUrl: extractFirstUrl(message),
+			suggestedAction: {
+				type: 'edit_secret_policy',
+				policyField: 'allowed_packages',
+			},
+		}
+	}
+
+	const scopeUnavailableDetails = parseSecretScopeUnavailableMessage(message)
+	if (scopeUnavailableDetails) {
+		const editorUrl = extractFirstUrl(message)
+		return {
+			kind: 'secret_scope_unavailable',
+			message,
+			nextStep:
+				scopeUnavailableDetails.scope === 'package'
+					? 'This secret exists on a package this runtime cannot see. Either invoke the work through that package, or send the user the editor link so they can change the secret scope, then retry.'
+					: 'This secret exists in another scope this runtime cannot see. Send the user the editor link so they can change the secret scope, or retry from a runtime that can see it.',
+			secretNames: [scopeUnavailableDetails.secretName],
+			scope: scopeUnavailableDetails.scope,
+			packageName: scopeUnavailableDetails.packageName,
+			packageId: scopeUnavailableDetails.packageId,
+			editorUrl,
+			suggestedAction: {
+				type: 'edit_secret_policy',
+				policyField: 'scope',
+			},
+		}
+	}
+
+	if (isIntegrationTokenRefreshCallerMessage(message)) {
+		const parsed = parseIntegrationTokenRefreshCallerMessage(message)
+		const reconnectHref = parsed.reconnectHref
+		const name = parsed.integrationName
+		return {
+			kind: 'integration_auth_failed',
+			message,
+			nextStep: reconnectHref
+				? `Send the user to ${reconnectHref} so they can reconnect ${name ?? 'this integration'}, then retry.`
+				: 'Ask the user to reconnect this integration from /account/waiting or /account/integrations, then retry.',
+			integrationName: name,
+			reconnectHref,
+			suggestedAction: {
+				type: 'reconnect_integration',
+			},
+		}
+	}
+
+	const missingSecretDetails = parseMissingSecretMessage(message)
+	if (missingSecretDetails) {
+		return {
+			kind: 'secret_required',
+			message,
+			nextStep: `Send the user to /account/secrets/new?name=${encodeURIComponent(missingSecretDetails.secretName)} so they can provide and save this secret, then retry the workflow.`,
+			secretNames: [missingSecretDetails.secretName],
+			suggestedAction: {
+				type: 'connect_secret',
+				reason: 'collect_secret',
+			},
+		}
+	}
+
+	if (isSecretAuthRequiredMessage(message)) {
+		return {
+			kind: 'auth_required',
+			message,
+			nextStep: 'Ask the user to sign in to Kody, then retry the request.',
+			suggestedAction: {
+				type: 'sign_in',
+			},
+		}
+	}
+
+	if (isDisposedRpcStubMessage(message)) {
+		return {
+			kind: 'sandbox_runtime_stale',
+			message,
+			nextStep:
+				'The sandbox reused an RPC stub from an earlier execution, which is a Kody runtime lifecycle bug — retrying the identical call will hit the same cached sandbox worker. Re-run the execute call with a trivially different module (for example, add a comment) so a fresh sandbox is created, and report this error.',
+			suggestedAction: {
+				type: 'report_bug',
+			},
+		}
+	}
+
+	const unboundRuntimeHelper = parseUnboundRuntimeHelperMessage(message)
+	if (unboundRuntimeHelper) {
+		return {
+			kind: 'runtime_helper_unbound',
+			message,
+			nextStep: buildUnboundRuntimeHelperNextStep(unboundRuntimeHelper),
+			helperName: unboundRuntimeHelper,
+			suggestedAction: {
+				type: 'fix_code',
+			},
+		}
+	}
+
+	const missingRuntimeExport = parseMissingRuntimeExportMessage(message)
+	if (missingRuntimeExport) {
+		return {
+			kind: 'runtime_import_missing',
+			message,
+			nextStep: `\`${missingRuntimeExport}\` is provided by the Kody runtime module and must be imported: add \`import { ${missingRuntimeExport} } from 'kody:runtime'\` at the top of the module, then retry.`,
+			exportName: missingRuntimeExport,
+			suggestedAction: {
+				type: 'fix_code',
+			},
+		}
+	}
+
+	return null
+}
+
+/**
+ * Named exports of the virtual `kody:runtime` module (see
+ * `createRuntimeModuleSource` in `#worker/package-runtime/module-graph.ts`).
+ * Referencing one without the import throws a bare `X is not defined`
+ * ReferenceError that gives no hint about the required import.
+ */
+const kodyRuntimeExportNames = new Set([
+	'kody',
+	'packageStorage',
+	'createAuthenticatedFetch',
+	'secretHeaders',
+	'oauthClientCredentials',
+	'packageContext',
+	'packageSecrets',
+	'email',
+	'workflows',
+	'packages',
+	'events',
+])
+
+/**
+ * Remedies for guard-less access to an optional `kody:runtime` export that
+ * the execution context intentionally left unbound (`undefined` / `null` so
+ * `if (email) { ... }` guards stay falsy). The message itself is produced
+ * by `createUnboundRuntimeHelperMessage` in
+ * `#worker/package-runtime/unbound-runtime-helpers.ts`.
+ */
+const unboundRuntimeHelperNextSteps: Record<string, string> = {
+	packages:
+		'`packages` is bound for authenticated ad hoc execute calls, scheduled jobs, and saved-package runtime contexts. Prefer a static `kody:@scope/package/export` import when the name is known, or `import(specifier)` when the name is data. Guard with `if (packages) { ... }` when this helper is optional.',
+	events:
+		"`events` is only bound in saved-package runtime contexts that can dispatch package events; statically import the owning package's export so it runs in that context, or guard with `if (events) { ... }`.",
+	packageSecrets:
+		"`packageSecrets` is bound on stamped saved-package modules (including static `kody:@` imports) and in saved-package runtime contexts. Ad hoc execute entry code stays unbound; import the owning package's export so its stamp reads the mounts, or guard with `'get' in packageSecrets` / `packageContext?.packageId` (the late-bound export is always a proxy).",
+	email:
+		'`email` is only bound for email-triggered runs; guard with `if (email) { ... }` when the code can also run outside an email context.',
+}
+
+function buildUnboundRuntimeHelperNextStep(helperName: string) {
+	return (
+		unboundRuntimeHelperNextSteps[helperName] ??
+		`The optional \`${helperName}\` export of 'kody:runtime' is not provided in this execution context; guard with a falsiness check (for example \`if (${helperName}) { ... }\`) or run the code in a context that binds it, such as statically importing the owning saved package's export.`
+	)
+}
+
+/**
+ * workerd throws this when an RPC stub outlives the execution context that
+ * created it (stubs passed as RPC parameters are implicitly disposed when the
+ * call returns; everything else when the I/O context is destroyed). In the
+ * execute pipeline this indicates per-run state leaked into a cached dynamic
+ * worker, so surface a structured hint instead of a bare error string.
+ */
+function isDisposedRpcStubMessage(message: string) {
+	return message.includes('RPC stub used after being disposed')
+}
+
+/**
+ * Recognize `createExecutorSandboxTimeoutMessage` output (and legacy forms:
+ * budget-less, explanation-less, or both) at the end of an error message,
+ * tolerating wrapper prefixes such as `[execution_failed] ` from package
+ * invocation responses. The captured budget lets the structured hint report
+ * the actual enforced limit instead of assuming the ad hoc execute default.
+ */
+const executorSandboxTimeoutDetailsPattern = new RegExp(
+	`(?:^|\\s)${executorSandboxTimeoutMessagePrefix}(?: after (\\d+(?:\\.\\d+)?)(m?s))?(?:${escapeRegExp(executorSandboxTimeoutMessageExplanation)})?$`,
+)
+
+function escapeRegExp(value: string) {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function parseExecutorSandboxTimeoutErrorMessage(message: string) {
+	const match = executorSandboxTimeoutDetailsPattern.exec(message)
+	if (!match) return null
+	const [, amount, unit] = match
+	if (!amount) return { timedOutAfterMs: null }
+	const value = Number(amount)
+	return { timedOutAfterMs: unit === 'ms' ? value : value * 1000 }
+}
+
+function createExecutionTimedOutNextStep(timedOutAfterMs: number | null) {
+	const budgetSentence =
+		timedOutAfterMs === null
+			? 'The sandbox enforces a hard execution time budget (~90s for ad hoc execute), so retrying the identical call will time out again.'
+			: `The sandbox enforces a hard execution time budget and this run used its full ${formatTimeoutBudget(timedOutAfterMs)}, so retrying the identical call will time out again.`
+	return `${budgetSentence} For genuinely long-running work (batch sweeps, migrations, polling loops), have one short execute call submit a durable workflow — \`import { workflows } from 'kody:runtime'\` then \`workflows.create({ code, params })\` — and inspect progress with \`workflowRunList\`. Otherwise split the work into smaller calls that each finish well within the budget.`
+}
+
+function formatTimeoutBudget(timeoutMs: number) {
+	const seconds = timeoutMs / 1000
+	return Number.isInteger(seconds) ? `${seconds}s` : `${timeoutMs}ms`
+}
+
+function parseMissingRuntimeExportMessage(message: string) {
+	const match = /^(?:ReferenceError: )?(\w+) is not defined\b/.exec(message)
+	const exportName = match?.[1]
+	return exportName && kodyRuntimeExportNames.has(exportName)
+		? exportName
+		: null
+}
+
+function toEntitlementExecutionErrorDetails(
+	message: string,
+	details: EntitlementLimitErrorDetails,
+): ExecutionErrorDetails {
+	return {
+		kind: 'entitlement_limit_exceeded',
+		message,
+		nextStep: details.upgradeHint,
+		details,
+		suggestedAction: {
+			type: 'review_plan_limit',
+			resource: details.resource,
+		},
+	}
+}
+
+function toComputeOverageExecutionErrorDetails(
+	message: string,
+	details: ComputeOverageLimitErrorDetails,
+): ExecutionErrorDetails {
+	return {
+		kind: 'compute_overage_include_reached',
+		message,
+		nextStep: `${details.whatCounts} ${details.upgradeHint}`,
+		details,
+		suggestedAction: {
+			type: 'review_plan_limit',
+			resource: details.resource,
+		},
+	}
+}
+
+export function formatExecutionOutput(result: ExecuteResult) {
+	if (result.error) {
+		const errorText = getErrorMessage(result.error)
+		const details = getExecutionErrorDetails(result.error)
+		if (!details) return `Error: ${errorText}`
+		return `Error: ${errorText}\n\nNext step: ${details.nextStep}`
+	}
+	return stringifyExecutionValueForOutput(result.result)
+}
+
+export function extractRawContent(value: unknown): Array<ContentBlock> | null {
+	return extractMcpPassthrough(value)?.content ?? null
+}
+
+function extractFirstUrl(message: string) {
+	for (const part of message.split(/\s+/)) {
+		if (part.startsWith('http://') || part.startsWith('https://')) {
+			return part.replace(/[),.;]+$/, '')
+		}
+	}
+	return null
+}
+
+export function limitExecutionResultValue(
+	value: unknown,
+	responseLimitBytes: number,
+) {
+	if (typeof value === 'string') {
+		const returnedBytes = getUtf8ByteLength(value)
+		if (returnedBytes <= responseLimitBytes) {
+			return {
+				value,
+				displayText: value,
+				returnedBytes,
+				truncated: false,
+			} as const
+		}
+		const note = `Returned value was ${returnedBytes.toLocaleString()} bytes, exceeding responseLimit ${responseLimitBytes.toLocaleString()} bytes; output was truncated. Project fields before returning.`
+		return {
+			value: truncateUtf8String(value, responseLimitBytes),
+			returnedBytes,
+			truncated: true,
+			note,
+		} as const
+	}
+
+	const compactSerialized = JSON.stringify(value) ?? 'undefined'
+	const returnedBytes = getUtf8ByteLength(compactSerialized)
+
+	if (returnedBytes <= responseLimitBytes) {
+		return {
+			value,
+			displayText: JSON.stringify(value, null, 2) ?? 'undefined',
+			returnedBytes,
+			truncated: false,
+		} as const
+	}
+
+	const note = `Returned value was ${returnedBytes.toLocaleString()} bytes, exceeding responseLimit ${responseLimitBytes.toLocaleString()} bytes; output was truncated. Project fields before returning.`
+	const truncatedValue = {
+		truncated: true,
+		type: describeExecutionValue(value),
+	}
+
+	return {
+		value: truncatedValue,
+		displayText: JSON.stringify(truncatedValue, null, 2) ?? 'undefined',
+		returnedBytes,
+		truncated: true,
+		note,
+	} as const
+}
+
+export function formatLimitedExecutionOutput(input: {
+	value: unknown
+	truncated: boolean
+	note?: string
+	displayText?: string
+}) {
+	const text =
+		input.displayText ?? stringifyExecutionValueForOutput(input.value)
+	if (!input.truncated) return text
+	return `${text}\n\n--- TRUNCATED ---\n${input.note}`
+}
+
+function stringifyExecutionValueForOutput(value: unknown) {
+	if (typeof value === 'string') return value
+	return JSON.stringify(value, null, 2) ?? 'undefined'
+}
+
+function truncateUtf8String(value: string, maxBytes: number) {
+	const encoder = new TextEncoder()
+	let usedBytes = 0
+	let result = ''
+	for (const character of value) {
+		const characterBytes = encoder.encode(character).byteLength
+		if (usedBytes + characterBytes > maxBytes) break
+		result += character
+		usedBytes += characterBytes
+	}
+	return result
+}
+
+function getUtf8ByteLength(value: string) {
+	return new TextEncoder().encode(value).byteLength
+}
+
+function describeExecutionValue(value: unknown) {
+	if (value === null) return 'null'
+	if (Array.isArray(value)) return 'array'
+	return typeof value
+}

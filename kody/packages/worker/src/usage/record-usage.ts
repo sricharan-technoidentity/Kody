@@ -1,0 +1,337 @@
+/**
+ * Per-user usage metering.
+ *
+ * One event schema covers every metered chokepoint (execute runs, package
+ * export invocations, statically imported package export calls, job runs,
+ * workflow runs, realtime websocket sessions, gateway fetches, email sends and
+ * receives, unique Dynamic Worker days, observe-only Dynamic Worker
+ * invokes, and observe-only Durable Object duration).
+ *
+ * The write path depends on the environment:
+ *
+ * - When the Workers Analytics Engine binding (`USAGE_EVENTS`) is present
+ *   (production/preview), the event is written **only** to Analytics Engine.
+ *   The D1 `usage_rollups` table is then a derived aggregate, recomputed
+ *   hourly from Analytics Engine by
+ *   `packages/worker/src/usage/aggregate-rollups.ts` — a per-event D1 upsert
+ *   would serialize every metered request on D1's single writer.
+ * - When `USAGE_EVENTS` is absent (local dev, tests), the event is upserted
+ *   directly into `usage_rollups` so local admin pages and tests work without
+ *   Analytics Engine access.
+ *
+ * `recordUsage` never throws and never rejects; metering must not break the
+ * paths it observes. In local dev and tests where a binding is missing it
+ * degrades to a debug log. See
+ * `docs/contributing/architecture/usage-metering.md`.
+ *
+ * Every recorded event also emits a `kody.usage.{eventType}` trace span (when
+ * Workers tracing is available) carrying the user id, entity id, and outcome
+ * as attributes. The chokepoints that meter usage are exactly the app-level
+ * units worth finding in traces, so this one funnel makes every trace
+ * searchable by user and feature without touching the chokepoints themselves.
+ */
+
+import * as cloudflareWorkers from 'cloudflare:workers'
+import {
+	isCoalescedCountUsageEventType,
+	type UsageEventType,
+} from '#universal/usage-event-types.ts'
+import { stampFirstExecute } from '#worker/identity/activation-stamps.ts'
+import { type DynamicWorkerDaySurface } from './dynamic-worker-day-surface.ts'
+import { type ExecuteThinGlueClass } from './execute-thin-glue.ts'
+
+export {
+	usageEventTypes,
+	type UsageEventType,
+} from '#universal/usage-event-types.ts'
+
+// Older local runtimes (and the node test stub) may not expose `tracing`;
+// treat it as optional so metering keeps its never-throws contract.
+const runtimeTracing: typeof cloudflareWorkers.tracing | undefined = (
+	cloudflareWorkers as Partial<typeof cloudflareWorkers>
+).tracing
+
+export type UsageOutcome = 'success' | 'error'
+
+export type UsageEvent = {
+	/** Owning user. Required: every usage event is scoped to one user. */
+	userId: string
+	eventType: UsageEventType
+	/**
+	 * Identifier of the metered entity when one exists (package id, job id,
+	 * workflow run id, email message id, fetch host).
+	 */
+	entityId?: string | null
+	/** Wall-clock duration of the metered unit, in milliseconds. */
+	durationMs?: number | null
+	/** CPU time in milliseconds, only when the platform exposes it. */
+	cpuMs?: number | null
+	/** Bytes transferred/stored when meaningful (fetch bodies, email size). */
+	bytes?: number | null
+	/**
+	 * How many metered units this write represents. Defaults to 1. Coalesced
+	 * `durable_object_gb_seconds` bursts send one Analytics Engine point with
+	 * the summed duration and this count in `doubles[2]`.
+	 */
+	eventCount?: number
+	outcome: UsageOutcome
+	/** ISO 8601 timestamp. Defaults to the time of recording. */
+	timestamp?: string
+	/**
+	 * Closed surface tag for `dynamic_worker_day` (and optionally other
+	 * events). Written to Analytics Engine blob6. Empty when unset.
+	 */
+	surface?: DynamicWorkerDaySurface | null
+	/**
+	 * Host-side execute thin/glue class. Written to Analytics Engine blob7
+	 * on `execute` events. Never used for billing and not shown to agents.
+	 */
+	executeShape?: ExecuteThinGlueClass | null
+	/**
+	 * Billing-aligned Dynamic Worker reuse. Written to Analytics Engine
+	 * blob8 on `dynamic_worker_invoke`. `miss` when this worker id was
+	 * first claimed today; `hit` on later claims the same UTC day.
+	 */
+	cacheReuse?: DynamicWorkerCacheReuse | null
+	/**
+	 * Character length of the hashable module-graph text used for the
+	 * Dynamic Worker id. Written to Analytics Engine double4. Number only.
+	 */
+	codeChars?: number | null
+	/**
+	 * Character length of a stable JSON serialization of evaluate
+	 * `params`. 0 when `params` is null, undefined, a non-object, or
+	 * empty `{}`. Written to Analytics Engine double5. Number only —
+	 * never the JSON.
+	 */
+	paramsChars?: number | null
+}
+
+export const dynamicWorkerCacheReuses = ['hit', 'miss'] as const
+export type DynamicWorkerCacheReuse = (typeof dynamicWorkerCacheReuses)[number]
+
+/** Analytics Engine blob positions for `USAGE_EVENTS` data points. */
+export const usageEventBlobIndexes = {
+	userId: 0,
+	eventType: 1,
+	entityId: 2,
+	outcome: 3,
+	timestamp: 4,
+	surface: 5,
+	executeShape: 6,
+	cacheReuse: 7,
+} as const
+
+export const usageEventDoubleIndexes = {
+	durationMs: 0,
+	cpuMs: 1,
+	bytesOrCoalescedCount: 2,
+	codeChars: 3,
+	paramsChars: 4,
+} as const
+
+export function usageEventBlobs(
+	event: Pick<
+		UsageEvent,
+		| 'userId'
+		| 'eventType'
+		| 'entityId'
+		| 'outcome'
+		| 'surface'
+		| 'executeShape'
+		| 'cacheReuse'
+	>,
+	timestamp: string,
+): [string, string, string, string, string, string, string, string] {
+	return [
+		event.userId,
+		event.eventType,
+		event.entityId ?? '',
+		event.outcome,
+		timestamp,
+		event.surface ?? '',
+		event.executeShape ?? '',
+		event.cacheReuse ?? '',
+	]
+}
+
+export type UsageEnv = {
+	USAGE_EVENTS?: AnalyticsEngineDataset
+	APP_DB?: D1Database
+}
+
+const usageRollupUpsertStatement = `
+INSERT INTO usage_rollups (
+	user_id, metric, month,
+	event_count, error_count,
+	total_duration_ms, total_cpu_ms, total_bytes,
+	updated_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+ON CONFLICT (user_id, metric, month) DO UPDATE SET
+	event_count = event_count + excluded.event_count,
+	error_count = error_count + excluded.error_count,
+	total_duration_ms = total_duration_ms + excluded.total_duration_ms,
+	total_cpu_ms = total_cpu_ms + excluded.total_cpu_ms,
+	total_bytes = total_bytes + excluded.total_bytes,
+	updated_at = excluded.updated_at
+`.trim()
+
+/**
+ * Record one usage event.
+ *
+ * With `USAGE_EVENTS` bound this is a single non-blocking `writeDataPoint`
+ * call; the D1 rollup is derived later by the hourly aggregation cron.
+ * Without it (local dev, tests) the event is upserted into `usage_rollups`
+ * directly.
+ *
+ * Guarantees:
+ * - Never throws and never rejects: failures are logged at debug level.
+ * - Each sink degrades independently when its binding is unavailable.
+ *
+ * Callers should `await` it (cheap: one `writeDataPoint`, or one D1 upsert in
+ * local dev) or hand the promise to `ctx.waitUntil(...)` inside Durable
+ * Objects. Successful `execute` events still stamp `users.first_execute_at`;
+ * pass `waitUntil` to keep that D1 write off the critical path.
+ */
+export async function recordUsage(
+	env: UsageEnv,
+	event: UsageEvent,
+	options?: { waitUntil?: (promise: Promise<unknown>) => void },
+): Promise<void> {
+	try {
+		if (!event.userId) {
+			console.debug('usage-event-skipped', 'missing userId', event.eventType)
+			return
+		}
+		emitUsageSpan(event)
+		const timestamp = event.timestamp ?? new Date().toISOString()
+		if (
+			event.eventType === 'execute' &&
+			event.outcome === 'success' &&
+			env.APP_DB
+		) {
+			const stamp = stampFirstExecute(
+				env.APP_DB,
+				{
+					stableUserId: event.userId,
+					at: timestamp,
+				},
+				env,
+			).catch((error: unknown) => {
+				console.warn('activation-stamp-execute-failed', error)
+			})
+			if (options?.waitUntil) {
+				options.waitUntil(stamp)
+			} else {
+				await stamp
+			}
+		}
+		if (env.USAGE_EVENTS) {
+			writeUsageDataPoint(env, event, timestamp)
+			return
+		}
+		console.debug('usage-event-local', JSON.stringify({ ...event, timestamp }))
+		await writeUsageRollup(env, event, timestamp)
+	} catch (error) {
+		console.warn('usage-event-record-failed', error)
+	}
+}
+
+/**
+ * Emit a marker span for one usage event, nested under whatever platform span
+ * is active in the current async context (HTTP handler, DO invocation, ...).
+ * When the invocation is not sampled, `enterSpan` still runs the callback but
+ * records nothing.
+ */
+function emitUsageSpan(event: UsageEvent) {
+	if (!runtimeTracing?.enterSpan) return
+	try {
+		runtimeTracing.enterSpan(`kody.usage.${event.eventType}`, (span) => {
+			span.setAttribute('kody.user_id', event.userId)
+			span.setAttribute('kody.event_type', event.eventType)
+			span.setAttribute('kody.outcome', event.outcome)
+			if (event.entityId) span.setAttribute('kody.entity_id', event.entityId)
+			if (event.durationMs != null) {
+				span.setAttribute('kody.duration_ms', event.durationMs)
+			}
+			if (event.bytes != null) span.setAttribute('kody.bytes', event.bytes)
+			if (event.surface) span.setAttribute('kody.surface', event.surface)
+			if (event.executeShape) {
+				span.setAttribute('kody.execute_shape', event.executeShape)
+			}
+			if (event.cacheReuse) {
+				span.setAttribute('kody.cache_reuse', event.cacheReuse)
+			}
+			if (event.codeChars != null) {
+				span.setAttribute('kody.code_chars', event.codeChars)
+			}
+			if (event.paramsChars != null) {
+				span.setAttribute('kody.params_chars', event.paramsChars)
+			}
+		})
+	} catch (error) {
+		console.debug('usage-span-failed', error)
+	}
+}
+
+function writeUsageDataPoint(
+	env: UsageEnv,
+	event: UsageEvent,
+	timestamp: string,
+) {
+	if (!env.USAGE_EVENTS) return
+	try {
+		env.USAGE_EVENTS.writeDataPoint({
+			indexes: [event.userId],
+			blobs: usageEventBlobs(event, timestamp),
+			doubles: [
+				event.durationMs ?? 0,
+				event.cpuMs ?? 0,
+				isCoalescedCountUsageEventType(event.eventType)
+					? usageEventCount(event)
+					: (event.bytes ?? 0),
+				event.codeChars ?? 0,
+				event.paramsChars ?? 0,
+			],
+		})
+	} catch (error) {
+		console.warn('usage-event-analytics-failed', error)
+	}
+}
+
+async function writeUsageRollup(
+	env: UsageEnv,
+	event: UsageEvent,
+	timestamp: string,
+) {
+	if (!env.APP_DB) {
+		console.debug('usage-rollup-skipped', 'missing APP_DB binding')
+		return
+	}
+	try {
+		const eventCount = usageEventCount(event)
+		await env.APP_DB.prepare(usageRollupUpsertStatement)
+			.bind(
+				event.userId,
+				event.eventType,
+				timestamp.slice(0, 7),
+				eventCount,
+				event.outcome === 'error' ? eventCount : 0,
+				Math.round(event.durationMs ?? 0),
+				Math.round(event.cpuMs ?? 0),
+				Math.round(event.bytes ?? 0),
+				timestamp,
+			)
+			.run()
+	} catch (error) {
+		console.warn('usage-rollup-failed', error)
+	}
+}
+
+function usageEventCount(event: UsageEvent) {
+	const count = event.eventCount
+	if (typeof count !== 'number' || !Number.isFinite(count) || count < 1) {
+		return 1
+	}
+	return Math.trunc(count)
+}

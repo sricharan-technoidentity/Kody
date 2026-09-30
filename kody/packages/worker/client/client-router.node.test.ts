@@ -1,0 +1,607 @@
+import { expect, test, vi } from 'vitest'
+import {
+	documentHasPersistentShell,
+	isSameShellAreaNavigation,
+	matchRoute,
+	matchRouteLoader,
+	navigate,
+	navigationTimeoutMs,
+	persistentShellNavSelector,
+	prefetchRouteHrefs,
+	registerClientRoutes,
+	registerRouteLoaders,
+	Router,
+	shouldLeaveDocumentForPath,
+	shouldRouterHandleClick,
+	shouldUseViewTransition,
+	type RouteLoader,
+} from './client-router.tsx'
+import {
+	abortIntentPrefetch,
+	takePrefetchedRouteResult,
+} from './intent-prefetch.ts'
+import { communityArea } from './lazy-route.tsx'
+import { routePattern } from '#universal/route-pattern.ts'
+import { routes } from '#universal/routes.ts'
+
+test('client route and loader matching prefer specific static routes over dynamic parents', () => {
+	const serverDetailRoute = 'server-detail-route' as unknown as JSX.Element
+	const newServerRoute = 'new-server-route' as unknown as JSX.Element
+	const routes = {
+		'/account/mcp-servers/:serverId': serverDetailRoute,
+		'/account/mcp-servers/new': newServerRoute,
+	}
+
+	expect(matchRoute('/account/mcp-servers/new', routes)).toBe(newServerRoute)
+	expect(matchRoute('/account/mcp-servers/server-1', routes)).toBe(
+		serverDetailRoute,
+	)
+
+	const genericSecretRoute = 'generic-secret-route' as unknown as JSX.Element
+	const userSecretRoute = 'user-secret-route' as unknown as JSX.Element
+	const nestedRoutes = {
+		'/account/secrets/:secretId': genericSecretRoute,
+		'/account/secrets/user/:secretName': userSecretRoute,
+	}
+
+	expect(matchRoute('/account/secrets/user/github-token', nestedRoutes)).toBe(
+		userSecretRoute,
+	)
+	expect(matchRoute('/account/secrets/secret-1', nestedRoutes)).toBe(
+		genericSecretRoute,
+	)
+
+	const accountLoader = (async () => ({
+		accountProfile: { ok: true },
+	})) as RouteLoader
+	const serverLoader = (async () => ({
+		accountMcpServers: { ok: true },
+	})) as RouteLoader
+	const loaders = {
+		'/account/mcp-servers/:serverId': serverLoader,
+		'/account/mcp-servers/new': serverLoader,
+		'/account': accountLoader,
+	}
+
+	expect(matchRouteLoader('/account', loaders)).toBe(accountLoader)
+	expect(matchRouteLoader('/account/mcp-servers/new', loaders)).toBe(
+		serverLoader,
+	)
+	expect(matchRouteLoader('/account/mcp-servers/server-1', loaders)).toBe(
+		serverLoader,
+	)
+
+	const genericSecretLoader = (async () => ({
+		accountSecrets: { ok: true },
+	})) as RouteLoader
+	const userSecretLoader = (async () => ({
+		accountSecrets: { ok: true },
+	})) as RouteLoader
+	const secretLoaders = {
+		'/account/secrets/:secretId': genericSecretLoader,
+		'/account/secrets/user/:secretName': userSecretLoader,
+	}
+
+	expect(
+		matchRouteLoader('/account/secrets/user/github-token', secretLoaders),
+	).toBe(userSecretLoader)
+	expect(matchRouteLoader('/account/secrets/secret-1', secretLoaders)).toBe(
+		genericSecretLoader,
+	)
+})
+
+test('package approve-publish is not swallowed by the package detail route', () => {
+	const packageDetailRoute = 'package-detail-route' as unknown as JSX.Element
+	const approvePublishRoute = 'approve-publish-route' as unknown as JSX.Element
+	const packageRoutes = {
+		[routePattern(routes.communityPackage)]: packageDetailRoute,
+		[routePattern(routes.communityPackageApprovePublish)]: approvePublishRoute,
+	}
+	expect(matchRoute('/@kentcdodds/pkg-1', packageRoutes)).toBe(
+		packageDetailRoute,
+	)
+	expect(matchRoute('/@kentcdodds/pkg-1/approve-publish', packageRoutes)).toBe(
+		approvePublishRoute,
+	)
+	expect(
+		matchRoute(
+			'/@kentcdodds/pkg-1/approve-publish?commit=abc1234',
+			packageRoutes,
+		),
+	).toBe(approvePublishRoute)
+})
+
+test('package approve-changes is not swallowed by the package detail route', () => {
+	const packageDetailRoute = 'package-detail-route' as unknown as JSX.Element
+	const approveChangesRoute = 'approve-changes-route' as unknown as JSX.Element
+	const packageRoutes = {
+		[routePattern(routes.communityPackage)]: packageDetailRoute,
+		[routePattern(routes.communityPackageApproveChanges)]: approveChangesRoute,
+	}
+	expect(matchRoute('/@kentcdodds/pkg-1', packageRoutes)).toBe(
+		packageDetailRoute,
+	)
+	expect(matchRoute('/@kentcdodds/pkg-1/approve-changes', packageRoutes)).toBe(
+		approveChangesRoute,
+	)
+})
+
+test('view transitions skip shell tab switches, including when from-path was never recorded', () => {
+	// Tab switching inside a persistent shell (account/admin rail, docs
+	// sidebar): the chrome is unchanged and full-height, so a snapshot
+	// transition would squash or fade it. These swap instantly.
+	expect(isSameShellAreaNavigation('/account', '/account/secrets')).toBe(true)
+	expect(
+		isSameShellAreaNavigation('/account/jobs?view=failed', '/account/values'),
+	).toBe(true)
+	expect(
+		isSameShellAreaNavigation('/admin/users', '/admin/feature-flags'),
+	).toBe(true)
+	expect(isSameShellAreaNavigation('/docs', '/docs/oauth')).toBe(true)
+	expect(isSameShellAreaNavigation('/docs/oauth', '/docs/connect')).toBe(true)
+	expect(isSameShellAreaNavigation('/docs/how-kody-works', '/docs')).toBe(true)
+	expect(isSameShellAreaNavigation('/pricing', '/account')).toBe(false)
+	expect(isSameShellAreaNavigation('/account', '/pricing')).toBe(false)
+	expect(isSameShellAreaNavigation('/account', '/admin/users')).toBe(false)
+	expect(isSameShellAreaNavigation('/docs', '/pricing')).toBe(false)
+	expect(isSameShellAreaNavigation('/docs', '/documentation')).toBe(false)
+	expect(isSameShellAreaNavigation(null, '/account')).toBe(false)
+	expect(isSameShellAreaNavigation('/account', '/accounts-payable')).toBe(false)
+
+	const animate = (input: {
+		from: string | null
+		to: string
+		hasPersistentShell?: boolean
+	}) =>
+		shouldUseViewTransition({
+			from: input.from,
+			to: input.to,
+			canStart: true,
+			prefersReducedMotion: false,
+			hasPersistentShell: input.hasPersistentShell,
+		})
+
+	// The production bug: first click after a full load had from=null, so the
+	// path-only skip missed and the whole account shell faded + slid 8px.
+	expect(
+		animate({
+			from: null,
+			to: '/account/activity',
+			hasPersistentShell: true,
+		}),
+	).toBe(false)
+	expect(
+		animate({
+			from: '/account/usage',
+			to: '/account/activity',
+			hasPersistentShell: true,
+		}),
+	).toBe(false)
+	expect(animate({ from: '/account/usage', to: '/account/activity' })).toBe(
+		false,
+	)
+	expect(animate({ from: '/docs', to: '/docs/oauth' })).toBe(false)
+	expect(animate({ from: '/docs/oauth', to: '/docs/connect' })).toBe(false)
+	expect(
+		animate({
+			from: null,
+			to: '/docs/how-kody-works',
+			hasPersistentShell: true,
+		}),
+	).toBe(false)
+	expect(animate({ from: '/pricing', to: '/docs' })).toBe(true)
+	expect(animate({ from: '/docs/oauth', to: '/blog' })).toBe(true)
+
+	// Leaving, entering, or crossing shells is still a real page change.
+	expect(
+		animate({
+			from: '/account/usage',
+			to: '/pricing',
+			hasPersistentShell: true,
+		}),
+	).toBe(true)
+	expect(
+		animate({
+			from: '/account/usage',
+			to: '/admin/users',
+			hasPersistentShell: true,
+		}),
+	).toBe(true)
+	expect(animate({ from: '/pricing', to: '/account/usage' })).toBe(true)
+	expect(animate({ from: null, to: '/account/usage' })).toBe(true)
+
+	// Same pathname+search (hash-only / same-URL refresh) never animates.
+	expect(animate({ from: '/account/usage', to: '/account/usage' })).toBe(false)
+
+	// Onboarding subroutes share heading, stepper, and picker chrome. A
+	// page view-transition would fade those in place; only the incoming
+	// panel may move.
+	expect(
+		animate({
+			from: '/onboarding/step-1',
+			to: '/onboarding/step-1/cursor',
+		}),
+	).toBe(false)
+	expect(
+		animate({
+			from: '/onboarding/step-1/cursor',
+			to: '/onboarding/step-1/not-listed',
+		}),
+	).toBe(false)
+	expect(
+		animate({
+			from: '/onboarding/step-2',
+			to: '/onboarding/step-2/notion',
+		}),
+	).toBe(false)
+	expect(
+		animate({
+			from: null,
+			to: '/onboarding/step-1/cursor',
+		}),
+	).toBe(false)
+	expect(animate({ from: '/pricing', to: '/onboarding/step-1' })).toBe(true)
+	expect(animate({ from: '/onboarding/step-1', to: '/pricing' })).toBe(true)
+
+	// Chip filters and search on `/@username` stay on the same page.
+	expect(animate({ from: '/@jane', to: '/@jane?app=yes' })).toBe(false)
+	expect(
+		animate({ from: '/@jane?visibility=private', to: '/@jane?app=no' }),
+	).toBe(false)
+	expect(animate({ from: '/@jane', to: '/@jane?q=notes' })).toBe(false)
+	expect(animate({ from: '/@jane', to: '/@jane?package=no' })).toBe(false)
+	expect(animate({ from: '/@jane', to: '/@jane?sort=created' })).toBe(false)
+	expect(animate({ from: '/@jane', to: '/@jane?dir=asc' })).toBe(false)
+	expect(animate({ from: '/@jane', to: '/@other' })).toBe(true)
+	expect(animate({ from: '/pricing', to: '/@jane' })).toBe(true)
+
+	// Repo / Files / Settings share chrome; crossing packages still animates.
+	expect(
+		animate({
+			from: '/@kentcdodds/grok-bot',
+			to: '/@kentcdodds/grok-bot/tree/main',
+		}),
+	).toBe(false)
+	expect(
+		animate({
+			from: '/@kentcdodds/grok-bot/tree/main',
+			to: '/@kentcdodds/grok-bot/settings',
+		}),
+	).toBe(false)
+	expect(
+		animate({
+			from: '/@kentcdodds/grok-bot/settings',
+			to: '/@kentcdodds/grok-bot',
+		}),
+	).toBe(false)
+	expect(
+		animate({
+			from: '/@kentcdodds/grok-bot',
+			to: '/@kentcdodds/other-bot',
+		}),
+	).toBe(true)
+
+	const withRail = {
+		querySelector: (selector: string) =>
+			selector === persistentShellNavSelector ? ({} as Element) : null,
+	}
+	const withoutRail = { querySelector: () => null }
+	expect(documentHasPersistentShell(withRail)).toBe(true)
+	expect(documentHasPersistentShell(withoutRail)).toBe(false)
+	expect(documentHasPersistentShell(null)).toBe(false)
+})
+
+test('same-origin hash links are intercepted so scroll restoration can reach them', () => {
+	const previousWindow = globalThis.window
+	globalThis.window = {
+		location: {
+			href: 'https://kody.local/',
+			origin: 'https://kody.local',
+		},
+	} as Window & typeof globalThis
+
+	try {
+		const click = {
+			defaultPrevented: false,
+			button: 0,
+			metaKey: false,
+			altKey: false,
+			ctrlKey: false,
+			shiftKey: false,
+		} as MouseEvent
+		const hashAnchor = {
+			target: '',
+			hasAttribute: () => false,
+			getAttribute: (name: string) => (name === 'href' ? '#invite' : null),
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, hashAnchor)).toBe(true)
+
+		const sameDocumentHashAnchor = {
+			target: '',
+			hasAttribute: () => false,
+			getAttribute: (name: string) => (name === 'href' ? '/#invite' : null),
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, sameDocumentHashAnchor)).toBe(true)
+
+		const externalAnchor = {
+			target: '',
+			hasAttribute: () => false,
+			getAttribute: (name: string) =>
+				name === 'href' ? 'https://example.com/#invite' : null,
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, externalAnchor)).toBe(false)
+
+		const remixFrameAnchor = {
+			target: '',
+			hasAttribute: (name: string) => name === 'data-rmx-target',
+			getAttribute: (name: string) => (name === 'href' ? '/community' : null),
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, remixFrameAnchor)).toBe(false)
+	} finally {
+		globalThis.window = previousWindow
+	}
+})
+
+test('doc and blog markdown twins leave the SPA instead of rendering a 404', () => {
+	const guidePage = 'guide-page' as unknown as JSX.Element
+	const blogPage = 'blog-page' as unknown as JSX.Element
+	const pageRoutes = {
+		[routePattern(routes.docDetail)]: guidePage,
+		[routePattern(routes.blogPost)]: blogPage,
+		[routePattern(routes.docs)]: guidePage,
+		[routePattern(routes.home)]: guidePage,
+	}
+
+	expect(matchRoute('/docs/oauth', pageRoutes)).toBe(guidePage)
+	expect(matchRoute('/docs/oauth.md', pageRoutes)).toBeNull()
+	expect(matchRoute('/docs/oauth.json', pageRoutes)).toBeNull()
+	expect(matchRoute('/docs/llms.txt', pageRoutes)).toBeNull()
+	expect(matchRoute('/blog/your-assistants-home.md', pageRoutes)).toBeNull()
+	expect(matchRoute(routes.blogRss.href(), pageRoutes)).toBeNull()
+	expect(routes.docDetailMarkdown.href({ slug: 'oauth' })).toBe(
+		'/docs/oauth.md',
+	)
+	expect(routes.blogRss.href()).toBe('/blog/rss.xml')
+
+	registerClientRoutes(pageRoutes)
+	const previousWindow = globalThis.window
+	const assign = vi.fn<() => void>()
+	globalThis.window = {
+		location: {
+			href: 'https://kody.local/docs/oauth',
+			origin: 'https://kody.local',
+			pathname: '/docs/oauth',
+			search: '',
+			hash: '',
+			assign,
+		},
+	} as unknown as Window & typeof globalThis
+
+	try {
+		expect(shouldLeaveDocumentForPath('/docs')).toBe(false)
+		expect(shouldLeaveDocumentForPath('/docs/oauth')).toBe(false)
+		expect(shouldLeaveDocumentForPath('/docs/connect')).toBe(false)
+		expect(shouldLeaveDocumentForPath('/docs/oauth.md')).toBe(true)
+		expect(shouldLeaveDocumentForPath('/docs.md')).toBe(true)
+		expect(shouldLeaveDocumentForPath('/docs/connect.md')).toBe(true)
+		expect(shouldLeaveDocumentForPath('/docs/llms.txt')).toBe(true)
+		// Legacy URLs are worker 308s, never SPA pages.
+		expect(shouldLeaveDocumentForPath('/guides/oauth')).toBe(true)
+		expect(shouldLeaveDocumentForPath('/auth.md')).toBe(true)
+		expect(shouldLeaveDocumentForPath('/robots.txt')).toBe(true)
+		expect(shouldLeaveDocumentForPath('/missing-page')).toBe(true)
+		expect(shouldLeaveDocumentForPath(routes.blogRss.href())).toBe(true)
+
+		const click = {
+			defaultPrevented: false,
+			button: 0,
+			metaKey: false,
+			altKey: false,
+			ctrlKey: false,
+			shiftKey: false,
+		} as MouseEvent
+		const markdownAnchor = {
+			target: '',
+			hasAttribute: () => false,
+			getAttribute: (name: string) =>
+				name === 'href' ? '/docs/oauth.md' : null,
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, markdownAnchor)).toBe(false)
+
+		const documentAnchor = {
+			target: '',
+			hasAttribute: (name: string) => name === 'data-rmx-document',
+			getAttribute: (name: string) =>
+				name === 'href' ? '/docs/oauth.md' : null,
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, documentAnchor)).toBe(false)
+
+		const rssAnchor = {
+			target: '',
+			hasAttribute: (name: string) => name === 'data-rmx-document',
+			getAttribute: (name: string) =>
+				name === 'href' ? routes.blogRss.href() : null,
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, rssAnchor)).toBe(false)
+
+		const pageAnchor = {
+			target: '',
+			hasAttribute: () => false,
+			getAttribute: (name: string) => (name === 'href' ? '/docs/oauth' : null),
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, pageAnchor)).toBe(true)
+
+		navigate('/docs/how-kody-works.md')
+		expect(assign).toHaveBeenCalledWith('/docs/how-kody-works.md')
+		navigate(routes.blogRss.href())
+		expect(assign).toHaveBeenCalledWith(routes.blogRss.href())
+	} finally {
+		registerClientRoutes({})
+		globalThis.window = previousWindow
+	}
+})
+
+test('the router holds the previous route until a cold destination module is cached', async () => {
+	let url = '/pricing'
+	const pricingRoute = 'pricing-route' as unknown as JSX.Element
+	const communityRoute = 'community-route' as unknown as JSX.Element
+	const render = Router({
+		props: {
+			routes: {
+				'/pricing': pricingRoute,
+				'/community': communityRoute,
+			},
+		},
+		signal: new AbortController().signal,
+		update: vi.fn(),
+		context: {
+			get: () => ({ url, ssrUrl: '/pricing' }),
+		},
+	} as never)
+
+	expect(render()).toBe(pricingRoute)
+	url = '/community'
+	expect(render()).toBe(pricingRoute)
+
+	await communityArea.load()
+	expect(render()).toBe(communityRoute)
+})
+
+test('a navigation that exceeds the timeout falls back to a full document navigation', async () => {
+	vi.useFakeTimers()
+	const previousWindow = globalThis.window
+	const assign = vi.fn()
+	globalThis.window = {
+		location: {
+			href: 'https://kody.local/',
+			origin: 'https://kody.local',
+			pathname: '/',
+			search: '',
+			hash: '',
+			assign,
+		},
+	} as unknown as Window & typeof globalThis
+	registerRouteLoaders({
+		'/stuck': () => new Promise(() => {}),
+	})
+
+	try {
+		navigate('/stuck')
+		await vi.advanceTimersByTimeAsync(navigationTimeoutMs)
+
+		expect(assign).toHaveBeenCalledWith('/stuck')
+	} finally {
+		registerRouteLoaders({})
+		vi.clearAllTimers()
+		vi.useRealTimers()
+		globalThis.window = previousWindow
+	}
+})
+
+test('prefetchRouteHrefs warms every registered destination so click skips a cold loader', async () => {
+	abortIntentPrefetch()
+	const previousWindow = globalThis.window
+	globalThis.window = {
+		location: {
+			href: 'https://kody.local/onboarding/step-2',
+			origin: 'https://kody.local',
+			pathname: '/onboarding/step-2',
+			search: '',
+			hash: '',
+		},
+	} as unknown as Window & typeof globalThis
+
+	const calls: Array<string> = []
+	const payload = { onboarding: { ok: true } as never }
+	const loader: RouteLoader = async (url) => {
+		calls.push(`${url.pathname}${url.search}`)
+		return payload
+	}
+	registerRouteLoaders({
+		[routePattern(routes.onboardingStep2Service)]: loader,
+		[routePattern(routes.onboardingStep1Agent)]: loader,
+	})
+
+	try {
+		prefetchRouteHrefs([
+			'/onboarding/step-2',
+			'/onboarding/step-2/notion',
+			'/onboarding/step-2/linear',
+			'/onboarding/step-1/cursor',
+			'/community',
+		])
+		expect(calls).toEqual(['/onboarding/step-2/notion'])
+		await Promise.resolve()
+
+		const notion = takePrefetchedRouteResult('/onboarding/step-2/notion')
+		expect(notion).not.toBeNull()
+		await expect(notion).resolves.toEqual(payload)
+		expect(
+			takePrefetchedRouteResult('/onboarding/step-2/linear'),
+		).not.toBeNull()
+		expect(
+			takePrefetchedRouteResult('/onboarding/step-1/cursor'),
+		).not.toBeNull()
+		expect(takePrefetchedRouteResult('/community')).toBeNull()
+		expect(calls).toHaveLength(1)
+	} finally {
+		abortIntentPrefetch()
+		registerRouteLoaders({})
+		globalThis.window = previousWindow
+	}
+})
+
+test('prefetchRouteHrefs independent warms each docs slug with its own request', async () => {
+	abortIntentPrefetch()
+	const previousWindow = globalThis.window
+	globalThis.window = {
+		location: {
+			href: 'https://kody.local/docs/memory',
+			origin: 'https://kody.local',
+			pathname: '/docs/memory',
+			search: '',
+			hash: '',
+		},
+	} as unknown as Window & typeof globalThis
+
+	const calls: Array<string> = []
+	const loader: RouteLoader = async (url) => {
+		const href = `${url.pathname}${url.search}`
+		calls.push(href)
+		return { docDetail: { ok: true, slug: href } as never }
+	}
+	registerRouteLoaders({
+		[routePattern(routes.docDetail)]: loader,
+		[routePattern(routes.docsConnect)]: loader,
+		[routePattern(routes.docs)]: loader,
+	})
+
+	try {
+		prefetchRouteHrefs(
+			['/docs/oauth', '/docs/memory', '/docs/secrets', '/docs/connect'],
+			{ independent: true },
+		)
+		expect(calls).toEqual(['/docs/oauth', '/docs/secrets', '/docs/connect'])
+		await Promise.resolve()
+
+		const oauth = takePrefetchedRouteResult('/docs/oauth')
+		expect(oauth).not.toBeNull()
+		await expect(oauth).resolves.toEqual({
+			docDetail: { ok: true, slug: '/docs/oauth' },
+		})
+		expect(takePrefetchedRouteResult('/docs/oauth')).toBeNull()
+
+		const secrets = takePrefetchedRouteResult('/docs/secrets')
+		expect(secrets).not.toBeNull()
+		await expect(secrets).resolves.toEqual({
+			docDetail: { ok: true, slug: '/docs/secrets' },
+		})
+		expect(takePrefetchedRouteResult('/docs/connect')).not.toBeNull()
+		expect(takePrefetchedRouteResult('/docs/memory')).toBeNull()
+		expect(calls).toHaveLength(3)
+	} finally {
+		abortIntentPrefetch()
+		registerRouteLoaders({})
+		globalThis.window = previousWindow
+	}
+})

@@ -1,0 +1,532 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	// Platform Durable Object Worker (ADR 0034): owns the remaining
+	// platform classes extracted from the origin `kody` Worker so
+	// content/UI deploys of the origin script do not reset those objects.
+	// The entry module lives in packages/worker/src/platform-worker.ts so
+	// the shared source tree, `#worker`/`#app` import maps, and the
+	// pre-bundled generated modules resolve identically to the
+	// origin Worker.
+	"name": "kody-platform",
+	"compatibility_date": "2026-04-16",
+	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	// Same Images binding as origin: MCP admin/integration logo uploads run
+	// on this script and must fit rasters before they land in R2. Wrangler
+	// does not inherit `images` into named envs — restate it on production
+	// and preview.
+	"images": {
+		"binding": "IMAGES",
+	},
+	// Same rationale as the origin worker: the MCP Agent Durable Object
+	// keeps a long-lived session and fans out into many D1 + Durable
+	// Object subrequests per invocation.
+	"limits": {
+		"subrequests": 100000,
+	},
+	"main": "../worker/src/platform-worker.ts",
+	"minify": true,
+	"upload_source_maps": true,
+	// Mirrors packages/worker/wrangler.jsonc: the module-graph builders
+	// dynamically import the pre-bundled worker-bundler modules from
+	// `packages/worker/src/node_modules/.kody-generated/` (base_dir
+	// defaults to the entry module's directory, which is
+	// packages/worker/src). That `node_modules/` prefix keeps wrangler's
+	// additional-module watcher off `esbuild.wasm` (Friction #1789).
+	"find_additional_modules": true,
+	"rules": [
+		{
+			"type": "Text",
+			"globs": ["./**/*.md", "../**/*.md"],
+			"fallthrough": true,
+		},
+		{
+			// Allowlisted generated filenames only. A `*.mjs` glob uploads
+			// stray files under `node_modules/.kody-generated/` (Friction #2504).
+			// Keep this list equal to `tools/worker-additional-module-allowlist.ts`.
+			"type": "ESModule",
+			"globs": [
+				"generated/guide-catalog.mjs",
+				"generated/guide-metadata.mjs",
+				"./generated/guide-catalog.mjs",
+				"./generated/guide-metadata.mjs",
+				"node_modules/.kody-generated/worker-bundler.mjs",
+				"node_modules/.kody-generated/worker-bundler-typescript.mjs",
+				"node_modules/.kody-generated/oauth-provider.mjs",
+				"node_modules/.kody-generated/package-app-remix.mjs",
+				"./node_modules/.kody-generated/worker-bundler.mjs",
+				"./node_modules/.kody-generated/worker-bundler-typescript.mjs",
+				"./node_modules/.kody-generated/oauth-provider.mjs",
+				"./node_modules/.kody-generated/package-app-remix.mjs",
+			],
+			"fallthrough": true,
+		},
+		{
+			"type": "CompiledWasm",
+			"globs": ["node_modules/.kody-generated/esbuild.wasm"],
+			"fallthrough": true,
+		},
+	],
+	// Production Durable Object storage moves with the classes from the
+	// origin `kody` script via a transfer migration; this applies on the
+	// first production deploy of this Worker. See
+	// docs/contributing/architecture/platform-worker-migration-runbook.md
+	// for the coordinated deploy order. The preview environment overrides
+	// this with `new_sqlite_classes` because preview worker sets are
+	// created fresh per PR with no storage to preserve.
+	"migrations": [
+		{
+			"tag": "v1",
+			"transferred_classes": [
+				{
+					"from": "MCP",
+					"from_script": "kody",
+					"to": "MCP",
+				},
+				{
+					"from": "McpClientHub",
+					"from_script": "kody",
+					"to": "McpClientHub",
+				},
+				{
+					"from": "OAuthPurgeCoordinator",
+					"from_script": "kody",
+					"to": "OAuthPurgeCoordinator",
+				},
+				{
+					"from": "UserMeter",
+					"from_script": "kody",
+					"to": "UserMeter",
+				},
+				{
+					"from": "Mailbox",
+					"from_script": "kody",
+					"to": "Mailbox",
+				},
+				{
+					"from": "RepoSession",
+					"from_script": "kody",
+					"to": "RepoSession",
+				},
+				{
+					"from": "RepoSessionIndex",
+					"from_script": "kody",
+					"to": "RepoSessionIndex",
+				},
+				{
+					"from": "StripePlanRefresh",
+					"from_script": "kody",
+					"to": "StripePlanRefresh",
+				},
+			],
+		},
+	],
+	"observability": {
+		"enabled": true,
+		"traces": {
+			"enabled": true,
+		},
+	},
+	"env": {
+		"production": {
+			"observability": {
+				"enabled": true,
+				"traces": {
+					"enabled": true,
+					"destinations": ["sentry-otlp-traces"],
+				},
+			},
+			"worker_loaders": [
+				{
+					"binding": "LOADER",
+				},
+				{
+					"binding": "APP_LOADER",
+				},
+			],
+			"workflows": [
+				{
+					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
+					"name": "kody-runtime-dynamic-callable-workflows",
+					"class_name": "DynamicCallableWorkflow",
+					"script_name": "kody-runtime",
+				},
+			],
+			"durable_objects": {
+				"bindings": [
+					// Platform-owned classes, local to this script.
+					{
+						"class_name": "MCP",
+						"name": "MCP_OBJECT",
+					},
+					{
+						"class_name": "McpClientHub",
+						"name": "MCP_CLIENT_HUB",
+					},
+					{
+						"class_name": "OAuthPurgeCoordinator",
+						"name": "OAUTH_PURGE_COORDINATOR",
+					},
+					{
+						"class_name": "UserMeter",
+						"name": "USER_METER",
+					},
+					{
+						"class_name": "Mailbox",
+						"name": "MAILBOX",
+					},
+					{
+						"class_name": "RepoSessionIndex",
+						"name": "REPO_SESSION_INDEX",
+					},
+					{
+						"class_name": "StripePlanRefresh",
+						"name": "STRIPE_PLAN_REFRESH",
+					},
+					{
+						"class_name": "RepoSession",
+						"name": "REPO_SESSION",
+					},
+					// Runtime-owned classes reached cross-script (ADR 0016).
+					{
+						"class_name": "StorageRunner",
+						"name": "STORAGE_RUNNER",
+						"script_name": "kody-runtime",
+					},
+					{
+						"class_name": "RunLog",
+						"name": "RUN_LOG",
+						"script_name": "kody-runtime",
+					},
+					{
+						"class_name": "PackageRealtimeSession",
+						"name": "PACKAGE_REALTIME_SESSION",
+						"script_name": "kody-runtime",
+					},
+				],
+			},
+			"services": [
+				{
+					"binding": "JOBS",
+					"service": "kody-jobs",
+					"entrypoint": "JobsService",
+				},
+			],
+			"d1_databases": [
+				{
+					"binding": "APP_DB",
+					"database_name": "kody",
+					"migrations_dir": "./../worker/migrations",
+				},
+				{
+					"binding": "AUDIT_DB",
+					"database_name": "kody-audit",
+					"migrations_dir": "./../worker/audit-migrations",
+				},
+			],
+			"kv_namespaces": [
+				{
+					"binding": "OAUTH_KV",
+				},
+				{
+					"binding": "BUNDLE_ARTIFACTS_KV",
+				},
+			],
+			"r2_buckets": [
+				{
+					"binding": "COMMUNITY_ASSETS",
+					"bucket_name": "kody-community-assets",
+				},
+				{
+					"binding": "EMAIL_BLOBS",
+					"bucket_name": "kody-email-blobs",
+				},
+				{
+					"binding": "REPO_SESSION_BLOBS",
+					"bucket_name": "kody-repo-session-blobs",
+				},
+			],
+			"queues": {
+				"producers": [
+					{
+						"binding": "PLATFORM_FEEDBACK_DISPATCH_QUEUE",
+						"queue": "kody-platform-feedback-dispatch",
+					},
+					{
+						"binding": "COMMUNITY_ACTIVITY_DISPATCH_QUEUE",
+						"queue": "kody-community-activity-dispatch",
+					},
+					{
+						"binding": "COMMUNITY_LISTING_PUBLISHED_DISPATCH_QUEUE",
+						"queue": "kody-community-listing-published-dispatch",
+					},
+					{
+						"binding": "PACKAGE_EVENTS_DISPATCH_QUEUE",
+						"queue": "kody-package-events-dispatch",
+					},
+					{
+						"binding": "WEBHOOK_DISPATCH_QUEUE",
+						"queue": "kody-webhook-dispatch",
+					},
+				],
+			},
+			"vectorize": [
+				{
+					"binding": "CAPABILITY_VECTOR_INDEX",
+					"index_name": "kody-capabilities-prod",
+				},
+			],
+			"analytics_engine_datasets": [
+				{
+					"binding": "USAGE_EVENTS",
+					"dataset": "kody_usage_events",
+				},
+				{
+					"binding": "FLAG_EXPOSURES",
+					"dataset": "kody_flag_exposures",
+				},
+				{
+					"binding": "EMAIL_EVENTS",
+					"dataset": "kody_email_events",
+				},
+				{
+					"binding": "MCP_PROTOCOL_EVENTS",
+					"dataset": "kody_mcp_protocol_events",
+				},
+				{
+					"binding": "PACKAGE_INVOKE_SPECIFIER_EVENTS",
+					"dataset": "kody_package_invoke_specifier_events",
+				},
+				{
+					"binding": "EXECUTE_INTERPRETABLE_EVENTS",
+					"dataset": "kody_execute_interpretable_events",
+				},
+				{
+					"binding": "MCP_SEARCH_EVENTS",
+					"dataset": "kody_mcp_search_events",
+				},
+				{
+					"binding": "ONBOARDING_FUNNEL_EVENTS",
+					"dataset": "kody_onboarding_funnel_events",
+				},
+			],
+			"ai": {
+				"binding": "AI",
+			},
+			"images": {
+				"binding": "IMAGES",
+			},
+			"send_email": [
+				{
+					"name": "EMAIL",
+				},
+			],
+			"artifacts": [
+				{
+					"binding": "ARTIFACTS",
+					"namespace": "production",
+				},
+			],
+			"vars": {
+				"SENTRY_ENVIRONMENT": "production",
+				"SENTRY_TRACES_SAMPLE_RATE": 0,
+				"ARTIFACTS_NAMESPACE": "production",
+			},
+		},
+		"preview": {
+			// Preview worker sets are created fresh per PR: the
+			// platform-owned classes are new namespaces here, not a transfer.
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"MCP",
+						"McpClientHub",
+						"OAuthPurgeCoordinator",
+						"UserMeter",
+						"Mailbox",
+						"RepoSession",
+						"RepoSessionIndex",
+						"StripePlanRefresh",
+					],
+				},
+			],
+			"worker_loaders": [
+				{
+					"binding": "LOADER",
+				},
+				{
+					"binding": "APP_LOADER",
+				},
+			],
+			"workflows": [
+				{
+					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
+					"name": "kody-runtime-preview-dynamic-callable-workflows",
+					"class_name": "DynamicCallableWorkflow",
+					"script_name": "kody-runtime",
+				},
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"class_name": "MCP",
+						"name": "MCP_OBJECT",
+					},
+					{
+						"class_name": "McpClientHub",
+						"name": "MCP_CLIENT_HUB",
+					},
+					{
+						"class_name": "OAuthPurgeCoordinator",
+						"name": "OAUTH_PURGE_COORDINATOR",
+					},
+					{
+						"class_name": "UserMeter",
+						"name": "USER_METER",
+					},
+					{
+						"class_name": "Mailbox",
+						"name": "MAILBOX",
+					},
+					{
+						"class_name": "RepoSessionIndex",
+						"name": "REPO_SESSION_INDEX",
+					},
+					{
+						"class_name": "StripePlanRefresh",
+						"name": "STRIPE_PLAN_REFRESH",
+					},
+					{
+						"class_name": "RepoSession",
+						"name": "REPO_SESSION",
+					},
+					{
+						"class_name": "StorageRunner",
+						"name": "STORAGE_RUNNER",
+						"script_name": "kody-runtime",
+					},
+					{
+						"class_name": "RunLog",
+						"name": "RUN_LOG",
+						"script_name": "kody-runtime",
+					},
+					{
+						"class_name": "PackageRealtimeSession",
+						"name": "PACKAGE_REALTIME_SESSION",
+						"script_name": "kody-runtime",
+					},
+				],
+			},
+			"services": [
+				{
+					"binding": "JOBS",
+					"service": "kody-jobs",
+					"entrypoint": "JobsService",
+				},
+			],
+			"d1_databases": [
+				{
+					"binding": "APP_DB",
+					"database_name": "kody-preview",
+					"migrations_dir": "./../worker/migrations",
+				},
+				{
+					"binding": "AUDIT_DB",
+					"database_name": "kody-preview-audit",
+					"migrations_dir": "./../worker/audit-migrations",
+				},
+			],
+			"kv_namespaces": [
+				{
+					"binding": "OAUTH_KV",
+				},
+				{
+					"binding": "BUNDLE_ARTIFACTS_KV",
+				},
+			],
+			"r2_buckets": [
+				{
+					"binding": "COMMUNITY_ASSETS",
+					"bucket_name": "kody-preview-community-assets",
+				},
+				{
+					"binding": "EMAIL_BLOBS",
+					"bucket_name": "kody-preview-email-blobs",
+				},
+				{
+					"binding": "REPO_SESSION_BLOBS",
+					"bucket_name": "kody-preview-repo-session-blobs",
+				},
+			],
+			"queues": {
+				"producers": [
+					{
+						"binding": "WEBHOOK_DISPATCH_QUEUE",
+						"queue": "kody-preview-webhook-dispatch",
+					},
+				],
+			},
+			"vectorize": [
+				{
+					"binding": "CAPABILITY_VECTOR_INDEX",
+					"index_name": "kody-capabilities-preview",
+				},
+			],
+			"analytics_engine_datasets": [
+				{
+					"binding": "USAGE_EVENTS",
+					"dataset": "kody_usage_events_preview",
+				},
+				{
+					"binding": "FLAG_EXPOSURES",
+					"dataset": "kody_flag_exposures_preview",
+				},
+				{
+					"binding": "EMAIL_EVENTS",
+					"dataset": "kody_email_events_preview",
+				},
+				{
+					"binding": "MCP_PROTOCOL_EVENTS",
+					"dataset": "kody_mcp_protocol_events_preview",
+				},
+				{
+					"binding": "PACKAGE_INVOKE_SPECIFIER_EVENTS",
+					"dataset": "kody_package_invoke_specifier_events_preview",
+				},
+				{
+					"binding": "EXECUTE_INTERPRETABLE_EVENTS",
+					"dataset": "kody_execute_interpretable_events_preview",
+				},
+				{
+					"binding": "MCP_SEARCH_EVENTS",
+					"dataset": "kody_mcp_search_events_preview",
+				},
+				{
+					"binding": "ONBOARDING_FUNNEL_EVENTS",
+					"dataset": "kody_onboarding_funnel_events_preview",
+				},
+			],
+			"ai": {
+				"binding": "AI",
+			},
+			"images": {
+				"binding": "IMAGES",
+			},
+			"send_email": [
+				{
+					"name": "EMAIL",
+				},
+			],
+			"artifacts": [
+				{
+					"binding": "ARTIFACTS",
+					"namespace": "preview",
+				},
+			],
+			"vars": {
+				"SENTRY_ENVIRONMENT": "preview",
+				"ARTIFACTS_NAMESPACE": "preview",
+			},
+		},
+	},
+}

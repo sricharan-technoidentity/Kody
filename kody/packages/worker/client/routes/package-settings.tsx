@@ -1,0 +1,398 @@
+// remix-skill: owner settings for a package (`/@user/name/settings`).
+import { type Handle, css } from 'remix/ui'
+import { createMatcher } from 'remix/route-pattern/match'
+import { readAppSession } from '#client/app-session-context.tsx'
+import { readCurrentRouterHref } from '#client/client-router.tsx'
+import { isFeatureFlagEnabled } from '#client/feature-flags.ts'
+import {
+	createRouteData,
+	renderRoutePendingStatus,
+	routeDataRedirect,
+} from '#client/route-data.tsx'
+import { readRouterPathname } from '#client/router-location.tsx'
+import { readJson } from '#client/routes/account-approval-shared.ts'
+import { NotFoundPage } from '#client/not-found-page.tsx'
+import { packageShareGrantsFlagKey } from '#universal/feature-flags/registry.ts'
+import { resolvePackageListIconUrl } from '#universal/identity-icon-urls.ts'
+import { type AccountPackageDetail } from '#universal/loader-data.ts'
+import {
+	fallbackDefaultBranchName,
+	getPackageTreeHref,
+} from '#universal/package-files.ts'
+import { type PackageShareGrantLoaderView } from '#universal/package-share.ts'
+import { renderPackageRepoChrome } from '#universal/package-repo-nav.tsx'
+import { routes } from '#universal/routes.ts'
+import {
+	type CommunityDetailApiPayload,
+	type CommunityPackageMovedPayload,
+	type PackageSettingsShell,
+	consumePackageSettingsShell,
+	getPackageSettingsPageRef,
+	packageMoveDestination,
+	postPackageLock,
+	rememberListingId,
+} from './community-detail-shared.ts'
+import {
+	detailArticleCss,
+	renderMissingListing,
+	renderOwnerPackageSection,
+	renderShellStatus,
+} from './community-detail-sections.tsx'
+import {
+	loadPackageShareGrants,
+	renderPackageShareSettings,
+} from './package-share-settings.tsx'
+import { postPackageShareAction } from './package-share-client.ts'
+import { createPackageWebhooksController } from './package-webhook-settings.tsx'
+
+const settingsMatcher = createMatcher(routes.communityPackageSettings.pattern)
+
+export function PackageSettingsRoute(handle: Handle) {
+	let ownerPackage: AccountPackageDetail | null = null
+	let username = ''
+	let kodyId = ''
+	let isPrivate = false
+	let listingId: string | null = null
+	let defaultBranch: string | null = null
+	let ownerProfilePublic = true
+	let ownerDetailsMessage: string | null = null
+	/** Payload last applied to the closure state above. */
+	let appliedShell: PackageSettingsShell | null = null
+	const lockInFlight = new Map<string, string | null>()
+	let shareGrants: Array<PackageShareGrantLoaderView> = []
+	let shareInviteUsername = ''
+	let shareInviteEmail = ''
+	let shareBusy = false
+	let shareMessage: string | null = null
+	let shareLoadedFor = ''
+	const webhooks = createPackageWebhooksController(handle)
+	const settingsData = createRouteData<
+		'communityDetailShell',
+		PackageSettingsShell
+	>({
+		consume: consumePackageSettingsShell,
+		async load(href, signal) {
+			const ref = getPackageSettingsPageRef(
+				new URL(href, 'http://localhost').pathname,
+			)
+			if (!ref) return null
+			const response = await fetch(ref.detailApiHref, {
+				headers: { Accept: 'application/json' },
+				signal,
+			})
+			const payload = await readJson<
+				CommunityDetailApiPayload | CommunityPackageMovedPayload
+			>(response)
+			if (response.status === 401) return { kind: 'unauthorized' }
+			if (response.status === 404) {
+				const movedTo = payload && !payload.ok ? payload.redirectTo : null
+				if (movedTo) {
+					return routeDataRedirect(
+						packageMoveDestination(ref.pathname, movedTo),
+					)
+				}
+				return { kind: 'not-found' }
+			}
+			if (
+				!response.ok ||
+				!payload?.ok ||
+				!payload.ownerPackage ||
+				!payload.viewerIsOwner
+			) {
+				return { kind: 'not-found' }
+			}
+			if (payload.listing) {
+				rememberListingId(ref.pathname, payload.listing.id)
+			}
+			return {
+				kind: 'owner',
+				ownerPackage: payload.ownerPackage,
+				username: payload.username,
+				kodyId: payload.kodyId || payload.ownerPackage.kodyId,
+				isPrivate: payload.isPrivate ?? payload.ownerPackage.isPrivate,
+				listingId: payload.listing?.id ?? null,
+				defaultBranch: payload.listing?.defaultBranch ?? null,
+				ownerProfilePublic: payload.ownerProfilePublic,
+			}
+		},
+	})
+
+	function applyOwnerPackageLock(packageId: string, lockedAt: string | null) {
+		if (ownerPackage?.id === packageId) {
+			ownerPackage = { ...ownerPackage, lockedAt }
+		}
+	}
+
+	async function togglePackageLock() {
+		if (!ownerPackage || lockInFlight.has(ownerPackage.id)) return
+		const packageId = ownerPackage.id
+		const previousLockedAt = ownerPackage.lockedAt
+		const nextLocked = !(
+			typeof previousLockedAt === 'string' && previousLockedAt.trim().length > 0
+		)
+		const nextLockedAt = nextLocked ? new Date().toISOString() : null
+		lockInFlight.set(packageId, nextLockedAt)
+		ownerDetailsMessage = null
+		applyOwnerPackageLock(packageId, nextLockedAt)
+		handle.update()
+
+		const result = await postPackageLock(packageId, nextLocked)
+		lockInFlight.delete(packageId)
+		if (result.status === 'unauthorized') {
+			window.location.assign('/login')
+			handle.update()
+			return
+		}
+		if (result.status === 'error') {
+			applyOwnerPackageLock(packageId, previousLockedAt)
+			if (ownerPackage?.id === packageId) {
+				ownerDetailsMessage = result.message
+			}
+			handle.update()
+			return
+		}
+		applyOwnerPackageLock(packageId, result.lockedAt ?? nextLockedAt)
+		if (result.selectedPackage?.id === packageId) {
+			ownerPackage = result.selectedPackage
+		}
+		handle.update()
+	}
+
+	async function refreshShareGrants(nextUsername: string, nextKodyId: string) {
+		const key = `${nextUsername}/${nextKodyId}`
+		if (!nextUsername || !nextKodyId || shareLoadedFor === key) return
+		shareLoadedFor = key
+		try {
+			const grants = await loadPackageShareGrants({
+				username: nextUsername,
+				kodyId: nextKodyId,
+			})
+			if (`${username}/${kodyId}` !== key) return
+			shareGrants = grants
+		} catch {
+			if (`${username}/${kodyId}` !== key) return
+			// Keep the key: the update below re-renders, and a cleared key
+			// would queue this same fetch again, looping on a persistent
+			// failure (for example the 404 the API answers when share grants
+			// are disabled). Invite / revoke clear it explicitly to refetch.
+			shareMessage = 'Unable to load who this package is shared with.'
+		}
+		handle.update()
+	}
+
+	async function inviteShare() {
+		if (shareBusy || !username || !kodyId) return
+		shareBusy = true
+		shareMessage = null
+		handle.update()
+		const result = await postPackageShareAction({
+			intent: 'invite',
+			ownerUsername: username,
+			kodyId,
+			username: shareInviteUsername,
+			email: shareInviteEmail,
+		})
+		shareBusy = false
+		if (result.status === 'unauthorized') {
+			window.location.assign('/login')
+			return
+		}
+		if (result.status === 'error') {
+			shareMessage = result.message
+			handle.update()
+			return
+		}
+		shareInviteUsername = ''
+		shareInviteEmail = ''
+		shareLoadedFor = ''
+		await refreshShareGrants(username, kodyId)
+	}
+
+	async function revokeShare(grantId: string) {
+		if (shareBusy || !username || !kodyId) return
+		shareBusy = true
+		shareMessage = null
+		handle.update()
+		const result = await postPackageShareAction({
+			intent: 'revoke',
+			ownerUsername: username,
+			kodyId,
+			grantId,
+		})
+		shareBusy = false
+		if (result.status === 'unauthorized') {
+			window.location.assign('/login')
+			return
+		}
+		if (result.status === 'error') {
+			shareMessage = result.message
+			handle.update()
+			return
+		}
+		shareLoadedFor = ''
+		await refreshShareGrants(username, kodyId)
+	}
+
+	return () => {
+		const currentHref = readCurrentRouterHref(handle)
+		const pathname = readRouterPathname(handle)
+		const ref = getPackageSettingsPageRef(pathname)
+		const urlParams = settingsMatcher.match(
+			new URL(pathname, 'http://localhost'),
+		)?.params
+
+		if (!ref) {
+			return <NotFoundPage />
+		}
+
+		const snapshot = settingsData.read(handle, currentHref)
+		if (snapshot.data && snapshot.data !== appliedShell) {
+			appliedShell = snapshot.data
+			switch (snapshot.data.kind) {
+				case 'owner':
+					ownerPackage = snapshot.data.ownerPackage
+					username = snapshot.data.username
+					kodyId = snapshot.data.kodyId
+					isPrivate = snapshot.data.isPrivate
+					listingId = snapshot.data.listingId
+					defaultBranch = snapshot.data.defaultBranch
+					if (snapshot.data.ownerProfilePublic !== undefined) {
+						ownerProfilePublic = snapshot.data.ownerProfilePublic
+					}
+					ownerDetailsMessage = null
+					break
+				case 'unauthorized':
+				case 'not-found':
+					break
+				default: {
+					const exhaustive: never = snapshot.data
+					throw new Error(`Unhandled settings shell: ${String(exhaustive)}`)
+				}
+			}
+		}
+
+		if (snapshot.data?.kind === 'unauthorized' && !snapshot.stale) {
+			return renderMissingListing(
+				'Unauthorized',
+				'You are not allowed to view this page.',
+			)
+		}
+		if (
+			(snapshot.data?.kind === 'not-found' && !snapshot.stale) ||
+			snapshot.kind === 'not-found'
+		) {
+			return <NotFoundPage />
+		}
+
+		const pending = snapshot.kind === 'pending'
+		// The previous package's settings (`snapshot.stale`) stay on screen
+		// while a fallback fetch runs; the loading copy is for the cold path.
+		const showReady = snapshot.data?.kind === 'owner'
+		const shareEnabled = isFeatureFlagEnabled(
+			readAppSession(handle)?.session,
+			packageShareGrantsFlagKey,
+		)
+		// The share API answers 404 while the flag is off, so only the
+		// rendered Share section asks for its grants.
+		if (
+			showReady &&
+			shareEnabled &&
+			username &&
+			kodyId &&
+			shareLoadedFor !== `${username}/${kodyId}` &&
+			typeof document !== 'undefined'
+		) {
+			handle.queueTask(() => refreshShareGrants(username, kodyId))
+		}
+		if (showReady && username && kodyId && typeof document !== 'undefined') {
+			handle.queueTask(() => webhooks.ensureLoaded({ username, kodyId }))
+		}
+		const showError = snapshot.kind === 'error'
+		const statusMessage = showError
+			? 'Unable to load package settings.'
+			: showReady
+				? ''
+				: 'Loading package settings…'
+
+		const chromeUsername = username || urlParams?.username || ''
+		const chromeKodyId = kodyId || urlParams?.kodyId || ''
+
+		return (
+			<article
+				mix={css(detailArticleCss)}
+				data-testid="package-settings"
+				aria-busy={pending && showReady ? 'true' : undefined}
+			>
+				{pending && showReady ? renderRoutePendingStatus() : null}
+				{chromeUsername && chromeKodyId
+					? renderPackageRepoChrome({
+							username: chromeUsername,
+							kodyId: chromeKodyId,
+							isPrivate,
+							isListed: ownerPackage?.hasCommunityListing === true,
+							viewerIsOwner: true,
+							active: 'settings',
+							filesHref: getPackageTreeHref({
+								username: chromeUsername,
+								kodyId: chromeKodyId,
+								listingId,
+								ref: defaultBranch || fallbackDefaultBranchName,
+							}),
+							description: ownerPackage?.description ?? '',
+							ownerProfilePublic,
+							iconUrl: resolvePackageListIconUrl({
+								username: chromeUsername,
+								kodyId: chromeKodyId,
+								listingId,
+								listingIconCommit: null,
+								publishedCommit: ownerPackage?.publishedCommit ?? null,
+							}),
+							iconName: ownerPackage?.kodyId ?? chromeKodyId,
+						})
+					: null}
+				{renderShellStatus(statusMessage)}
+				{showReady && ownerPackage
+					? renderOwnerPackageSection({
+							ownerUsername: username,
+							ownerPackage,
+							lockInFlight: lockInFlight.has(ownerPackage.id),
+							ownerDetailsMessage,
+							onToggleLock: () => void togglePackageLock(),
+							onPackagesPayload: (payload) => {
+								const selected = payload.selectedPackage
+								if (selected && selected.id === ownerPackage?.id) {
+									ownerPackage = selected
+									isPrivate = selected.isPrivate
+									handle.update()
+								}
+							},
+						})
+					: null}
+				{showReady && ownerPackage
+					? webhooks.render({ username, kodyId })
+					: null}
+				{showReady && ownerPackage && shareEnabled
+					? renderPackageShareSettings({
+							username,
+							kodyId,
+							grants: shareGrants,
+							inviteUsername: shareInviteUsername,
+							inviteEmail: shareInviteEmail,
+							busy: shareBusy,
+							message: shareMessage,
+							onInviteUsername: (value) => {
+								shareInviteUsername = value
+								handle.update()
+							},
+							onInviteEmail: (value) => {
+								shareInviteEmail = value
+								handle.update()
+							},
+							onInvite: () => void inviteShare(),
+							onRevoke: (grantId) => void revokeShare(grantId),
+						})
+					: null}
+			</article>
+		)
+	}
+}

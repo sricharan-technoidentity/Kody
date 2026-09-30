@@ -1,0 +1,291 @@
+import { expect, test, vi } from 'vitest'
+import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
+import { legacyPlanLimits, planLimits } from '#universal/plans.ts'
+import { readEntitlementUsageSnapshot } from '#worker/entitlements/usage-snapshot.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { createInMemoryRunLogUsageEnv } from '#worker/test-support/run-log-usage.ts'
+import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
+import { accountUsageEntitlementResources } from '#worker/entitlements/resource-visibility.ts'
+
+function withUsageEnv(env: { APP_DB: D1Database } & Record<string, unknown>) {
+	const meter = createInMemoryUserMeterEnv()
+	const runLog = createInMemoryRunLogUsageEnv()
+	const repoSessionIndex = createInMemoryRepoSessionIndexEnv(env.APP_DB)
+	return {
+		...env,
+		...meter.env,
+		...runLog.env,
+		REPO_SESSION_INDEX: repoSessionIndex.REPO_SESSION_INDEX,
+		MAILBOX: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({ countMessages: async () => ({ total: 0 }) }),
+		},
+		meter,
+		runLog,
+	}
+}
+
+function createUsageTestDb(input: {
+	email: string
+	repoCount?: number
+	packageCount?: number
+	storageBucketEstimates?: Array<number | null>
+}) {
+	const stableUserId = testStableUserIdFromEmail(input.email)
+	return {
+		stableUserId,
+		db: {
+			prepare(query: string) {
+				const normalized = query.replace(/\s+/g, ' ').trim().toLowerCase()
+				return {
+					bind(...params: Array<unknown>) {
+						return {
+							async first<T>() {
+								if (normalized.includes('from user_repos')) {
+									return { count: input.repoCount ?? 0 } as T
+								}
+								if (normalized.includes('from saved_packages')) {
+									return { count: input.packageCount ?? 0 } as T
+								}
+								if (normalized.includes('select 1 as present from users')) {
+									return { present: 1 } as T
+								}
+								if (
+									normalized.includes('count(*)') ||
+									normalized.includes('sum(')
+								) {
+									return { count: 0, total: 0, bytes: 0 } as T
+								}
+								void params
+								return null
+							},
+							async all<T>() {
+								if (normalized.includes('from user_storage_buckets')) {
+									if (params[0] !== stableUserId) {
+										return { results: [] as Array<T> }
+									}
+									return {
+										results: (input.storageBucketEstimates ?? []).map(
+											(estimatedBytes, index) => ({
+												storageId: `package-${index}`,
+												kind: 'package',
+												estimatedBytes,
+											}),
+										),
+									} as { results: Array<T> }
+								}
+								return { results: [] as Array<T> }
+							},
+						}
+					},
+				}
+			},
+		} as unknown as D1Database,
+	}
+}
+
+test('readEntitlementUsageSnapshot warns at 80% and includes the account resource set', async () => {
+	const now = new Date('2026-07-25T12:00:00.000Z')
+	const day = utcDayKey(now)
+	const email = 'warn@example.com'
+	const { stableUserId, db } = createUsageTestDb({
+		email,
+		packageCount: 7,
+		storageBucketEstimates: [2_000, null, 3_000],
+	})
+	const env = withUsageEnv({ APP_DB: db })
+	await env.meter.seed({
+		userId: stableUserId,
+		resource: 'email_sends_per_day',
+		day,
+		count: 9,
+	})
+	await env.meter.seedStorageBytes({
+		userId: stableUserId,
+		bytes: 1_000,
+	})
+	const snapshot = await readEntitlementUsageSnapshot({
+		db,
+		env: env as Env,
+		usageUserId: stableUserId,
+		plan: 'free',
+		ladder: 'public',
+		now,
+	})
+	const sends = snapshot.resources.find(
+		(row) => row.resource === 'email_sends_per_day',
+	)
+	expect(sends?.overEightyPercent).toBe(true)
+	expect(
+		snapshot.warnings.some((row) => row.resource === 'email_sends_per_day'),
+	).toBe(true)
+	const packages = snapshot.resources.find(
+		(row) => row.resource === 'saved_packages',
+	)
+	expect(packages?.overEightyPercent).toBe(false)
+	expect(
+		snapshot.resources.find((row) => row.resource === 'storage_bytes')?.current,
+	).toBe(6_000)
+	expect(snapshot.resources.map((row) => row.resource)).toEqual(
+		accountUsageEntitlementResources,
+	)
+	expect(snapshot.weekStart).toBe('2026-07-20')
+	const execute = snapshot.resources.find(
+		(row) => row.resource === 'execute_calls_per_day',
+	)
+	expect(execute?.week).toEqual({
+		current: 0,
+		limit: 400,
+		percentOfLimit: 0,
+		overEightyPercent: false,
+	})
+
+	const otherUserSnapshot = await readEntitlementUsageSnapshot({
+		db,
+		env: env as Env,
+		usageUserId: testStableUserIdFromEmail('other-user@example.com'),
+		plan: 'free',
+		ladder: 'public',
+		now,
+	})
+	expect(
+		otherUserSnapshot.resources.find((row) => row.resource === 'storage_bytes')
+			?.current,
+	).toBe(0)
+})
+
+test('readEntitlementUsageSnapshot uses the requested entitlement ladder', async () => {
+	const email = 'legacy-usage@example.com'
+	const { stableUserId, db } = createUsageTestDb({ email })
+	const env = withUsageEnv({ APP_DB: db })
+	const publicSnapshot = await readEntitlementUsageSnapshot({
+		db,
+		env: env as Env,
+		usageUserId: stableUserId,
+		plan: 'standard',
+		ladder: 'public',
+	})
+	const legacySnapshot = await readEntitlementUsageSnapshot({
+		db,
+		env: env as Env,
+		usageUserId: stableUserId,
+		plan: 'standard',
+		ladder: 'legacy',
+	})
+	expect(
+		publicSnapshot.resources.find(
+			(row) => row.resource === 'execute_calls_per_day',
+		)?.limit,
+	).toBe(planLimits.standard.maxExecuteCallsPerDay)
+	expect(
+		legacySnapshot.resources.find(
+			(row) => row.resource === 'execute_calls_per_day',
+		)?.limit,
+	).toBe(legacyPlanLimits.standard.maxExecuteCallsPerDay)
+	expect(
+		publicSnapshot.resources.find(
+			(row) => row.resource === 'execute_calls_per_day',
+		)?.week?.limit,
+	).toBe(planLimits.standard.maxExecuteCallsPerWeek)
+	expect(
+		legacySnapshot.resources.find(
+			(row) => row.resource === 'execute_calls_per_day',
+		)?.week,
+	).toBeUndefined()
+})
+
+test('readEntitlementUsageSnapshot reads the weekly window without waiting on the daily read', async () => {
+	const now = new Date('2026-07-25T12:00:00.000Z')
+	const { stableUserId, db } = createUsageTestDb({
+		email: 'weekly-parallel@example.com',
+	})
+	const env = withUsageEnv({ APP_DB: db })
+	type MeterStub = {
+		read: (input: { resource: string }) => Promise<unknown>
+		readRange: (input: { resource: string }) => Promise<unknown>
+	}
+	const userMeter = env.USER_METER as unknown as {
+		get: (id: unknown) => MeterStub
+	}
+	const realGet = userMeter.get
+	let releaseDailyRead!: () => void
+	const dailyReadGate = new Promise<void>((resolve) => {
+		releaseDailyRead = resolve
+	})
+	const weeklyRangeResources: Array<string> = []
+	userMeter.get = (id) => {
+		const meter = realGet(id)
+		return {
+			...meter,
+			async read(input: { resource: string }) {
+				if (input.resource === 'execute_calls_per_day') await dailyReadGate
+				return meter.read(input)
+			},
+			async readRange(input: { resource: string }) {
+				weeklyRangeResources.push(input.resource)
+				return meter.readRange(input)
+			},
+		}
+	}
+
+	const snapshotPromise = readEntitlementUsageSnapshot({
+		db,
+		env: env as unknown as Env,
+		usageUserId: stableUserId,
+		plan: 'free',
+		ladder: 'public',
+		now,
+	})
+	await vi.waitFor(() => {
+		expect(weeklyRangeResources).toContain('execute_calls_per_day')
+	})
+	releaseDailyRead()
+	const snapshot = await snapshotPromise
+	expect(
+		snapshot.resources.find((row) => row.resource === 'execute_calls_per_day')
+			?.week?.limit,
+	).toBe(400)
+})
+
+test('readEntitlementUsageSnapshot warns when the weekly window is hotter than today', async () => {
+	const now = new Date('2026-07-25T12:00:00.000Z')
+	const email = 'weekly-hot@example.com'
+	const { stableUserId, db } = createUsageTestDb({ email })
+	const env = withUsageEnv({ APP_DB: db })
+	await env.meter.seed({
+		userId: stableUserId,
+		resource: 'execute_calls_per_day',
+		day: '2026-07-20',
+		count: 330,
+	})
+	await env.meter.seed({
+		userId: stableUserId,
+		resource: 'execute_calls_per_day',
+		day: utcDayKey(now),
+		count: 10,
+	})
+	const snapshot = await readEntitlementUsageSnapshot({
+		db,
+		env: env as Env,
+		usageUserId: stableUserId,
+		plan: 'free',
+		ladder: 'public',
+		now,
+	})
+	const execute = snapshot.resources.find(
+		(row) => row.resource === 'execute_calls_per_day',
+	)
+	expect(execute?.current).toBe(10)
+	expect(execute?.percentOfLimit).toBe(10 / 150)
+	expect(execute?.week).toEqual({
+		current: 340,
+		limit: 400,
+		percentOfLimit: 340 / 400,
+		overEightyPercent: true,
+	})
+	expect(execute?.overEightyPercent).toBe(true)
+	expect(
+		snapshot.warnings.some((row) => row.resource === 'execute_calls_per_day'),
+	).toBe(true)
+})

@@ -1,0 +1,305 @@
+import { loadAccountPackageDetail } from '#app/account-packages-data.ts'
+import { loadCommunityDetailData } from '#app/community-data.ts'
+import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
+import { getAppBaseUrl } from '#worker/app-base-url.ts'
+import { getUserSocialRowByUsername } from '#worker/community/profile-repo.ts'
+import {
+	memoizePerRequest,
+	recordServerTiming,
+} from '#worker/request-context.ts'
+import {
+	getCommunityPackageHref,
+	resolvePackagePageUrl,
+} from '#worker/community/package-url.ts'
+import {
+	type AccountPackageDetail,
+	type CommunityDetailLoaderData,
+} from '#universal/loader-data.ts'
+import { type PackageShareGrantLoaderView } from '#universal/package-share.ts'
+import {
+	loadViewerPackageShare,
+	toPackageShareGrantLoaderView,
+} from '#worker/package-registry/share-grants.ts'
+
+export type PackagePageAccess =
+	| { kind: 'redirect'; to: string; shared: boolean }
+	| { kind: 'not_found' }
+	| { kind: 'unauthorized' }
+	| {
+			kind: 'page'
+			username: string
+			kodyId: string
+			listing: CommunityDetailLoaderData | null
+			ownerPackage: AccountPackageDetail | null
+			viewerIsOwner: boolean
+			loggedIn: boolean
+			invocationUrlOrigin: string
+			shareGrant: PackageShareGrantLoaderView | null
+			canReadOwnerSource: boolean
+			ownerUserId: string
+			/** True when `/@owner` is publicly reachable. */
+			ownerProfilePublic: boolean
+	  }
+
+export type PackagePagePrivacySource = {
+	ownerPackage: { isPrivate: boolean } | null
+	shareGrant: PackageShareGrantLoaderView | null
+}
+
+/**
+ * Pending share guests do not load `ownerPackage` (no source read until
+ * accept). Treat a share grant as private so the details frame does not
+ * fall through to the unlisted-public "Not published" mark.
+ */
+export function packagePageIsPrivate(page: PackagePagePrivacySource): boolean {
+	return page.ownerPackage?.isPrivate ?? page.shareGrant != null
+}
+
+function isPublicSavedPackage(pkg: { hidden: boolean; isPrivate: boolean }) {
+	return !pkg.hidden && !pkg.isPrivate
+}
+
+async function resolvePackagePageOwnerProfilePublic(input: {
+	env: Env
+	username: string
+	listing: CommunityDetailLoaderData | null
+}) {
+	if (typeof input.listing?.ownerProfilePublic === 'boolean') {
+		return input.listing.ownerProfilePublic
+	}
+	const row = await getUserSocialRowByUsername(input.env.APP_DB, input.username)
+	return row?.profile_visibility === 'public'
+}
+
+function sameKodyId(left: string, right: string) {
+	return left.trim().toLowerCase() === right.trim().toLowerCase()
+}
+
+/**
+ * One SSR request resolves the same package several times: the page handler,
+ * the `community-detail` frame rendered while the response streams, and the
+ * files loader that gates on the same access decision. Memoize per request so
+ * the URL resolution, auth, and detail loads run once.
+ */
+export function loadPackagePage(input: {
+	env: Env
+	request: Request
+	username: string
+	kodyId: string
+}): Promise<PackagePageAccess> {
+	return memoizePerRequest({
+		request: input.request,
+		key: `package-page:${input.username}:${input.kodyId}`,
+		load: () =>
+			recordServerTiming(
+				'package-page',
+				() => loadPackagePageUncached(input),
+				input.request,
+			),
+	})
+}
+
+async function loadPackagePageUncached(input: {
+	env: Env
+	request: Request
+	username: string
+	kodyId: string
+}): Promise<PackagePageAccess> {
+	// The URL lookup only needs the pair; the viewer lookup only needs the
+	// cookie. Neither waits on the other.
+	const [target, user] = await Promise.all([
+		recordServerTiming(
+			'resolve-url',
+			() =>
+				resolvePackagePageUrl({
+					db: input.env.APP_DB,
+					username: input.username,
+					kodyId: input.kodyId,
+				}),
+			input.request,
+		),
+		recordServerTiming(
+			'auth',
+			() => readAuthenticatedAppUser(input.request, input.env),
+			input.request,
+		),
+	])
+	if (!target) return { kind: 'not_found' }
+
+	const viewerUserId = user?.mcpUser.userId ?? null
+
+	if (target.kind === 'redirect') {
+		const viewerOwnsRedirect =
+			viewerUserId != null && viewerUserId === target.userId
+		// A listing move is public. An unlisted rename must not leak the new
+		// pair: only the owner is sent to the current URL.
+		if (!target.listingId && !viewerOwnsRedirect) {
+			return { kind: 'not_found' }
+		}
+		const listingKodyId = target.listingKodyId
+		const shared =
+			Boolean(target.listingId) &&
+			(listingKodyId == null || sameKodyId(target.kodyId, listingKodyId))
+		return {
+			kind: 'redirect',
+			to: getCommunityPackageHref({
+				username: target.username,
+				kodyId: target.kodyId,
+			}),
+			// Shared caches may only store hops to the listing public pair.
+			shared,
+		}
+	}
+
+	const viewerIsOwner = viewerUserId != null && viewerUserId === target.userId
+	const listingKodyId = target.listingKodyId
+	const savedKodyId = target.savedPackage?.kodyId ?? null
+	if (listingKodyId && savedKodyId && !sameKodyId(listingKodyId, savedKodyId)) {
+		// Listing kody_id lags a local rename until republish. Owners may
+		// hop to the unpublished pair; visitors stay on (or return to) the
+		// listing URL.
+		if (viewerIsOwner && sameKodyId(input.kodyId, listingKodyId)) {
+			return {
+				kind: 'redirect',
+				to: getCommunityPackageHref({
+					username: target.username,
+					kodyId: savedKodyId,
+				}),
+				shared: false,
+			}
+		}
+		if (!viewerIsOwner && sameKodyId(input.kodyId, savedKodyId)) {
+			return {
+				kind: 'redirect',
+				to: getCommunityPackageHref({
+					username: target.username,
+					kodyId: listingKodyId,
+				}),
+				shared: true,
+			}
+		}
+	}
+	const invocationUrlOrigin = getAppBaseUrl({
+		env: input.env,
+		requestUrl: input.request.url,
+	})
+
+	const shareGrantView = target.savedPackage
+		? await loadViewerPackageShare({
+				db: input.env.APP_DB,
+				packageId: target.savedPackage.id,
+				viewer: user
+					? {
+							userId: user.mcpUser.userId,
+							email: user.email,
+							emailVerified: user.emailVerified,
+						}
+					: null,
+			})
+		: null
+	const shareGrant = shareGrantView
+		? toPackageShareGrantLoaderView(shareGrantView)
+		: null
+	const shareCanReadSource = shareGrant?.status === 'accepted'
+
+	if (viewerIsOwner && target.savedPackage) {
+		const [listing, ownerPackage] = await Promise.all([
+			target.listingId
+				? loadCommunityDetailData(input.env, input.request, target.listingId)
+				: Promise.resolve(null),
+			loadAccountPackageDetail({
+				env: input.env,
+				requestUrl: input.request.url,
+				userId: target.userId,
+				packageId: target.savedPackage.id,
+			}),
+		])
+		const ownerProfilePublic = await resolvePackagePageOwnerProfilePublic({
+			env: input.env,
+			username: target.username,
+			listing,
+		})
+		return {
+			kind: 'page',
+			username: target.username,
+			kodyId: target.kodyId,
+			listing,
+			ownerPackage,
+			viewerIsOwner: true,
+			loggedIn: true,
+			invocationUrlOrigin,
+			shareGrant: null,
+			canReadOwnerSource: true,
+			ownerUserId: target.userId,
+			ownerProfilePublic,
+		}
+	}
+
+	if (
+		shareGrant &&
+		(shareGrant.status === 'pending' || shareGrant.status === 'accepted') &&
+		target.savedPackage
+	) {
+		const [listing, ownerPackage] = await Promise.all([
+			target.listingId
+				? loadCommunityDetailData(input.env, input.request, target.listingId)
+				: Promise.resolve(null),
+			shareCanReadSource
+				? loadAccountPackageDetail({
+						env: input.env,
+						requestUrl: input.request.url,
+						userId: target.userId,
+						packageId: target.savedPackage.id,
+					})
+				: Promise.resolve(null),
+		])
+		const ownerProfilePublic = await resolvePackagePageOwnerProfilePublic({
+			env: input.env,
+			username: target.username,
+			listing,
+		})
+		return {
+			kind: 'page',
+			username: target.username,
+			kodyId: target.kodyId,
+			listing,
+			ownerPackage,
+			viewerIsOwner: false,
+			loggedIn: true,
+			invocationUrlOrigin,
+			shareGrant,
+			canReadOwnerSource: shareCanReadSource,
+			ownerUserId: target.userId,
+			ownerProfilePublic,
+		}
+	}
+
+	if (target.listingId) {
+		const listing = await loadCommunityDetailData(
+			input.env,
+			input.request,
+			target.listingId,
+		)
+		if (!listing) return { kind: 'not_found' }
+		return {
+			kind: 'page',
+			username: target.username,
+			kodyId: target.kodyId,
+			listing,
+			ownerPackage: null,
+			viewerIsOwner: false,
+			loggedIn: Boolean(user),
+			invocationUrlOrigin,
+			shareGrant,
+			canReadOwnerSource: false,
+			ownerUserId: target.userId,
+			ownerProfilePublic: listing.ownerProfilePublic,
+		}
+	}
+
+	if (!target.savedPackage || !isPublicSavedPackage(target.savedPackage)) {
+		return { kind: 'not_found' }
+	}
+
+	return { kind: 'unauthorized' }
+}

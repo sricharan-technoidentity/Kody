@@ -1,0 +1,35 @@
+{
+	"version": 1,
+	"deletions": [
+		{
+			"config": "packages/worker/wrangler.jsonc",
+			"tag": "v7",
+			"classes": ["SchedulerDO"]
+		},
+		{
+			"config": "packages/worker/wrangler.jsonc",
+			"tag": "v16",
+			"classes": ["HomeMCP"]
+		},
+		{
+			"config": "packages/worker/wrangler.jsonc",
+			"tag": "v17",
+			"classes": ["AgentTurnRunner", "ChatAgent"]
+		},
+		{
+			"config": "packages/worker/wrangler.jsonc",
+			"tag": "v25",
+			"classes": ["RemoteConnectorSession"]
+		},
+		{
+			"config": "packages/worker/wrangler.jsonc",
+			"tag": "v26",
+			"classes": ["PackageServiceInstance"]
+		},
+		{
+			"config": "packages/runtime-worker/wrangler.jsonc",
+			"tag": "v2",
+			"classes": ["PackageServiceInstance"]
+		}
+	]
+}

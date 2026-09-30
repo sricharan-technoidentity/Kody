@@ -1,0 +1,428 @@
+import { quoteSqlIdentifier } from '@kody-internal/shared/sql-literals.ts'
+import { DatabaseSync } from 'node:sqlite'
+import { expect, test } from 'vitest'
+import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import {
+	accountExportForeignUserIdColumnsByTable,
+	accountExportRedactedColumnsByTable,
+	accountExportRedactedForeignUserId,
+	accountOperatorOwnedD1Surfaces,
+	accountUserDataTargets,
+	buildUserScopedDeleteOrUpdateSql,
+	buildUserScopedTargetMatch,
+	getAccountD1UserColumnCoverage,
+	getAccountExportExcludedD1Surfaces,
+	isExcludedFromAccountExport,
+	type UserScopedDataTarget,
+} from './data-targets.ts'
+
+function applyMigrations(db: DatabaseSync) {
+	const migrationsDir = new URL('../../migrations/', import.meta.url)
+	applyAllMigrations(db, migrationsDir)
+}
+
+function matchFor(target: UserScopedDataTarget) {
+	return buildUserScopedTargetMatch({
+		target,
+		mcpUserId: 'user-aaa',
+		dbUserId: 42,
+	})
+}
+
+test('shared user-scoped target match SQL is identical for deletion and export shapes', () => {
+	const samples: Array<UserScopedDataTarget> = [
+		{ kind: 'user_id', table: 'jobs' },
+		{ kind: 'db_user_id', table: 'passkeys' },
+		{ kind: 'db_user_target', table: 'verifications' },
+		{
+			kind: 'user_columns',
+			table: 'community_activity_events',
+			columns: ['actor_user_id'],
+		},
+		{
+			kind: 'null_user_column',
+			table: 'platform_feedback',
+			matchColumn: 'reviewed_by_user_id',
+			nullColumns: ['reviewed_by_user_id', 'reviewed_at', 'admin_note'],
+			includeInExport: false,
+		},
+		{
+			kind: 'replace_user_column',
+			table: 'community_bans',
+			matchColumn: 'banned_by_user_id',
+			setColumn: 'banned_by_user_id',
+			value: 'deleted-user',
+		},
+		{
+			kind: 'replace_user_id_in_json_column',
+			table: 'package_codemod_runs',
+			column: 'filters_json',
+			value: 'deleted-user',
+			includeInExport: false,
+			surface: 'package_codemod_runs_filters_json',
+			reason: 'test',
+		},
+		{
+			kind: 'bucket_parent',
+			table: 'value_entries',
+			parentTable: 'value_buckets',
+		},
+		{
+			kind: 'community_listing_child',
+			table: 'community_ratings',
+			listingColumn: 'listing_id',
+		},
+		{ kind: 'mcp_memory_suppression' },
+	]
+
+	expect(matchFor(samples[0]!)).toEqual({
+		table: 'jobs',
+		whereSql: 'user_id = ?',
+		qualifiedWhereSql: 'jobs.user_id = ?',
+		params: ['user-aaa'],
+		mutation: { kind: 'delete' },
+	})
+	expect(buildUserScopedDeleteOrUpdateSql(matchFor(samples[0]!))).toEqual({
+		sql: 'DELETE FROM jobs WHERE user_id = ?',
+		params: ['user-aaa'],
+	})
+
+	expect(matchFor(samples[1]!)).toEqual({
+		table: 'passkeys',
+		whereSql: 'user_id = ?',
+		qualifiedWhereSql: 'passkeys.user_id = ?',
+		params: [42],
+		mutation: { kind: 'delete' },
+	})
+	expect(matchFor(samples[2]!)).toEqual({
+		table: 'verifications',
+		whereSql: 'target = ?',
+		qualifiedWhereSql: 'verifications.target = ?',
+		params: ['42'],
+		mutation: { kind: 'delete' },
+	})
+	expect(matchFor(samples[3]!)).toEqual({
+		table: 'community_activity_events',
+		whereSql: 'actor_user_id = ?',
+		qualifiedWhereSql: 'community_activity_events.actor_user_id = ?',
+		params: ['user-aaa'],
+		mutation: { kind: 'delete' },
+	})
+
+	const nullMatch = matchFor(samples[4]!)
+	expect(nullMatch.mutation).toEqual({
+		kind: 'null_columns',
+		columns: ['reviewed_by_user_id', 'reviewed_at', 'admin_note'],
+	})
+	expect(buildUserScopedDeleteOrUpdateSql(nullMatch)).toEqual({
+		sql: `UPDATE platform_feedback
+						SET reviewed_by_user_id = NULL, reviewed_at = NULL, admin_note = NULL
+						WHERE reviewed_by_user_id = ?`,
+		params: ['user-aaa'],
+	})
+
+	const replaceMatch = matchFor(samples[5]!)
+	expect(buildUserScopedDeleteOrUpdateSql(replaceMatch)).toEqual({
+		sql: `UPDATE community_bans
+						SET banned_by_user_id = ?
+						WHERE banned_by_user_id = ?`,
+		params: ['deleted-user', 'user-aaa'],
+	})
+
+	const replaceJsonMatch = matchFor(samples[6]!)
+	expect(replaceJsonMatch).toEqual({
+		table: 'package_codemod_runs',
+		whereSql: 'instr(filters_json, ?) > 0',
+		qualifiedWhereSql: 'instr(package_codemod_runs.filters_json, ?) > 0',
+		params: ['"user-aaa"'],
+		mutation: {
+			kind: 'replace_json_string',
+			column: 'filters_json',
+			search: '"user-aaa"',
+			replacement: '"deleted-user"',
+		},
+	})
+	expect(buildUserScopedDeleteOrUpdateSql(replaceJsonMatch)).toEqual({
+		sql: `UPDATE package_codemod_runs
+						SET filters_json = REPLACE(filters_json, ?, ?)
+						WHERE instr(filters_json, ?) > 0`,
+		params: ['"user-aaa"', '"deleted-user"', '"user-aaa"'],
+	})
+
+	expect(matchFor(samples[7]!).qualifiedWhereSql).toBe(
+		`value_entries.bucket_id IN (
+						SELECT id FROM value_buckets WHERE user_id = ?
+					)`,
+	)
+	expect(matchFor(samples[8]!).qualifiedWhereSql).toBe(
+		`community_ratings.listing_id IN (
+						SELECT id FROM community_listings WHERE owner_user_id = ?
+					)`,
+	)
+	expect(matchFor(samples[9]!)).toEqual({
+		table: 'mcp_memory_conversation_suppressions',
+		whereSql: 'user_id = ?',
+		qualifiedWhereSql: 'mcp_memory_conversation_suppressions.user_id = ?',
+		params: ['user-aaa'],
+		mutation: { kind: 'delete' },
+	})
+})
+
+test('every accountUserDataTargets kind has a shared match builder and export guards', () => {
+	for (const target of accountUserDataTargets) {
+		const match = matchFor(target)
+		expect(match.table.length).toBeGreaterThan(0)
+		expect(match.whereSql.length).toBeGreaterThan(0)
+		expect(match.qualifiedWhereSql).toContain(match.table)
+		expect(match.params.length).toBeGreaterThan(0)
+		const statement = buildUserScopedDeleteOrUpdateSql(match)
+		expect(statement.sql).toContain(match.table)
+		expect(statement.params.length).toBeGreaterThan(0)
+	}
+
+	expect(accountExportRedactedColumnsByTable.users).toContain('password_hash')
+	expect(accountExportRedactedColumnsByTable.secret_entries).toEqual(
+		expect.arrayContaining(['encrypted_value', 'lookup_hash']),
+	)
+	expect(accountExportRedactedColumnsByTable.user_integrations).toEqual(
+		expect.arrayContaining([
+			'access_token_encrypted',
+			'refresh_token_encrypted',
+		]),
+	)
+	expect(accountExportRedactedColumnsByTable.user_oauth_apps).toEqual(
+		expect.arrayContaining(['client_secret_encrypted']),
+	)
+	expect(accountExportRedactedColumnsByTable.webhook_endpoints).toEqual(
+		expect.arrayContaining([
+			'url_secret_hash',
+			'url_secret_encrypted',
+			'previous_url_secret_hash',
+		]),
+	)
+	expect(
+		accountExportRedactedColumnsByTable.webhook_apply_destination_pending,
+	).toEqual(['destination_json'])
+	expect(
+		accountExportRedactedColumnsByTable.webhook_apply_destination_grants,
+	).toEqual(['destination_json'])
+	expect(
+		accountExportForeignUserIdColumnsByTable.community_activity_events,
+	).toEqual(expect.arrayContaining(['actor_user_id']))
+	expect(accountExportRedactedForeignUserId.length).toBeGreaterThan(0)
+
+	const excludedListingChildren = accountUserDataTargets.filter(
+		(target) =>
+			target.kind === 'community_listing_child' &&
+			target.includeInExport === false,
+	)
+	expect(excludedListingChildren.length).toBeGreaterThan(0)
+	expect(
+		excludedListingChildren.every((target) =>
+			target.table.startsWith('community_'),
+		),
+	).toBe(true)
+})
+
+test('operator-owned tables are explicit deletion/export exclusions', () => {
+	using db = new DatabaseSync(':memory:')
+	applyMigrations(db)
+	const expectedTables = [
+		'platform_oauth_apps',
+		'platform_provider_marks',
+		'repo_session_storage_bucket_cursor',
+		'site_banners',
+		'system_email_attachments',
+		'system_email_delivery_events',
+		'system_email_messages',
+		'system_email_threads',
+	]
+	expect(
+		accountOperatorOwnedD1Surfaces.map((surface) => surface.table).sort(),
+	).toEqual(expectedTables)
+	for (const table of expectedTables) {
+		const columns = db
+			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table)})`)
+			.all() as Array<{ name: string }>
+		expect(columns.map((column) => column.name)).not.toContain('user_id')
+		expect(
+			accountUserDataTargets.some(
+				(target) => 'table' in target && target.table === table,
+			),
+		).toBe(false)
+	}
+	expect(getAccountExportExcludedD1Surfaces()).toEqual(
+		expect.arrayContaining(
+			expectedTables.map((table) =>
+				expect.objectContaining({
+					name: table,
+					reason: expect.stringContaining(
+						table === 'platform_oauth_apps'
+							? 'Operator-provisioned built-in OAuth app'
+							: table === 'platform_provider_marks'
+								? 'Operator-owned provider brand marks'
+								: table === 'site_banners'
+									? 'Operator-owned site announcement'
+									: table.startsWith('repo_session_')
+										? 'Platform-owned'
+										: 'operator-owned system email',
+					),
+				}),
+			),
+		),
+	)
+})
+
+test('account deletion statements never bind a LIKE or GLOB pattern (D1 caps patterns at 50 bytes)', () => {
+	// A stable user id is 64 hex chars; wrapped in quotes and wildcards it is
+	// 68 bytes, which D1 rejects with "LIKE or GLOB pattern too complex". The
+	// production purge lane failed on exactly this until the JSON-column
+	// target switched to instr().
+	const stableUserId = 'f'.repeat(64)
+	for (const target of accountUserDataTargets) {
+		const match = buildUserScopedTargetMatch({
+			target,
+			mcpUserId: stableUserId,
+			dbUserId: 1,
+		})
+		const { sql, params } = buildUserScopedDeleteOrUpdateSql(match)
+		expect(sql).not.toMatch(/\b(LIKE|GLOB)\b/iu)
+		for (const param of params) {
+			if (typeof param !== 'string') continue
+			expect(param.startsWith('%') || param.endsWith('%')).toBe(false)
+		}
+	}
+})
+
+test('final schema drops entitlement_daily_counters without stale inventory coverage', () => {
+	const deletionStatements = accountUserDataTargets.map((target) => {
+		const match = matchFor(target)
+		return buildUserScopedDeleteOrUpdateSql(match).sql
+	})
+	expect(deletionStatements.join('\n')).not.toMatch(
+		/entitlement_daily_counters/u,
+	)
+
+	const exportStatements = accountUserDataTargets
+		.filter((target) => !isExcludedFromAccountExport(target))
+		.map((target) => {
+			const match = matchFor(target)
+			return `SELECT * FROM ${match.table} WHERE ${match.qualifiedWhereSql}`
+		})
+	expect(exportStatements.join('\n')).not.toMatch(/entitlement_daily_counters/u)
+
+	const db = new DatabaseSync(':memory:')
+	applyMigrations(db)
+	const tableExists = db
+		.prepare(
+			`SELECT 1 AS present
+			FROM sqlite_schema
+			WHERE type = 'table' AND name = 'entitlement_daily_counters'`,
+		)
+		.get() as { present: number } | undefined
+	expect(tableExists).toBeUndefined()
+
+	const liveUserColumns = new Set<string>()
+	const tables = db
+		.prepare(
+			`SELECT name
+			FROM sqlite_schema
+			WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+			ORDER BY name`,
+		)
+		.all() as Array<{ name: string }>
+	for (const table of tables) {
+		const columns = db
+			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
+			.all() as Array<{ name: string }>
+		for (const column of columns) {
+			if (column.name === 'user_id' || column.name.endsWith('_user_id')) {
+				liveUserColumns.add(`${table.name}.${column.name}`)
+			}
+		}
+	}
+	const coveredColumns = getAccountD1UserColumnCoverage()
+	expect(liveUserColumns.has('entitlement_daily_counters.user_id')).toBe(false)
+	const missing = [...liveUserColumns].filter(
+		(column) => !coveredColumns.has(column),
+	)
+	const stale = [...coveredColumns].filter(
+		(column) => !liveUserColumns.has(column),
+	)
+	expect(missing).toEqual([])
+	expect(stale).toEqual([])
+})
+
+test('final schema drops legacy RunLog D1 projections without stale inventory coverage', () => {
+	const retiredTables = [
+		'workflow_runs',
+		'user_package_run_successes',
+		'user_activation_milestones',
+	] as const
+
+	const deletionStatements = accountUserDataTargets.map((target) => {
+		const match = matchFor(target)
+		return buildUserScopedDeleteOrUpdateSql(match).sql
+	})
+	const exportStatements = accountUserDataTargets
+		.filter((target) => !isExcludedFromAccountExport(target))
+		.map((target) => {
+			const match = matchFor(target)
+			return `SELECT * FROM ${match.table} WHERE ${match.qualifiedWhereSql}`
+		})
+	const inventorySql = [
+		deletionStatements.join('\n'),
+		exportStatements.join('\n'),
+	].join('\n')
+	for (const table of retiredTables) {
+		expect(inventorySql).not.toMatch(new RegExp(`\\b${table}\\b`, 'u'))
+	}
+
+	const db = new DatabaseSync(':memory:')
+	applyMigrations(db)
+	for (const table of retiredTables) {
+		const tableExists = db
+			.prepare(
+				`SELECT 1 AS present
+				FROM sqlite_schema
+				WHERE type = 'table' AND name = ?`,
+			)
+			.get(table) as { present: number } | undefined
+		expect(
+			tableExists,
+			`${table} should be absent after migration 0137`,
+		).toBeUndefined()
+	}
+
+	const liveUserColumns = new Set<string>()
+	const tables = db
+		.prepare(
+			`SELECT name
+			FROM sqlite_schema
+			WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+			ORDER BY name`,
+		)
+		.all() as Array<{ name: string }>
+	for (const table of tables) {
+		const columns = db
+			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
+			.all() as Array<{ name: string }>
+		for (const column of columns) {
+			if (column.name === 'user_id' || column.name.endsWith('_user_id')) {
+				liveUserColumns.add(`${table.name}.${column.name}`)
+			}
+		}
+	}
+	const coveredColumns = getAccountD1UserColumnCoverage()
+	for (const table of retiredTables) {
+		expect(liveUserColumns.has(`${table}.user_id`)).toBe(false)
+	}
+	const missing = [...liveUserColumns].filter(
+		(column) => !coveredColumns.has(column),
+	)
+	const stale = [...coveredColumns].filter(
+		(column) => !liveUserColumns.has(column),
+	)
+	expect(missing).toEqual([])
+	expect(stale).toEqual([])
+})

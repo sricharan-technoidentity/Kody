@@ -1,0 +1,29 @@
+{
+	"extends": "./tsconfig-worker.json",
+	"compilerOptions": {
+		"types": ["@pitlane/dev/assets"],
+		"paths": {
+			"#client/app-root.tsx": ["./src/app/ssr-stubs/app-root.ts"],
+			"#client/lazy-route.tsx": ["./src/app/ssr-stubs/lazy-route.ts"],
+			"@modelcontextprotocol/sdk": [
+				"../../node_modules/@modelcontextprotocol/sdk"
+			],
+			"@modelcontextprotocol/sdk/*": [
+				"../../node_modules/@modelcontextprotocol/sdk/*"
+			]
+		}
+	},
+	"exclude": [
+		"**/*.test.ts",
+		"**/*.spec.ts",
+		"./src/test-support/**/*.ts",
+		"./src/mcp/test-process.ts",
+		"./src/og/og-image-assets.node.ts",
+		"./src/og/og-resvg-wasm.node.ts",
+		"./src/og/og-binary-assets.node.ts",
+		"../**/*.test.ts",
+		"../**/*.spec.ts",
+		"../../**/*.test.ts",
+		"../../**/*.spec.ts"
+	]
+}

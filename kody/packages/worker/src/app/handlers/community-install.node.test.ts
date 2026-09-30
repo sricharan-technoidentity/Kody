@@ -1,0 +1,249 @@
+import { expect, test, vi } from 'vitest'
+import { CommunityActionError } from '#worker/community/errors.ts'
+import { durableObjectIsolateMemoryResetMessage } from '#worker/sentry-options.ts'
+import { createCommunityInstallApiPostHandler } from './community-install.ts'
+import type * as CloudflareWorkers from 'cloudflare:workers'
+
+const mockModule = vi.hoisted(() => ({
+	readAuthenticatedAppUser: vi.fn(),
+	getCommunityListingById: vi.fn(),
+	installCommunityListing: vi.fn(),
+	getMcpUserPackageScope: vi.fn(),
+	waitUntil: vi.fn(),
+}))
+
+vi.mock('cloudflare:workers', async (importOriginal) => {
+	const actual = await importOriginal<typeof CloudflareWorkers>()
+	return {
+		...actual,
+		waitUntil: (...args: Array<unknown>) => mockModule.waitUntil(...args),
+	}
+})
+
+vi.mock('#app/authenticated-user.ts', () => ({
+	readAuthenticatedAppUser: (...args: Array<unknown>) =>
+		mockModule.readAuthenticatedAppUser(...args),
+}))
+
+vi.mock('#worker/community/repo.ts', () => ({
+	getCommunityListingById: (...args: Array<unknown>) =>
+		mockModule.getCommunityListingById(...args),
+}))
+
+vi.mock('#worker/community/install.ts', () => ({
+	installCommunityListing: (...args: Array<unknown>) =>
+		mockModule.installCommunityListing(...args),
+}))
+
+vi.mock('#worker/package-registry/user-scope.ts', () => ({
+	getMcpUserPackageScope: (...args: Array<unknown>) =>
+		mockModule.getMcpUserPackageScope(...args),
+}))
+
+const env = { APP_DB: {} as D1Database } as Env
+
+function buildInstallRequest(body: unknown) {
+	return {
+		request: new Request(
+			'https://example.com/community/listing-1/install.json',
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+			},
+		),
+		params: { listingId: 'listing-1' },
+		url: new URL('https://example.com/community/listing-1/install.json'),
+	} as never
+}
+
+function authenticatedUser() {
+	return {
+		email: 'userb@example.com',
+		mcpUser: { userId: 'stable-user-b', email: 'userb@example.com' },
+	}
+}
+
+test('community install POST enforces gates and maps install outcomes', async () => {
+	const handler = createCommunityInstallApiPostHandler(env)
+
+	mockModule.readAuthenticatedAppUser.mockResolvedValue(null)
+	const unauthorized = await handler.handler(buildInstallRequest({}))
+	expect(unauthorized.status).toBe(401)
+	expect(mockModule.installCommunityListing).not.toHaveBeenCalled()
+
+	mockModule.readAuthenticatedAppUser.mockResolvedValue(authenticatedUser())
+	mockModule.getCommunityListingById.mockResolvedValue(null)
+	const notFound = await handler.handler(buildInstallRequest({}))
+	expect(notFound.status).toBe(404)
+
+	mockModule.getCommunityListingById.mockResolvedValue({
+		id: 'listing-1',
+		name: '@someone/demo',
+		trusted: false,
+		pinnedCommit: 'commit-1',
+	})
+	const unacknowledged = await handler.handler(buildInstallRequest({}))
+	expect(unacknowledged.status).toBe(409)
+	expect(await unacknowledged.json()).toMatchObject({
+		ok: false,
+		requiresAcknowledgement: true,
+	})
+	expect(mockModule.installCommunityListing).not.toHaveBeenCalled()
+
+	mockModule.getCommunityListingById.mockResolvedValue({
+		id: 'listing-official',
+		name: '@kody/notion-mcp',
+		trusted: false,
+		pinnedCommit: 'commit-1',
+	})
+	mockModule.getMcpUserPackageScope.mockResolvedValue('userb')
+	mockModule.installCommunityListing.mockResolvedValue({
+		status: 'installed',
+		forkId: 'fork-official',
+		packageId: 'package-official',
+		sourceId: 'source-official',
+		targetKodyId: 'notion-mcp',
+		targetName: '@userb/notion-mcp',
+		originCommit: 'commit-1',
+	})
+	const officialWithoutAck = await handler.handler(buildInstallRequest({}))
+	expect(officialWithoutAck.status).toBe(200)
+	expect(await officialWithoutAck.json()).toMatchObject({
+		ok: true,
+		status: 'installed',
+		targetName: '@userb/notion-mcp',
+	})
+	expect(mockModule.installCommunityListing).toHaveBeenCalledTimes(1)
+	mockModule.installCommunityListing.mockClear()
+
+	mockModule.getCommunityListingById.mockResolvedValue({
+		id: 'listing-1',
+		name: '@someone/demo',
+		trusted: false,
+		pinnedCommit: 'commit-1',
+	})
+
+	const invalidBody = await handler.handler(
+		buildInstallRequest({ acknowledged: 'yes' }),
+	)
+	expect(invalidBody.status).toBe(400)
+	expect(mockModule.installCommunityListing).not.toHaveBeenCalled()
+
+	mockModule.getMcpUserPackageScope.mockResolvedValue('userb')
+	mockModule.installCommunityListing.mockResolvedValue({
+		status: 'installed',
+		forkId: 'fork-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+		targetKodyId: 'demo',
+		targetName: '@userb/demo',
+		originCommit: 'commit-1',
+	})
+	const installed = await handler.handler(
+		buildInstallRequest({ acknowledged: true }),
+	)
+	expect(installed.status).toBe(200)
+	const installedPayload = (await installed.json()) as Record<string, unknown>
+	expect(installedPayload).toMatchObject({
+		ok: true,
+		status: 'installed',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+		targetName: '@userb/demo',
+	})
+	expect(typeof installedPayload.agentPrompt).toBe('string')
+	expect(String(installedPayload.agentPrompt)).toContain('@userb/demo')
+	expect(mockModule.installCommunityListing).toHaveBeenCalledWith(
+		expect.objectContaining({
+			env,
+			userId: 'stable-user-b',
+			userEmail: 'userb@example.com',
+			expectedPackageScope: 'userb',
+			listingId: 'listing-1',
+			// The acknowledgement is bound to the commit the listing pinned
+			// when the handler checked acknowledgement.
+			expectedPinnedCommit: 'commit-1',
+			// cloudflare:workers waitUntil — defers search-index / retriever
+			// projection work off the install response critical path.
+			waitUntil: expect.any(Function),
+		}),
+	)
+
+	mockModule.installCommunityListing.mockResolvedValue({
+		status: 'adaptation_required',
+		forkId: 'fork-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+		targetKodyId: 'demo',
+		targetName: '@userb/demo',
+		originCommit: 'commit-1',
+		failedChecks: [{ kind: 'bundle', ok: false, message: 'unresolved' }],
+		crossScopeReferences: [{ file: 'src/index.ts', specifier: 'kody:@usera/' }],
+	})
+	const adaptation = await handler.handler(
+		buildInstallRequest({ acknowledged: true }),
+	)
+	expect(adaptation.status).toBe(200)
+	const adaptationPayload = (await adaptation.json()) as Record<string, unknown>
+	expect(adaptationPayload).toMatchObject({
+		ok: true,
+		status: 'adaptation_required',
+		sourceId: 'source-1',
+		failedChecks: [{ kind: 'bundle', message: 'unresolved' }],
+	})
+	expect(typeof adaptationPayload.agentPrompt).toBe('string')
+	expect(String(adaptationPayload.agentPrompt)).toContain('source-1')
+
+	mockModule.installCommunityListing.mockRejectedValue(
+		new CommunityActionError(
+			'You already have a saved package named "demo". Pass a different package name leaf to fork this listing.',
+		),
+	)
+	const userFacingError = await handler.handler(
+		buildInstallRequest({ acknowledged: true }),
+	)
+	expect(userFacingError.status).toBe(400)
+	expect(await userFacingError.json()).toMatchObject({
+		ok: false,
+		error: expect.stringContaining('already have a saved package'),
+	})
+
+	const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+	mockModule.installCommunityListing.mockRejectedValue(
+		new Error('artifacts unavailable'),
+	)
+	const serverError = await handler.handler(
+		buildInstallRequest({ acknowledged: true }),
+	)
+	expect(serverError.status).toBe(500)
+	expect(await serverError.json()).toEqual({
+		ok: false,
+		error: 'Unable to install this public package.',
+	})
+	expect(consoleError).toHaveBeenCalled()
+	consoleError.mockRestore()
+
+	const resourceConsoleError = vi
+		.spyOn(console, 'error')
+		.mockImplementation(() => {})
+	mockModule.installCommunityListing.mockRejectedValue(
+		new Error(durableObjectIsolateMemoryResetMessage),
+	)
+	const resourceLimit = await handler.handler(
+		buildInstallRequest({ acknowledged: true }),
+	)
+	expect(resourceLimit.status).toBe(503)
+	expect(await resourceLimit.json()).toEqual({
+		ok: false,
+		error: expect.stringMatching(/too large to finish forking/),
+	})
+	expect(resourceConsoleError).toHaveBeenCalledWith(
+		'Community install failed:',
+		expect.objectContaining({
+			error: expect.stringMatching(/memory limit/),
+			userMessage: expect.stringMatching(/too large to finish forking/),
+		}),
+	)
+	resourceConsoleError.mockRestore()
+})

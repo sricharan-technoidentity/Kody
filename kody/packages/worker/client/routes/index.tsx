@@ -1,0 +1,701 @@
+import { type RouteLoader } from '#client/client-router.tsx'
+import {
+	accountArea,
+	adminArea,
+	authArea,
+	blogArea,
+	communityArea,
+	LazyAccountRoute,
+	LazyAdminRoute,
+	LazyAuthRoute,
+	LazyBlogRoute,
+	LazyCommunityRoute,
+	LazyMarketingRoute,
+	LazyOnboardingRoute,
+	LazyPackageFilesRoute,
+	lazyRouteLoader,
+	marketingArea,
+	onboardingArea,
+	packageFilesArea,
+} from '#client/lazy-route.tsx'
+import { InternalErrorPage } from '#client/internal-error-page.tsx'
+import { NotFoundPage } from '#client/not-found-page.tsx'
+import { oauthPaths } from '#universal/oauth-paths.ts'
+import { routePattern } from '#universal/route-pattern.ts'
+import { routes } from '#universal/routes.ts'
+import { HomeRoute, homeRouteLoader } from './home.tsx'
+import { OAuthCallbackRoute } from './oauth-callback.tsx'
+import { ProfileRoute, profileRouteLoader } from './profile.tsx'
+
+export const clientRouteLoaders: Record<string, RouteLoader> = {
+	[routePattern(routes.home)]: homeRouteLoader,
+	[routePattern(routes.account)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountRouteLoader,
+	),
+	[routePattern(routes.accountBilling)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountBillingRouteLoader,
+	),
+	[routePattern(routes.accountBillingSuccess)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountBillingSuccessRouteLoader,
+	),
+	[routePattern(routes.accountUsage)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountUsageRouteLoader,
+	),
+	[routePattern(routes.accountWaiting)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountWaitingRouteLoader,
+	),
+	[routePattern(routes.accountExperiments)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountExperimentsRouteLoader,
+	),
+	[routePattern(routes.accountConnections)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountConnectionsRouteLoader,
+	),
+	[routePattern(routes.accountConnectionNew)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountConnectionsRouteLoader,
+	),
+	[routePattern(routes.accountConnectionNewAgent)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountConnectionsRouteLoader,
+	),
+	[routePattern(routes.accountShared)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSharedRouteLoader,
+	),
+	[routePattern(routes.communityPackageApproveChanges)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.packageShareApproveChangesRouteLoader,
+	),
+	[routePattern(routes.accountIntegrations)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountIntegrationsRouteLoader,
+	),
+	[routePattern(routes.accountOauthAppDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountIntegrationsRouteLoader,
+	),
+	[routePattern(routes.accountIntegrationsApprove)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountIntegrationsRouteLoader,
+	),
+	[routePattern(routes.accountIntegrationDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountIntegrationsRouteLoader,
+	),
+	[routePattern(routes.accountMcpServers)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountMcpServersRouteLoader,
+	),
+	[routePattern(routes.accountMcpServerNew)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountMcpServersRouteLoader,
+	),
+	[routePattern(routes.accountMcpServerDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountMcpServersRouteLoader,
+	),
+	[routePattern(routes.communityPackageApprovePublish)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountPackageApprovePublishRouteLoader,
+	),
+	[routePattern(routes.accountPackageFiles)]: lazyRouteLoader(
+		packageFilesArea,
+		(m) => m.packageFilesRouteLoader,
+	),
+	[routePattern(routes.accountPasskeys)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountPasskeysRouteLoader,
+	),
+	[routePattern(routes.accountMcpOauthClients)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountMcpOauthClientsRouteLoader,
+	),
+	[routePattern(routes.accountSecrets)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSecretsRouteLoader,
+	),
+	[routePattern(routes.accountSecretNew)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSecretsRouteLoader,
+	),
+	[routePattern(routes.accountSecretsApprove)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSecretsRouteLoader,
+	),
+	[routePattern(routes.accountSecretProviders)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSecretProvidersRouteLoader,
+	),
+	[routePattern(routes.accountSecretProvidersApprove)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSecretProvidersRouteLoader,
+	),
+	[routePattern(routes.accountSecretUserDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSecretsRouteLoader,
+	),
+	[routePattern(routes.accountSecretPackageDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSecretsRouteLoader,
+	),
+	[routePattern(routes.accountSecretSessionDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountSecretsRouteLoader,
+	),
+	[routePattern(routes.accountValues)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountValuesRouteLoader,
+	),
+	[routePattern(routes.accountValueNew)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountValuesRouteLoader,
+	),
+	[routePattern(routes.accountValueDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountValuesRouteLoader,
+	),
+	[routePattern(routes.accountJobs)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountJobsRouteLoader,
+	),
+	[routePattern(routes.accountJobDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountJobsRouteLoader,
+	),
+	[routePattern(routes.accountWorkflows)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountWorkflowsRouteLoader,
+	),
+	[routePattern(routes.accountWorkflowDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountWorkflowsRouteLoader,
+	),
+	[routePattern(routes.accountWebhooks)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountWebhooksRouteLoader,
+	),
+	[routePattern(routes.accountActivity)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountActivityRouteLoader,
+	),
+	[routePattern(routes.accountActivityDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountActivityRouteLoader,
+	),
+	[routePattern(routes.accountMemories)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountMemoriesRouteLoader,
+	),
+	[routePattern(routes.accountMemoryDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountMemoriesRouteLoader,
+	),
+	[routePattern(routes.accountEmail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountEmailRouteLoader,
+	),
+	[routePattern(routes.accountEmailDetail)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountEmailRouteLoader,
+	),
+	[routePattern(routes.accountTwoFactor)]: lazyRouteLoader(
+		accountArea,
+		(m) => m.accountTwoFactorRouteLoader,
+	),
+	[routePattern(routes.admin)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminUsersRouteLoader,
+	),
+	[routePattern(routes.adminUsers)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminUsersRouteLoader,
+	),
+	[routePattern(routes.adminUserDetail)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminUsersRouteLoader,
+	),
+	[routePattern(routes.adminReservedUsernames)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminReservedUsernamesRouteLoader,
+	),
+	[routePattern(routes.adminFeatureFlags)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminFeatureFlagsRouteLoader,
+	),
+	[routePattern(routes.adminBanners)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminBannersRouteLoader,
+	),
+	[routePattern(routes.adminPlatformIntegrations)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminPlatformIntegrationsRouteLoader,
+	),
+	[routePattern(routes.adminPlatformIntegrationNew)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminPlatformIntegrationsRouteLoader,
+	),
+	[routePattern(routes.adminPlatformIntegrationDetail)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminPlatformIntegrationsRouteLoader,
+	),
+	[routePattern(routes.adminProviderMarks)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminProviderMarksRouteLoader,
+	),
+	[routePattern(routes.adminCodemods)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminCodemodsRouteLoader,
+	),
+	[routePattern(routes.adminRoles)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminRolesRouteLoader,
+	),
+	[routePattern(routes.adminCommunityReports)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminCommunityReportsRouteLoader,
+	),
+	[routePattern(routes.adminInsights)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminInsightsRouteLoader,
+	),
+	[routePattern(routes.adminPlatformFeedback)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminPlatformFeedbackRouteLoader,
+	),
+	[routePattern(routes.adminSystemEmail)]: lazyRouteLoader(
+		adminArea,
+		(m) => m.adminSystemEmailRouteLoader,
+	),
+	[routePattern(routes.blog)]: lazyRouteLoader(
+		blogArea,
+		(m) => m.blogRouteLoader,
+	),
+	[routePattern(routes.blogPost)]: lazyRouteLoader(
+		blogArea,
+		(m) => m.blogPostRouteLoader,
+	),
+	[routePattern(routes.docs)]: lazyRouteLoader(
+		blogArea,
+		(m) => m.docsIntroRouteLoader,
+	),
+	[routePattern(routes.docsConnect)]: lazyRouteLoader(
+		blogArea,
+		(m) => m.docsConnectRouteLoader,
+	),
+	[routePattern(routes.docDetail)]: lazyRouteLoader(
+		blogArea,
+		(m) => m.docDetailRouteLoader,
+	),
+	[routePattern(routes.community)]: lazyRouteLoader(
+		communityArea,
+		(m) => m.communityRouteLoader,
+	),
+	[routePattern(routes.communityDetail)]: lazyRouteLoader(
+		communityArea,
+		(m) => m.communityDetailRouteLoader,
+	),
+	[routePattern(routes.communityPackage)]: lazyRouteLoader(
+		communityArea,
+		(m) => m.communityDetailRouteLoader,
+	),
+	[routePattern(routes.communityPackageSettings)]: lazyRouteLoader(
+		communityArea,
+		(m) => m.communityDetailRouteLoader,
+	),
+	[routePattern(routes.communityDetailFiles)]: lazyRouteLoader(
+		packageFilesArea,
+		(m) => m.packageFilesRouteLoader,
+	),
+	[routePattern(routes.communityPackageFiles)]: lazyRouteLoader(
+		packageFilesArea,
+		(m) => m.packageFilesRouteLoader,
+	),
+	[routePattern(routes.communityPackageTree)]: lazyRouteLoader(
+		packageFilesArea,
+		(m) => m.packageFilesRouteLoader,
+	),
+	[routePattern(routes.profile)]: profileRouteLoader,
+	[routePattern(routes.login)]: lazyRouteLoader(
+		authArea,
+		(m) => m.authProvidersRouteLoader,
+	),
+	[routePattern(routes.signup)]: lazyRouteLoader(
+		authArea,
+		(m) => m.authProvidersRouteLoader,
+	),
+	[oauthPaths.authorize]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.oauthAuthorizeRouteLoader,
+	),
+	[routePattern(routes.onboarding)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.onboardingRouteLoader,
+	),
+	[routePattern(routes.onboardingStep1)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.onboardingRouteLoader,
+	),
+	[routePattern(routes.onboardingStep1Agent)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.onboardingRouteLoader,
+	),
+	[routePattern(routes.onboardingStep2)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.onboardingRouteLoader,
+	),
+	[routePattern(routes.onboardingStep2Service)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.onboardingRouteLoader,
+	),
+	[routePattern(routes.onboardingStep3)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.onboardingRouteLoader,
+	),
+	[routePattern(routes.onboardingStep3Agent)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.onboardingRouteLoader,
+	),
+	[routePattern(routes.connectOauth)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.connectOauthRouteLoader,
+	),
+	[routePattern(routes.connectSecrets)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.connectSecretsRouteLoader,
+	),
+	[routePattern(routes.connectWebhookApply)]: lazyRouteLoader(
+		onboardingArea,
+		(m) => m.connectWebhookApplyRouteLoader,
+	),
+	[routePattern(routes.pendingVerification)]: lazyRouteLoader(
+		authArea,
+		(m) => m.pendingVerificationRouteLoader,
+	),
+	[routePattern(routes.discord)]: lazyRouteLoader(
+		marketingArea,
+		(m) => m.discordRouteLoader,
+	),
+	[routePattern(routes.pricing)]: lazyRouteLoader(
+		marketingArea,
+		(m) => m.pricingRouteLoader,
+	),
+	[routePattern(routes.faq)]: lazyRouteLoader(
+		marketingArea,
+		(m) => m.faqRouteLoader,
+	),
+}
+
+export const clientRoutes = {
+	[routePattern(routes.home)]: <HomeRoute />,
+	[routePattern(routes.notFoundPage)]: <NotFoundPage />,
+	[routePattern(routes.internalErrorPage)]: <InternalErrorPage />,
+	[routePattern(routes.account)]: (
+		<LazyAccountRoute render={(m) => <m.AccountRoute />} />
+	),
+	[routePattern(routes.accountBilling)]: (
+		<LazyAccountRoute render={(m) => <m.AccountBillingRoute />} />
+	),
+	[routePattern(routes.accountBillingSuccess)]: (
+		<LazyAccountRoute render={(m) => <m.AccountBillingSuccessRoute />} />
+	),
+	[routePattern(routes.accountUsage)]: (
+		<LazyAccountRoute render={(m) => <m.AccountUsageRoute />} />
+	),
+	[routePattern(routes.accountWaiting)]: (
+		<LazyAccountRoute render={(m) => <m.AccountWaitingRoute />} />
+	),
+	[routePattern(routes.accountExperiments)]: (
+		<LazyAccountRoute render={(m) => <m.AccountExperimentsRoute />} />
+	),
+	[routePattern(routes.accountConnections)]: (
+		<LazyAccountRoute render={(m) => <m.AccountConnectionsRoute />} />
+	),
+	[routePattern(routes.accountConnectionNew)]: (
+		<LazyAccountRoute render={(m) => <m.AccountConnectionsRoute />} />
+	),
+	[routePattern(routes.accountConnectionNewAgent)]: (
+		<LazyAccountRoute render={(m) => <m.AccountConnectionsRoute />} />
+	),
+	[routePattern(routes.accountShared)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSharedRoute />} />
+	),
+	[routePattern(routes.communityPackageApproveChanges)]: (
+		<LazyAccountRoute render={(m) => <m.PackageShareApproveChangesRoute />} />
+	),
+	[routePattern(routes.accountIntegrations)]: (
+		<LazyAccountRoute render={(m) => <m.AccountIntegrationsRoute />} />
+	),
+	[routePattern(routes.accountOauthAppDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountIntegrationsRoute />} />
+	),
+	[routePattern(routes.accountIntegrationsApprove)]: (
+		<LazyAccountRoute render={(m) => <m.AccountIntegrationsRoute />} />
+	),
+	[routePattern(routes.accountIntegrationDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountIntegrationsRoute />} />
+	),
+	[routePattern(routes.accountMcpServers)]: (
+		<LazyAccountRoute render={(m) => <m.AccountMcpServersRoute />} />
+	),
+	[routePattern(routes.accountMcpServerNew)]: (
+		<LazyAccountRoute render={(m) => <m.AccountMcpServersRoute />} />
+	),
+	[routePattern(routes.accountMcpServerDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountMcpServersRoute />} />
+	),
+	[routePattern(routes.communityPackageApprovePublish)]: (
+		<LazyAccountRoute render={(m) => <m.AccountPackageApprovePublishRoute />} />
+	),
+	[routePattern(routes.accountPackageFiles)]: (
+		<LazyPackageFilesRoute render={(m) => <m.PackageFilesRoute />} />
+	),
+	[routePattern(routes.accountPasskeys)]: (
+		<LazyAccountRoute render={(m) => <m.AccountPasskeysRoute />} />
+	),
+	[routePattern(routes.accountMcpOauthClients)]: (
+		<LazyAccountRoute render={(m) => <m.AccountMcpOauthClientsRoute />} />
+	),
+	[routePattern(routes.accountSecrets)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSecretsRoute />} />
+	),
+	[routePattern(routes.accountSecretNew)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSecretsRoute />} />
+	),
+	[routePattern(routes.accountSecretsApprove)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSecretsRoute />} />
+	),
+	[routePattern(routes.accountSecretProviders)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSecretProvidersRoute />} />
+	),
+	[routePattern(routes.accountSecretProvidersApprove)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSecretProvidersRoute />} />
+	),
+	[routePattern(routes.accountSecretUserDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSecretsRoute />} />
+	),
+	[routePattern(routes.accountSecretPackageDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSecretsRoute />} />
+	),
+	[routePattern(routes.accountSecretSessionDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountSecretsRoute />} />
+	),
+	[routePattern(routes.accountValues)]: (
+		<LazyAccountRoute render={(m) => <m.AccountValuesRoute />} />
+	),
+	[routePattern(routes.accountValueNew)]: (
+		<LazyAccountRoute render={(m) => <m.AccountValuesRoute />} />
+	),
+	[routePattern(routes.accountValueDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountValuesRoute />} />
+	),
+	[routePattern(routes.accountJobs)]: (
+		<LazyAccountRoute render={(m) => <m.AccountJobsRoute />} />
+	),
+	[routePattern(routes.accountJobDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountJobsRoute />} />
+	),
+	[routePattern(routes.accountWorkflows)]: (
+		<LazyAccountRoute render={(m) => <m.AccountWorkflowsRoute />} />
+	),
+	[routePattern(routes.accountWorkflowDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountWorkflowsRoute />} />
+	),
+	[routePattern(routes.accountWebhooks)]: (
+		<LazyAccountRoute render={(m) => <m.AccountWebhooksRoute />} />
+	),
+	[routePattern(routes.accountActivity)]: (
+		<LazyAccountRoute render={(m) => <m.AccountActivityRoute />} />
+	),
+	[routePattern(routes.accountActivityDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountActivityRoute />} />
+	),
+	[routePattern(routes.accountMemories)]: (
+		<LazyAccountRoute render={(m) => <m.AccountMemoriesRoute />} />
+	),
+	[routePattern(routes.accountMemoryDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountMemoriesRoute />} />
+	),
+	[routePattern(routes.accountEmail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountEmailRoute />} />
+	),
+	[routePattern(routes.accountEmailDetail)]: (
+		<LazyAccountRoute render={(m) => <m.AccountEmailRoute />} />
+	),
+	[routePattern(routes.accountTwoFactor)]: (
+		<LazyAccountRoute render={(m) => <m.AccountTwoFactorRoute />} />
+	),
+	[routePattern(routes.admin)]: (
+		<LazyAdminRoute render={(m) => <m.AdminUsersRoute />} />
+	),
+	[routePattern(routes.adminUsers)]: (
+		<LazyAdminRoute render={(m) => <m.AdminUsersRoute />} />
+	),
+	[routePattern(routes.adminUserDetail)]: (
+		<LazyAdminRoute render={(m) => <m.AdminUsersRoute />} />
+	),
+	[routePattern(routes.adminReservedUsernames)]: (
+		<LazyAdminRoute render={(m) => <m.AdminReservedUsernamesRoute />} />
+	),
+	[routePattern(routes.adminFeatureFlags)]: (
+		<LazyAdminRoute render={(m) => <m.AdminFeatureFlagsRoute />} />
+	),
+	[routePattern(routes.adminBanners)]: (
+		<LazyAdminRoute render={(m) => <m.AdminBannersRoute />} />
+	),
+	[routePattern(routes.adminPlatformIntegrations)]: (
+		<LazyAdminRoute render={(m) => <m.AdminPlatformIntegrationsRoute />} />
+	),
+	[routePattern(routes.adminPlatformIntegrationNew)]: (
+		<LazyAdminRoute render={(m) => <m.AdminPlatformIntegrationsRoute />} />
+	),
+	[routePattern(routes.adminPlatformIntegrationDetail)]: (
+		<LazyAdminRoute render={(m) => <m.AdminPlatformIntegrationsRoute />} />
+	),
+	[routePattern(routes.adminProviderMarks)]: (
+		<LazyAdminRoute render={(m) => <m.AdminProviderMarksRoute />} />
+	),
+	[routePattern(routes.adminCodemods)]: (
+		<LazyAdminRoute render={(m) => <m.AdminCodemodsRoute />} />
+	),
+	[routePattern(routes.adminRoles)]: (
+		<LazyAdminRoute render={(m) => <m.AdminRolesRoute />} />
+	),
+	[routePattern(routes.adminCommunityReports)]: (
+		<LazyAdminRoute render={(m) => <m.AdminCommunityReportsRoute />} />
+	),
+	[routePattern(routes.adminInsights)]: (
+		<LazyAdminRoute render={(m) => <m.AdminInsightsRoute />} />
+	),
+	[routePattern(routes.adminPlatformFeedback)]: (
+		<LazyAdminRoute render={(m) => <m.AdminPlatformFeedbackRoute />} />
+	),
+	[routePattern(routes.adminSystemEmail)]: (
+		<LazyAdminRoute render={(m) => <m.AdminSystemEmailRoute />} />
+	),
+	[routePattern(routes.blog)]: (
+		<LazyBlogRoute render={(m) => <m.BlogRoute />} />
+	),
+	[routePattern(routes.blogPost)]: (
+		<LazyBlogRoute render={(m) => <m.BlogPostRoute />} />
+	),
+	[routePattern(routes.docs)]: (
+		<LazyBlogRoute render={(m) => <m.DocDetailRoute />} />
+	),
+	[routePattern(routes.docsConnect)]: (
+		<LazyBlogRoute render={(m) => <m.DocsConnectRoute />} />
+	),
+	[routePattern(routes.docDetail)]: (
+		<LazyBlogRoute render={(m) => <m.DocDetailRoute />} />
+	),
+	[routePattern(routes.community)]: (
+		<LazyCommunityRoute render={(m) => <m.CommunityRoute />} />
+	),
+	[routePattern(routes.communityDetail)]: (
+		<LazyCommunityRoute render={(m) => <m.CommunityDetailRoute />} />
+	),
+	[routePattern(routes.communityPackage)]: (
+		<LazyCommunityRoute render={(m) => <m.CommunityDetailRoute />} />
+	),
+	[routePattern(routes.communityPackageSettings)]: (
+		<LazyCommunityRoute render={(m) => <m.PackageSettingsRoute />} />
+	),
+	[routePattern(routes.communityDetailFiles)]: (
+		<LazyPackageFilesRoute render={(m) => <m.PackageFilesRoute />} />
+	),
+	[routePattern(routes.communityPackageFiles)]: (
+		<LazyPackageFilesRoute render={(m) => <m.PackageFilesRoute />} />
+	),
+	[routePattern(routes.communityPackageTree)]: (
+		<LazyPackageFilesRoute render={(m) => <m.PackageFilesRoute />} />
+	),
+	[routePattern(routes.profile)]: <ProfileRoute />,
+	[routePattern(routes.login)]: (
+		<LazyAuthRoute render={(m) => <m.LoginRoute />} />
+	),
+	[routePattern(routes.onboarding)]: (
+		<LazyOnboardingRoute render={(m) => <m.OnboardingRoute />} />
+	),
+	[routePattern(routes.onboardingStep1)]: (
+		<LazyOnboardingRoute render={(m) => <m.OnboardingRoute />} />
+	),
+	[routePattern(routes.onboardingStep1Agent)]: (
+		<LazyOnboardingRoute render={(m) => <m.OnboardingRoute />} />
+	),
+	[routePattern(routes.onboardingStep2)]: (
+		<LazyOnboardingRoute render={(m) => <m.OnboardingRoute />} />
+	),
+	[routePattern(routes.onboardingStep2Service)]: (
+		<LazyOnboardingRoute render={(m) => <m.OnboardingRoute />} />
+	),
+	[routePattern(routes.onboardingStep3)]: (
+		<LazyOnboardingRoute render={(m) => <m.OnboardingRoute />} />
+	),
+	[routePattern(routes.onboardingStep3Agent)]: (
+		<LazyOnboardingRoute render={(m) => <m.OnboardingRoute />} />
+	),
+	[routePattern(routes.pendingVerification)]: (
+		<LazyAuthRoute render={(m) => <m.PendingVerificationRoute />} />
+	),
+	[routePattern(routes.pricing)]: (
+		<LazyMarketingRoute render={(m) => <m.PricingRoute />} />
+	),
+	[routePattern(routes.faq)]: (
+		<LazyMarketingRoute render={(m) => <m.FaqRoute />} />
+	),
+	[routePattern(routes.support)]: (
+		<LazyMarketingRoute render={(m) => <m.SupportRoute />} />
+	),
+	[routePattern(routes.privacy)]: (
+		<LazyMarketingRoute render={(m) => <m.PrivacyRoute />} />
+	),
+	[routePattern(routes.terms)]: (
+		<LazyMarketingRoute render={(m) => <m.TermsRoute />} />
+	),
+	[routePattern(routes.discord)]: (
+		<LazyMarketingRoute render={(m) => <m.DiscordRoute />} />
+	),
+	[routePattern(routes.signup)]: (
+		<LazyAuthRoute render={(m) => <m.LoginRoute />} />
+	),
+	[routePattern(routes.resetPassword)]: (
+		<LazyAuthRoute render={(m) => <m.ResetPasswordRoute />} />
+	),
+	[routePattern(routes.verify)]: (
+		<LazyAuthRoute render={(m) => <m.VerifyRoute />} />
+	),
+	[routePattern(routes.verifyEmail)]: (
+		<LazyAuthRoute render={(m) => <m.VerifyEmailRoute />} />
+	),
+	[routePattern(routes.verifyEmailChange)]: (
+		<LazyAuthRoute render={(m) => <m.VerifyEmailRoute />} />
+	),
+	[routePattern(routes.verifyEmailClaimRelease)]: (
+		<LazyAuthRoute render={(m) => <m.VerifyEmailRoute />} />
+	),
+	[routePattern(routes.verifyEmailDestination)]: (
+		<LazyAuthRoute render={(m) => <m.VerifyEmailRoute />} />
+	),
+	[routePattern(routes.unsubscribeTips)]: (
+		<LazyAuthRoute render={(m) => <m.UnsubscribeTipsRoute />} />
+	),
+	[routePattern(routes.connectOauth)]: (
+		<LazyOnboardingRoute render={(m) => <m.ConnectOauthRoute />} />
+	),
+	[routePattern(routes.connectSecrets)]: (
+		<LazyOnboardingRoute render={(m) => <m.ConnectSecretsRoute />} />
+	),
+	[routePattern(routes.connectWebhookApply)]: (
+		<LazyOnboardingRoute render={(m) => <m.ConnectWebhookApplyRoute />} />
+	),
+	[oauthPaths.authorize]: (
+		<LazyOnboardingRoute render={(m) => <m.OAuthAuthorizeRoute />} />
+	),
+	[oauthPaths.callback]: <OAuthCallbackRoute />,
+}

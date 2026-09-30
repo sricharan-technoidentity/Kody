@@ -1,0 +1,219 @@
+/**
+ * Shared `users` provisioning for `*.workers.test.ts` suites. Local D1 starts
+ * empty and never applies migrations, so each suite creates the tables it
+ * needs — and several suites share one database, so the same `users` table can
+ * already exist with fewer columns than the current suite wants.
+ *
+ * Every column therefore has a fresh `CREATE TABLE` form and (where SQLite
+ * allows it) an additive `ALTER TABLE ... ADD COLUMN` form. Feature-specific
+ * tables stay in the feature's own `test-schema.ts`.
+ */
+
+/**
+ * Columns beyond the always-present core that a suite can opt into. Suites
+ * request only what they assert on so the helper keeps documenting which
+ * migrations each suite depends on.
+ */
+export type UsersTestSchemaColumn =
+	| 'email_verified_at'
+	| 'account_type'
+	| 'stripe_customer_id'
+	| 'stripe_plan'
+	| 'stripe_price_id'
+	| 'stripe_plan_refreshed_at'
+	| 'bio'
+	| 'avatar_key'
+	| 'profile_visibility'
+	| 'onboarding_checklist_dismissed_at'
+	| 'experiments_opt_in'
+
+type UsersColumnDefinition = {
+	/** Definition used by the fresh `CREATE TABLE users`. */
+	create: string
+	/**
+	 * Definition used by `ALTER TABLE users ADD COLUMN` when a preexisting
+	 * shared table needs the column. SQLite cannot add `NOT NULL` without a
+	 * constant default, so some alter forms are weaker than the create form.
+	 * Omit to reuse `create`.
+	 */
+	alter?: string
+}
+
+/**
+ * Present in every suite. `id`, `username`, `email`, `password_hash`,
+ * `created_at`, and `updated_at` cannot be added by `ALTER TABLE` (identity,
+ * `UNIQUE`, `NOT NULL` without a default, non-constant defaults), so they only
+ * ever come from the fresh `CREATE TABLE`.
+ */
+const nonAdditiveCoreColumns = [
+	'id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL',
+	'username TEXT NOT NULL UNIQUE',
+	'email TEXT NOT NULL UNIQUE',
+	'password_hash TEXT NOT NULL',
+] as const
+
+const timestampColumns = [
+	'created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)',
+	'updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)',
+] as const
+
+/**
+ * Mirrors migrations 0052 + 0075 (`stable_user_id` NOT NULL + unique index),
+ * 0081 + 0083 (`plan` NOT NULL DEFAULT `'free'`), account
+ * deletion/suspension state, profile display names, and the account write
+ * lease counters. Non-historical seeds may set `'max'` or `'free'` explicitly
+ * when plan matters.
+ */
+const alwaysAdditiveColumns: Record<string, UsersColumnDefinition> = {
+	// Preexisting shared tables: ALTER ADD COLUMN cannot express NOT NULL
+	// without a default; nullable TEXT matches migration 0052's add step.
+	stable_user_id: { create: 'TEXT NOT NULL', alter: 'TEXT' },
+	plan: { create: `TEXT NOT NULL DEFAULT 'free'` },
+	entitlement_ladder: {
+		create: `TEXT NOT NULL DEFAULT 'public' CHECK (entitlement_ladder IN ('public', 'legacy'))`,
+		alter: `TEXT NOT NULL DEFAULT 'public'`,
+	},
+	deleting_at: { create: 'TEXT' },
+	suspended_at: { create: 'TEXT' },
+	email_outbound_paused_at: { create: 'TEXT' },
+	email_verification_delivery_status: { create: 'TEXT' },
+	email_verification_delivery_at: { create: 'TEXT' },
+	email_verification_delivery_detail: { create: 'TEXT' },
+	email_verification_delivery_class: { create: 'TEXT' },
+	active_write_count: { create: 'INTEGER NOT NULL DEFAULT 0' },
+	active_write_expires_at: { create: 'TEXT' },
+	display_name: { create: 'TEXT' },
+	utm_source: { create: 'TEXT' },
+	utm_medium: { create: 'TEXT' },
+	utm_campaign: { create: 'TEXT' },
+	utm_content: { create: 'TEXT' },
+	utm_term: { create: 'TEXT' },
+	first_touch_landing_path: { create: 'TEXT' },
+	first_touch_referrer: { create: 'TEXT' },
+	first_mcp_connected_at: { create: 'TEXT' },
+	first_execute_at: { create: 'TEXT' },
+	first_search_at: { create: 'TEXT' },
+	first_saved_package_at: { create: 'TEXT' },
+	first_secret_at: { create: 'TEXT' },
+	first_integration_at: { create: 'TEXT' },
+	first_job_at: { create: 'TEXT' },
+	mcp_client_name: { create: 'TEXT' },
+	last_active_at: { create: 'TEXT' },
+	second_agent_standard_gift_granted_at: { create: 'TEXT' },
+	second_agent_standard_gift_expires_at: { create: 'TEXT' },
+	referral_standard_credit_expires_at: { create: 'TEXT' },
+	stripe_credits_eligible: {
+		create: `INTEGER NOT NULL DEFAULT 0 CHECK (stripe_credits_eligible IN (0, 1))`,
+		alter: `INTEGER NOT NULL DEFAULT 0`,
+	},
+	admin_credits_eligible: {
+		create: `INTEGER NOT NULL DEFAULT 0 CHECK (admin_credits_eligible IN (0, 1))`,
+		alter: `INTEGER NOT NULL DEFAULT 0`,
+	},
+}
+
+/**
+ * Opt-in columns. `account_type` mirrors migration 0072, the Stripe columns
+ * mirror 0066 plus `0044-users-stripe-price-id.sql`, `email_verified_at`
+ * mirrors 0046, the profile columns mirror
+ * the community social migration, and `onboarding_checklist_dismissed_at`
+ * mirrors 0015. `CHECK` constraints are dropped from the alter forms to match
+ * what the migrations do for preexisting tables.
+ */
+const optionalColumns: Record<UsersTestSchemaColumn, UsersColumnDefinition> = {
+	email_verified_at: { create: 'TEXT' },
+	account_type: {
+		create: `TEXT NOT NULL DEFAULT 'person' CHECK (account_type IN ('person', 'platform'))`,
+		alter: `TEXT NOT NULL DEFAULT 'person'`,
+	},
+	stripe_customer_id: { create: 'TEXT' },
+	stripe_plan: { create: 'TEXT' },
+	stripe_price_id: { create: 'TEXT' },
+	stripe_plan_refreshed_at: { create: 'TEXT' },
+	bio: { create: 'TEXT' },
+	avatar_key: { create: 'TEXT' },
+	profile_visibility: {
+		create: `TEXT NOT NULL DEFAULT 'public' CHECK (profile_visibility IN ('public', 'private'))`,
+		alter: `TEXT NOT NULL DEFAULT 'public'`,
+	},
+	onboarding_checklist_dismissed_at: { create: 'TEXT' },
+	experiments_opt_in: {
+		create: `INTEGER NOT NULL DEFAULT 0 CHECK (experiments_opt_in IN (0, 1))`,
+		alter: `INTEGER NOT NULL DEFAULT 0`,
+	},
+}
+
+export async function ensureUsersTestSchema(input: {
+	db: D1Database
+	columns?: ReadonlyArray<UsersTestSchemaColumn>
+}) {
+	const additive: Array<readonly [string, UsersColumnDefinition]> = [
+		...Object.entries(alwaysAdditiveColumns),
+		...(input.columns ?? []).map(
+			(column) => [column, optionalColumns[column]] as const,
+		),
+	]
+
+	const createColumns = [
+		...nonAdditiveCoreColumns,
+		...additive.map(([name, definition]) => `${name} ${definition.create}`),
+		...timestampColumns,
+	]
+	await input.db
+		.prepare(
+			`CREATE TABLE IF NOT EXISTS users (\n\t${createColumns.join(',\n\t')}\n)`,
+		)
+		.run()
+
+	for (const [name, definition] of additive) {
+		try {
+			await input.db
+				.prepare(
+					`ALTER TABLE users ADD COLUMN ${name} ${definition.alter ?? definition.create}`,
+				)
+				.run()
+		} catch {
+			// The column already exists (fresh CREATE above, or a prior suite).
+		}
+	}
+
+	try {
+		await input.db
+			.prepare(
+				`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_stable_user_id
+				 ON users(stable_user_id)`,
+			)
+			.run()
+	} catch {
+		// Index already exists, or a partial legacy index remains from an
+		// earlier suite sharing this database.
+	}
+	await ensureCreditWalletsTestTable(input.db)
+}
+
+/**
+ * Mirrors `credit_wallets` from `0069-prepaid-credits.sql`. Created with
+ * `users` because entitlement resolution reads the wallet balance for any
+ * account on the purchasable Pro (including gift and referral overlays).
+ */
+export async function ensureCreditWalletsTestTable(db: D1Database) {
+	await db
+		.prepare(
+			`CREATE TABLE IF NOT EXISTS credit_wallets (
+	user_id TEXT PRIMARY KEY NOT NULL,
+	balance_micro_usd INTEGER NOT NULL DEFAULT 0,
+	auto_refill_enabled INTEGER NOT NULL DEFAULT 0,
+	auto_refill_threshold_cents INTEGER,
+	auto_refill_amount_cents INTEGER,
+	auto_refill_monthly_cap_cents INTEGER,
+	auto_refill_payment_method_id TEXT,
+	auto_refill_failed_at TEXT,
+	notify_auto_refilled INTEGER NOT NULL DEFAULT 1,
+	notify_monthly_cap INTEGER NOT NULL DEFAULT 1,
+	notify_low_balance INTEGER NOT NULL DEFAULT 1,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+)`,
+		)
+		.run()
+}

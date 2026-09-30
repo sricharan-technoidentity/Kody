@@ -1,0 +1,89 @@
+{
+	"$schema": "../../../node_modules/wrangler/config-schema.json",
+	"name": "kody-mock-cloudflare",
+	"compatibility_date": "2026-04-16",
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public",
+		"enhanced_error_serialization",
+	],
+	"main": "./src/worker.ts",
+	"preview_urls": true,
+	// Local `wrangler dev` (node-unit + MCP e2e) must not start the 4.118+
+	// observability collector/tail pair. Parallel mock processes then 503 or
+	// return empty JSON on the first Durable Object RPC. Preview/production
+	// keep observability below.
+	"observability": { "enabled": false },
+	// SQLite-backed classes: Cloudflare rejects creating new key-value backed
+	// Durable Object namespaces (error 10099), and every PR preview deploys a
+	// fresh mock script that runs these migrations from scratch. Long-lived
+	// scripts already applied these tags, so the edit only affects new scripts.
+	"migrations": [
+		{
+			"new_sqlite_classes": ["MockCloudflareEmailMessagesDurableObject"],
+			"tag": "v1",
+		},
+		{
+			"new_sqlite_classes": ["MockCloudflareArtifactsDurableObject"],
+			"tag": "v2",
+		},
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "MockCloudflareArtifactsDurableObject",
+				"name": "MOCK_CLOUDFLARE_ARTIFACTS_STATE",
+			},
+			{
+				"class_name": "MockCloudflareEmailMessagesDurableObject",
+				"name": "MOCK_CLOUDFLARE_EMAIL_STATE",
+			},
+		],
+	},
+	"env": {
+		"production": {
+			"observability": { "enabled": true },
+			"durable_objects": {
+				"bindings": [
+					{
+						"class_name": "MockCloudflareArtifactsDurableObject",
+						"name": "MOCK_CLOUDFLARE_ARTIFACTS_STATE",
+					},
+					{
+						"class_name": "MockCloudflareEmailMessagesDurableObject",
+						"name": "MOCK_CLOUDFLARE_EMAIL_STATE",
+					},
+				],
+			},
+		},
+		"preview": {
+			"observability": { "enabled": true },
+			"durable_objects": {
+				"bindings": [
+					{
+						"class_name": "MockCloudflareArtifactsDurableObject",
+						"name": "MOCK_CLOUDFLARE_ARTIFACTS_STATE",
+					},
+					{
+						"class_name": "MockCloudflareEmailMessagesDurableObject",
+						"name": "MOCK_CLOUDFLARE_EMAIL_STATE",
+					},
+				],
+			},
+		},
+		"test": {
+			"durable_objects": {
+				"bindings": [
+					{
+						"class_name": "MockCloudflareArtifactsDurableObject",
+						"name": "MOCK_CLOUDFLARE_ARTIFACTS_STATE",
+					},
+					{
+						"class_name": "MockCloudflareEmailMessagesDurableObject",
+						"name": "MOCK_CLOUDFLARE_EMAIL_STATE",
+					},
+				],
+			},
+		},
+	},
+}

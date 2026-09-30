@@ -1,0 +1,176 @@
+import { expect, test, vi } from 'vitest'
+import { consoleError } from '#worker/test-support/console-spies.ts'
+
+const refreshStripePlanForUser = vi.hoisted(() =>
+	vi.fn(async () => ({
+		stripePlan: 'pro' as const,
+		stripeInterval: 'month' as 'month' | 'year' | null,
+		stripePriceId: 'price_pro' as string | null,
+		cancelAt: null as string | null,
+		subscriptionStatus: 'active' as string | null,
+	})),
+)
+const scheduleStripePlanRefreshBackstop = vi.hoisted(() =>
+	vi.fn(async () => true),
+)
+
+vi.mock('#worker/billing/subscription-sync.ts', () => ({
+	refreshStripePlanForUser,
+}))
+vi.mock('#worker/billing/stripe-plan-refresh-client.ts', () => ({
+	scheduleStripePlanRefreshBackstop,
+}))
+
+import {
+	loadAccountBillingData,
+	resolveBillingErrorMessage,
+	resolveBillingNoticeMessage,
+} from '#app/account-billing-data.ts'
+
+function createBillingTestDb(input: {
+	plan: string
+	stripePlan?: string | null
+	stripeCustomerId?: string | null
+}) {
+	return {
+		prepare(query: string) {
+			const normalized = query.replace(/\s+/g, ' ').trim().toLowerCase()
+			return {
+				bind(...params: Array<unknown>) {
+					return {
+						async first<T>() {
+							if (
+								normalized.includes('from users') &&
+								normalized.includes('where id')
+							) {
+								void params
+								return {
+									plan: input.plan,
+									username: 'billing-user',
+									stable_user_id: 'stable-user-id',
+									stripe_plan: input.stripePlan ?? null,
+									stripe_customer_id: input.stripeCustomerId ?? null,
+									stripe_plan_refreshed_at: null,
+									second_agent_standard_gift_expires_at: null,
+									referral_standard_credit_expires_at: null,
+								} as T
+							}
+							return null
+						},
+						async all<T>() {
+							return { results: [] as Array<T> }
+						},
+						async run() {
+							return { success: true }
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database
+}
+
+test('loadAccountBillingData refreshes Stripe status and degrades when refresh is unavailable', async () => {
+	expect(resolveBillingErrorMessage('totally_new_code')).toBe(
+		'totally_new_code',
+	)
+	expect(resolveBillingErrorMessage(null)).toBeUndefined()
+	// Unknown notice codes render nothing (they are not user-typed errors).
+	expect(resolveBillingNoticeMessage('made_up')).toBeUndefined()
+	expect(resolveBillingNoticeMessage(null)).toBeUndefined()
+
+	refreshStripePlanForUser.mockResolvedValueOnce({
+		stripePlan: 'pro',
+		stripeInterval: 'year',
+		stripePriceId: 'price_pro_yearly',
+		cancelAt: '2026-08-01T00:00:00.000Z',
+		subscriptionStatus: 'past_due',
+	})
+
+	const env = {
+		APP_DB: createBillingTestDb({
+			plan: 'free',
+			stripePlan: 'pro',
+			stripeCustomerId: 'cus_test',
+		}),
+		STRIPE_SECRET_KEY: 'sk_test',
+		STRIPE_PRO_PRICE_ID: 'price_pro',
+	} as Env
+
+	const data = await loadAccountBillingData({
+		env,
+		userId: 9,
+		noticeCode: 'updated',
+		now: new Date('2026-07-25T12:00:00.000Z'),
+	})
+
+	expect(data.ok).toBe(true)
+	expect(data.configured).toBe(true)
+	expect(data.hasStripeCustomer).toBe(true)
+	expect(data.stripePlan).toBe('pro')
+	expect(data.stripeInterval).toBe('year')
+	expect(data.notice).toEqual(expect.any(String))
+	expect(data.notice?.length).toBeGreaterThan(0)
+	expect(data.error).toBeUndefined()
+	expect(data.effectivePlan).toBe('pro')
+	expect(data.subscriptionStatus).toBe('past_due')
+	expect(data.cancelAt).toBe('2026-08-01T00:00:00.000Z')
+	expect(data.usageHref).toBe('/account/usage')
+	expect(data.purchasablePlans).toEqual(['pro'])
+	expect(data.creditsHref).toBe('/account/usage#credits')
+	expect(data.referralProgram).toEqual(
+		expect.objectContaining({
+			sharePath: '/signup?ref=billing-user',
+			rewardedCount: 0,
+			pendingCount: 0,
+			creditExpiresAt: null,
+			creditActive: false,
+			referrals: [],
+		}),
+	)
+	expect(refreshStripePlanForUser).toHaveBeenCalledWith(
+		expect.objectContaining({
+			userId: 9,
+			customerId: 'cus_test',
+		}),
+	)
+	expect(scheduleStripePlanRefreshBackstop).toHaveBeenCalledWith({
+		env,
+		userId: 'stable-user-id',
+		now: new Date('2026-07-25T12:00:00.000Z'),
+	})
+
+	consoleError.mockImplementation(() => {})
+	refreshStripePlanForUser.mockRejectedValueOnce(new Error('stripe down'))
+	const failed = await loadAccountBillingData({ env, userId: 3 })
+	expect(failed.stripePlan).toBe('pro')
+	expect(failed.stripeInterval).toBeNull()
+	expect(failed.subscriptionStatus).toBeNull()
+	expect(failed.cancelAt).toBeNull()
+	expect(failed.notice).toBeUndefined()
+	expect(consoleError).toHaveBeenCalledWith(
+		'account_billing_refresh_failed',
+		expect.objectContaining({ userId: 3, error: 'stripe down' }),
+	)
+
+	refreshStripePlanForUser.mockClear()
+	const noCustomerEnv = {
+		APP_DB: createBillingTestDb({
+			plan: 'free',
+			stripePlan: null,
+			stripeCustomerId: null,
+		}),
+		STRIPE_SECRET_KEY: 'sk_test',
+		STRIPE_PRO_PRICE_ID: 'price_pro',
+	} as Env
+	const noCustomer = await loadAccountBillingData({
+		env: noCustomerEnv,
+		userId: 4,
+	})
+	expect(noCustomer.hasStripeCustomer).toBe(false)
+	expect(noCustomer.subscriptionStatus).toBeNull()
+	expect(noCustomer.configured).toBe(true)
+	expect(noCustomer.purchasablePlans).toEqual(['pro'])
+	expect(refreshStripePlanForUser).not.toHaveBeenCalled()
+	expect(scheduleStripePlanRefreshBackstop).toHaveBeenCalledTimes(2)
+})

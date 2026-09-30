@@ -1,0 +1,73 @@
+{
+	"jsPlugins": ["./local-plugin.js"],
+	"rules": {
+		"jsx-a11y/alt-text": "error",
+		"jsx-a11y/anchor-has-content": "error",
+		"jsx-a11y/anchor-is-valid": "error",
+		"jsx-a11y/aria-activedescendant-has-tabindex": "error",
+		"jsx-a11y/aria-props": "error",
+		"jsx-a11y/aria-proptypes": "error",
+		"jsx-a11y/aria-role": "error",
+		"jsx-a11y/aria-unsupported-elements": "error",
+		"jsx-a11y/autocomplete-valid": "off",
+		"jsx-a11y/click-events-have-key-events": "off",
+		"jsx-a11y/heading-has-content": "error",
+		"jsx-a11y/html-has-lang": "error",
+		"jsx-a11y/iframe-has-title": "error",
+		"jsx-a11y/img-redundant-alt": "error",
+		"jsx-a11y/label-has-associated-control": "off",
+		"jsx-a11y/lang": "error",
+		"jsx-a11y/media-has-caption": "error",
+		"jsx-a11y/mouse-events-have-key-events": "off",
+		"jsx-a11y/no-access-key": "error",
+		"jsx-a11y/no-aria-hidden-on-focusable": "error",
+		"jsx-a11y/no-autofocus": "off",
+		"jsx-a11y/no-distracting-elements": "error",
+		"jsx-a11y/no-noninteractive-tabindex": "error",
+		"jsx-a11y/no-redundant-roles": "error",
+		"jsx-a11y/no-static-element-interactions": "off",
+		"jsx-a11y/prefer-tag-over-role": "off",
+		"jsx-a11y/role-has-required-aria-props": "error",
+		"jsx-a11y/role-supports-aria-props": "off",
+		"jsx-a11y/scope": "error",
+		"jsx-a11y/tabindex-no-positive": "error",
+		"eslint/no-warning-comments": [
+			"error",
+			{
+				"terms": ["TODO", "FIXME", "HACK"],
+				"location": "anywhere"
+			}
+		],
+		"kody-custom/enforce-import-boundaries": "error",
+		"kody-custom/no-example-identifier": "error",
+		"kody-custom/no-literal-frame-src": "error",
+		"kody-custom/no-oversized-guide-section": "error",
+		"kody-custom/no-tautological-absence": "error",
+		"kody-custom/prefer-loader-data-types": "error",
+		"typescript/no-explicit-any": "error",
+		"vitest/require-mock-type-parameters": "off",
+		"vitest/no-conditional-expect": "off",
+		"epic-web/prefer-dispose-in-tests": "off",
+		"epic-web/no-manual-dispose": "off"
+	},
+	"overrides": [
+		{
+			"files": ["**/packages/worker/client/event-mixin.ts"],
+			"rules": {
+				"typescript/no-explicit-any": "off"
+			}
+		},
+		{
+			"files": [
+				"**/tests/**",
+				"**/#tests/**",
+				"**/__tests__/**/*",
+				"**/*.test.*",
+				"**/*.spec.*"
+			],
+			"rules": {
+				"epic-web/prefer-dispose-in-tests": "off"
+			}
+		}
+	]
+}

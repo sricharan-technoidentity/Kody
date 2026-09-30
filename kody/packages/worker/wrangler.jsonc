@@ -1,0 +1,1282 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "kody",
+	"compatibility_date": "2026-04-16",
+	// `enhanced_error_serialization` is date-default on 2026-04-21. Opt in
+	// explicitly so JSRPC from the Artifacts binding preserves `name`/`code`
+	// instead of flattening to `Error` + `ArtifactsError: …` message. Keep
+	// the structural matcher in `src/repo/artifacts.ts`; this flag does not
+	// restore custom prototype identity. Do not advance the date just to
+	// pick this up — 2026-04-21 also defaults `enable_python_external_sdk`.
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public",
+		"enhanced_error_serialization",
+	],
+	// Resize/re-encode package icons and integration logos at ingest. Local
+	// wrangler uses the offline Images simulator (width/height/fit/format).
+	// Wrangler does not inherit `images` into named envs — restate it on
+	// production, preview, and test.
+	"images": {
+		"binding": "IMAGES",
+	},
+	// Paid default is 10_000 subrequests/invocation. The MCP Agent Durable
+	// Object keeps a long-lived session and each mutating storageQuery pays
+	// several D1 + StorageRunner RPCs (entitlement baseline, sqlQuery,
+	// estimate refresh). Production hit "Too many API requests by single
+	// Worker invocation" (Sentry 7650160242 / KODY-CLOUDFLARE-2S) during a
+	// burst of ~25 storageQuery calls in one session — raise the ceiling
+	// for that long-lived DO workload. Inheritable by env.production /
+	// env.preview. https://developers.cloudflare.com/workers/wrangler/configuration/#limits
+	"limits": {
+		"subrequests": 100000,
+	},
+	// Dev/test entry. The slim `production-worker.ts` is deploy-generated only:
+	// production (`tools/ci/production-resources.ts`) after the live origin
+	// script is classified as already transferred, preview
+	// (`tools/ci/preview-resources.ts`) always, since a per-PR origin never
+	// owns a Durable Object class. Do not set env.production.main or
+	// env.preview.main here — local production-mode dev inherits this full
+	// entry so historical Durable Object migrations can replay.
+	"main": "./src/index.ts",
+	"minify": true,
+	"upload_source_maps": true,
+	// Origin local/prod go through Vite (`tools/deploy.ts`, `vite.config.ts`).
+	// `@cloudflare/vite-plugin` ignores `find_additional_modules` / `rules` and
+	// emits those dynamic `import()` targets as hashed SSR chunks instead.
+	// The rules stay so Wrangler sibling workers and any direct `wrangler
+	// deploy --dry-run` against this file still keep worker-bundler, the
+	// guide catalog, and oauth-provider off the main module.
+	"find_additional_modules": true,
+	"rules": [
+		{
+			// Specifier-shaped globs (`./`/`../` prefixes) on purpose: every
+			// markdown import in the worker is a relative specifier, and these
+			// globs must NOT match traversal-relative file names (for example
+			// `blog/posts/foo.md`). If the traversal discovered those files,
+			// wrangler would upload them under their directory-relative names
+			// while keeping the original `./posts/foo.md` import specifiers,
+			// which resolve against the bundled entry module and fail at boot
+			// with "No such module".
+			"type": "Text",
+			"globs": ["./**/*.md", "../**/*.md"],
+			"fallthrough": true,
+		},
+		{
+			// Both spellings are required: the bare glob matches file names during
+			// the on-disk traversal that discovers additional modules, while the
+			// `./`-prefixed glob matches the import specifier so wrangler keeps
+			// `import('./generated/…')` / `import('./node_modules/.kody-generated/…')`
+			// external instead of inlining it. Single-star globs on purpose:
+			// wrangler's specifier matcher converts globs without globstar
+			// support, so `**/*` can never match a flat specifier.
+			//
+			// Worker-bundler lives under `src/node_modules/.kody-generated/`
+			// (hardlinked from `packages/worker/.generated/`) so wrangler's
+			// additional-module directory watcher — which skips `node_modules`
+			// — does not see those files. `wrangler-env.ts` also clears that
+			// collector's esbuild `watchFiles` / `watchDirs` (Friction #1789).
+			// Guide catalog stays in `src/generated/`.
+			//
+			// Each glob is one generated filename. A `*.mjs` glob would also
+			// upload a stray file left in that directory (Friction #2504).
+			// Keep this list equal to `tools/worker-additional-module-allowlist.ts`.
+			"type": "ESModule",
+			"globs": [
+				"generated/guide-catalog.mjs",
+				"generated/guide-metadata.mjs",
+				"./generated/guide-catalog.mjs",
+				"./generated/guide-metadata.mjs",
+				"node_modules/.kody-generated/worker-bundler.mjs",
+				"node_modules/.kody-generated/worker-bundler-typescript.mjs",
+				"node_modules/.kody-generated/oauth-provider.mjs",
+				"node_modules/.kody-generated/package-app-remix.mjs",
+				"./node_modules/.kody-generated/worker-bundler.mjs",
+				"./node_modules/.kody-generated/worker-bundler-typescript.mjs",
+				"./node_modules/.kody-generated/oauth-provider.mjs",
+				"./node_modules/.kody-generated/package-app-remix.mjs",
+			],
+			"fallthrough": true,
+		},
+		{
+			"type": "CompiledWasm",
+			"globs": ["node_modules/.kody-generated/esbuild.wasm"],
+			"fallthrough": true,
+		},
+	],
+	"migrations": [
+		{
+			"new_sqlite_classes": ["MCP"],
+			"tag": "v1",
+		},
+		{
+			"new_sqlite_classes": ["ChatAgent"],
+			"tag": "v2",
+		},
+		{
+			"new_sqlite_classes": ["HomeConnectorSession", "HomeMCP"],
+			"tag": "v3",
+		},
+		{
+			"new_sqlite_classes": ["SchedulerDO"],
+			"tag": "v4",
+		},
+		// v6 (JobManager+JobRunner) and v9 (delete JobRunner) are omitted:
+		// JobManager lives on the jobs worker (ADR 0016) and is not
+		// exported here, so a fresh script replaying this chain (local dev,
+		// a new deployment) must not create it. The deployed production
+		// script is already past these tags, so wrangler's migration diff
+		// for it is unaffected.
+		{
+			"deleted_classes": ["SchedulerDO"],
+			"tag": "v7",
+		},
+		{
+			"new_sqlite_classes": ["StorageRunner"],
+			"tag": "v8",
+		},
+		{
+			"new_sqlite_classes": ["AgentTurnRunner"],
+			"tag": "v10",
+		},
+		{
+			"new_sqlite_classes": ["RepoSession"],
+			"tag": "v11",
+		},
+		{
+			"new_sqlite_classes": ["PackageRealtimeSession"],
+			"tag": "v13",
+		},
+		{
+			"new_sqlite_classes": ["PackageServiceInstance"],
+			"tag": "v14",
+		},
+		{
+			"renamed_classes": [
+				{
+					"from": "HomeConnectorSession",
+					"to": "RemoteConnectorSession",
+				},
+			],
+			"tag": "v15",
+		},
+		{
+			"deleted_classes": ["HomeMCP"],
+			"tag": "v16",
+		},
+		{
+			"deleted_classes": ["ChatAgent", "AgentTurnRunner"],
+			"tag": "v17",
+		},
+		{
+			"new_sqlite_classes": ["McpClientHub"],
+			"tag": "v18",
+		},
+		{
+			"new_sqlite_classes": ["OAuthPurgeCoordinator"],
+			"tag": "v19",
+		},
+		{
+			"new_sqlite_classes": ["RunLog"],
+			"tag": "v20",
+		},
+		{
+			"new_sqlite_classes": ["UserMeter"],
+			"tag": "v21",
+		},
+		{
+			"new_sqlite_classes": ["Mailbox"],
+			"tag": "v22",
+		},
+		{
+			"new_sqlite_classes": ["StripePlanRefresh"],
+			"tag": "v23",
+		},
+		{
+			"new_sqlite_classes": ["RepoSessionIndex"],
+			"tag": "v24",
+		},
+		{
+			"deleted_classes": ["RemoteConnectorSession"],
+			"tag": "v25",
+		},
+		{
+			"deleted_classes": ["PackageServiceInstance"],
+			"tag": "v26",
+		},
+	],
+
+	"observability": {
+		"enabled": true,
+		// Workers automatic tracing (beta): OTel-standard spans for handler
+		// invocations, outbound fetches, and binding calls (D1, KV, R2, DO,
+		// queues). Spans share the Workers Logs event quota. Inherited by all
+		// environments unless overridden; local dev and tests ignore it. The
+		// production env overrides this block to add the Sentry OTLP export
+		// destination, so preview spans stay in the Cloudflare dashboard only.
+		"traces": {
+			"enabled": true,
+		},
+	},
+	// Cron scheduling moved to the jobs worker (packages/jobs-worker, ADR
+	// 0016); the main worker has no scheduled handler.
+	"env": {
+		"production": {
+			"ratelimits": [
+				{
+					"name": "AUTH_RATE_LIMITER",
+					"namespace_id": "1001",
+					"simple": {
+						"limit": 10,
+						"period": 60,
+					},
+				},
+				{
+					"name": "SENTRY_TUNNEL_RATE_LIMITER",
+					"namespace_id": "1003",
+					"simple": {
+						"limit": 120,
+						"period": 60,
+					},
+				},
+			],
+			// Replaces the top-level observability block (wrangler env keys
+			// override wholesale, so "enabled" is restated): same tracing,
+			// plus the account-level Sentry OTLP export destination
+			// "sentry-otlp-traces" (Workers Observability -> Destinations),
+			// which points at the kody-cloudflare Sentry project's OTLP
+			// traces endpoint. The destination must exist in the target
+			// account before deploy; forks create their own or remove it.
+			// See docs/contributing/setup-manifest.md.
+			"observability": {
+				"enabled": true,
+				"traces": {
+					"enabled": true,
+					"destinations": ["sentry-otlp-traces"],
+				},
+			},
+			"worker_loaders": [
+				{
+					"binding": "LOADER",
+				},
+				{
+					"binding": "APP_LOADER",
+				},
+			],
+			// The runtime lane's workflow moved to the kody-runtime script (ADR
+			// 0016); MCP durable escalation in this Worker starts instances over
+			// the cross-script binding.
+			"workflows": [
+				{
+					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
+					"name": "kody-runtime-dynamic-callable-workflows",
+					"class_name": "DynamicCallableWorkflow",
+					"script_name": "kody-runtime",
+				},
+			],
+			// Package runtime Worker (ADR 0016): runtime-owned requests are
+			// forwarded wholesale over this service binding (see
+			// packages/worker/src/runtime-worker-routing.ts). Jobs (ADR 0016)
+			// and highlight (fetch-only Shiki tokenizer) share this array —
+			// wrangler JSONC last-wins, so do not add a second "services" key.
+			"services": [
+				{
+					"binding": "RUNTIME_WORKER",
+					"service": "kody-runtime",
+					"entrypoint": "RuntimeWorkerService",
+				},
+				{
+					"binding": "JOBS",
+					"service": "kody-jobs",
+					"entrypoint": "JobsService",
+				},
+				{
+					"binding": "HIGHLIGHT",
+					"service": "kody-highlight",
+				},
+			],
+			"assets": {
+				// Static files in `public/` (styles, favicons). Vite copies this
+				// directory into `dist/client` and the Cloudflare Vite plugin
+				// rewrites the deploy config to that hashed client output.
+				"directory": "./public",
+				"binding": "ASSETS",
+				"run_worker_first": [
+					"/@*/api/package-invocations/*",
+					"/@*/packages/*",
+					"/@*/webhooks/*",
+					"/robots.txt",
+					"/sitemap.xml",
+					"/auth.md",
+					"/.well-known/mcp/*",
+					"/.well-known/api-catalog",
+					"/.well-known/agent-skills/*",
+					"/.well-known/security.txt",
+					"/.well-known/openai-apps-challenge",
+					"/styles.css",
+					"/client-entry.js",
+					"/assets/*",
+				],
+			},
+			"durable_objects": {
+				"bindings": [
+					// Platform-owned Durable Objects live in the kody-platform
+					// script (ADR 0034); storage transferred there via that
+					// script's `transferred_classes` migration.
+					{
+						"class_name": "MCP",
+						"name": "MCP_OBJECT",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "McpClientHub",
+						"name": "MCP_CLIENT_HUB",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "OAuthPurgeCoordinator",
+						"name": "OAUTH_PURGE_COORDINATOR",
+						"script_name": "kody-platform",
+					},
+					// Runtime-owned Durable Objects live in the kody-runtime script
+					// (ADR 0016); storage transferred there via that script's
+					// `transferred_classes` migration.
+					{
+						"class_name": "StorageRunner",
+						"name": "STORAGE_RUNNER",
+						"script_name": "kody-runtime",
+					},
+					{
+						"class_name": "RunLog",
+						"name": "RUN_LOG",
+						"script_name": "kody-runtime",
+					},
+					{
+						"class_name": "UserMeter",
+						"name": "USER_METER",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "Mailbox",
+						"name": "MAILBOX",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "RepoSessionIndex",
+						"name": "REPO_SESSION_INDEX",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "StripePlanRefresh",
+						"name": "STRIPE_PLAN_REFRESH",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "RepoSession",
+						"name": "REPO_SESSION",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "PackageRealtimeSession",
+						"name": "PACKAGE_REALTIME_SESSION",
+						"script_name": "kody-runtime",
+					},
+				],
+			},
+			"d1_databases": [
+				{
+					"binding": "APP_DB",
+					"database_name": "kody",
+					"migrations_dir": "./migrations",
+				},
+				{
+					"binding": "AUDIT_DB",
+					"database_name": "kody-audit",
+					"migrations_dir": "./audit-migrations",
+				},
+			],
+			"send_email": [
+				{
+					"name": "EMAIL",
+				},
+			],
+			"queues": {
+				"producers": [
+					{
+						"binding": "PLATFORM_FEEDBACK_DISPATCH_QUEUE",
+						"queue": "kody-platform-feedback-dispatch",
+					},
+					{
+						"binding": "COMMUNITY_ACTIVITY_DISPATCH_QUEUE",
+						"queue": "kody-community-activity-dispatch",
+					},
+					{
+						"binding": "COMMUNITY_LISTING_PUBLISHED_DISPATCH_QUEUE",
+						"queue": "kody-community-listing-published-dispatch",
+					},
+					{
+						"binding": "PACKAGE_EVENTS_DISPATCH_QUEUE",
+						"queue": "kody-package-events-dispatch",
+					},
+					{
+						"binding": "WEBHOOK_DISPATCH_QUEUE",
+						"queue": "kody-webhook-dispatch",
+					},
+				],
+				"consumers": [
+					{
+						"queue": "kody-email-delivery",
+						"max_batch_size": 10,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "kody-email-delivery-dlq",
+					},
+					{
+						"queue": "kody-artifacts-repo-events",
+						"max_batch_size": 10,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "kody-artifacts-repo-events-dlq",
+					},
+					{
+						"queue": "kody-platform-feedback-dispatch",
+						"max_batch_size": 10,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "kody-platform-feedback-dispatch-dlq",
+					},
+					{
+						"queue": "kody-community-activity-dispatch",
+						"max_batch_size": 10,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "kody-community-activity-dispatch-dlq",
+					},
+					{
+						"queue": "kody-community-listing-published-dispatch",
+						"max_batch_size": 10,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "kody-community-listing-published-dispatch-dlq",
+					},
+					{
+						"queue": "kody-package-events-dispatch",
+						"max_batch_size": 10,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						// Each event fans out to dynamic Worker isolate loads per
+						// subscriber; cap consumer concurrency so an emit burst
+						// cannot multiply into unbounded isolate loads.
+						"max_concurrency": 16,
+						"dead_letter_queue": "kody-package-events-dispatch-dlq",
+					},
+					{
+						"queue": "kody-webhook-dispatch",
+						"max_batch_size": 1,
+						"max_batch_timeout": 5,
+						"max_retries": 10,
+						"max_concurrency": 16,
+						"dead_letter_queue": "kody-webhook-dispatch-dlq",
+					},
+				],
+			},
+			"kv_namespaces": [
+				{
+					"binding": "OAUTH_KV",
+				},
+				{
+					"binding": "BUNDLE_ARTIFACTS_KV",
+				},
+			],
+			"r2_buckets": [
+				{
+					"binding": "COMMUNITY_ASSETS",
+					"bucket_name": "kody-community-assets",
+				},
+				{
+					"binding": "EMAIL_BLOBS",
+					"bucket_name": "kody-email-blobs",
+				},
+				{
+					"binding": "REPO_SESSION_BLOBS",
+					"bucket_name": "kody-repo-session-blobs",
+				},
+			],
+			"vectorize": [
+				{
+					"binding": "CAPABILITY_VECTOR_INDEX",
+					"index_name": "kody-capabilities-prod",
+				},
+			],
+			"analytics_engine_datasets": [
+				{
+					"binding": "USAGE_EVENTS",
+					"dataset": "kody_usage_events",
+				},
+				{
+					"binding": "FLAG_EXPOSURES",
+					"dataset": "kody_flag_exposures",
+				},
+				{
+					"binding": "EMAIL_EVENTS",
+					"dataset": "kody_email_events",
+				},
+				{
+					"binding": "MCP_PROTOCOL_EVENTS",
+					"dataset": "kody_mcp_protocol_events",
+				},
+				{
+					"binding": "PACKAGE_INVOKE_SPECIFIER_EVENTS",
+					"dataset": "kody_package_invoke_specifier_events",
+				},
+				{
+					"binding": "EXECUTE_INTERPRETABLE_EVENTS",
+					"dataset": "kody_execute_interpretable_events",
+				},
+				{
+					"binding": "MCP_SEARCH_EVENTS",
+					"dataset": "kody_mcp_search_events",
+				},
+				{
+					"binding": "ONBOARDING_FUNNEL_EVENTS",
+					"dataset": "kody_onboarding_funnel_events",
+				},
+			],
+			"ai": {
+				"binding": "AI",
+			},
+			"images": {
+				"binding": "IMAGES",
+			},
+			"artifacts": [
+				{
+					"binding": "ARTIFACTS",
+					"namespace": "production",
+				},
+			],
+			"vars": {
+				"SENTRY_ENVIRONMENT": "production",
+				// JSON number on purpose: buildSentryOptions reads the raw
+				// runtime env and only honors a number here (string secrets
+				// are ignored). 0 disables Sentry SDK trace sampling because
+				// Workers native tracing already exports OTLP traces to
+				// Sentry via the sentry-otlp-traces destination; error
+				// capture is unaffected.
+				"SENTRY_TRACES_SAMPLE_RATE": 0,
+				"ARTIFACTS_NAMESPACE": "production",
+				// Origin hosted package apps are served from. Must stay a
+				// separate registrable domain from APP_BASE_URL — that is what
+				// makes package code cross-site from the app origin, so
+				// `kody_session` never attaches to it. Intentionally unset for
+				// preview and tests, which keep serving package apps inline on
+				// the app origin.
+				//
+				// Production deploy publishes apex and wildcard zone routes for
+				// this host on the runtime Worker (never a custom domain in the
+				// package-app zone); DNS placeholder records are ensured
+				// separately. The routes deliberately do not live here, because
+				// Wrangler resolves *local dev* request URLs against the first
+				// configured route — every `npm run dev` request would arrive
+				// as https://kody.run/... and send local logins to the real
+				// domain. See docs/contributing/setup-manifest.md.
+				"PACKAGE_APP_BASE_URL": "https://kody.run",
+				// Email domains are committed (not just GitHub Actions vars) so
+				// they can never silently rederive from APP_BASE_URL. Canonical
+				// email lives on kody.codes. Outbound always sends from the
+				// canonical domains, which requires Email Routing + Email
+				// Sending verification on the kody.codes zone.
+				"USER_EMAIL_DOMAIN": "inbox.kody.codes",
+				"SYSTEM_EMAIL_DOMAIN": "kody.codes",
+				// Fathom Analytics site id (public, non-secret). Production
+				// only so local dev, preview, and tests never send pageviews.
+				"FATHOM_SITE_ID": "WKKSDJGN",
+				// Public playlist whose latest Atom-feed videos may open in
+				// the site-wide `/?youtubeId=` overlay. Tests leave this unset.
+				"YOUTUBE_ALLOWED_PLAYLIST_IDS": "PLV5CVI1eNcJhP4nrJt85L7PxHjebFpDfY",
+				// Public (non-secret) Stripe Price ids for production
+				// subscriptions. Coupled to the live Stripe account: if a
+				// price is regenerated in Stripe, update the value in the
+				// same change or subscription plan matching silently degrades
+				// to the kody_plan metadata fallback. Checkout sessions are
+				// created server-side for authenticated users (no public
+				// Payment Link). STRIPE_PRO_PRICE_ID /
+				// STRIPE_PRO_YEARLY_PRICE_ID are the purchasable Pro ($12 /
+				// $120) on prod_VKxtLxMdjEkOdu ("Kody Pro") with the prepaid
+				// credit wallet (#2617). The previous Standard $12/$120 and
+				// Pro $49/$480 ids (prod_V1ChgPPenrxsAX, now "Kody Pro
+				// (legacy)") live in retiredStandardPriceIds /
+				// retiredProPriceIds; reusing either here would make those
+				// subscribers wallet-eligible.
+				"STRIPE_PRO_PRICE_ID": "price_1UKHxZLAQpAnsYszwwqZTCCT",
+				"STRIPE_PRO_YEARLY_PRICE_ID": "price_1UKHxaLAQpAnsYszlsVHHXjK",
+				// Stripe Billing Portal configuration used by Manage
+				// subscription and by switches to Pro for existing
+				// subscribers (subscription_update_confirm flow pinned to the
+				// Pro price, always_invoice proration). Its product list must
+				// offer only the purchasable Pro once those prices exist.
+				// Preview and test leave it unset so Stripe uses the account
+				// default configuration.
+				"STRIPE_BILLING_PORTAL_CONFIGURATION_ID": "bpc_1UBzc8LAQpAnsYszyBkO2N3F",
+				// Disaster-recovery exporter → locked R2 bucket in the KCD
+				// (DR) account. The companion S3 credentials are Worker
+				// secrets set out-of-band via the Cloudflare API.
+				"DR_EXPORT_ENABLED": "true",
+				"DR_BACKUP_ACCOUNT_ID": "a41d50ecaf0ae0f86dd1824ef6729cb2",
+				"DR_BACKUP_BUCKET_NAME": "kody-production-backups",
+				// Public verification material shared with the DR control plane.
+				// The matching signing private key remains control-plane-only.
+				"BACKUP_MANIFEST_SIGNING_KEY_ID": "kody-dr-2026-07",
+				"BACKUP_MANIFEST_VERIFYING_PUBLIC_KEY_SPKI_BASE64": "MCowBQYDK2VwAyEA3jqjPcGTzWefE5PGyRBdUQKAEj7FFGtFIz+223sbt9A=",
+			},
+		},
+		"preview": {
+			// Deployed preview origins upload the slim entry and own no Durable
+			// Object class, so `tools/ci/preview-resources.ts` strips this block
+			// from the generated deploy config. It only replays for the full
+			// `index.ts` entry (local `--env preview` runs), and so must not
+			// create JobManager/JobRunner: the class is not exported here
+			// anymore (it lives in the jobs worker, ADR 0016). Same chain as the
+			// top level minus the v6/v9 JobManager+JobRunner pair.
+			"migrations": [
+				{
+					"new_sqlite_classes": ["MCP"],
+					"tag": "v1",
+				},
+				{
+					"new_sqlite_classes": ["ChatAgent"],
+					"tag": "v2",
+				},
+				{
+					"new_sqlite_classes": ["HomeConnectorSession", "HomeMCP"],
+					"tag": "v3",
+				},
+				{
+					"new_sqlite_classes": ["SchedulerDO"],
+					"tag": "v4",
+				},
+				{
+					"deleted_classes": ["SchedulerDO"],
+					"tag": "v7",
+				},
+				{
+					"new_sqlite_classes": ["StorageRunner"],
+					"tag": "v8",
+				},
+				{
+					"new_sqlite_classes": ["AgentTurnRunner"],
+					"tag": "v10",
+				},
+				{
+					"new_sqlite_classes": ["RepoSession"],
+					"tag": "v11",
+				},
+				{
+					"new_sqlite_classes": ["PackageRealtimeSession"],
+					"tag": "v13",
+				},
+				{
+					"new_sqlite_classes": ["PackageServiceInstance"],
+					"tag": "v14",
+				},
+				{
+					"renamed_classes": [
+						{
+							"from": "HomeConnectorSession",
+							"to": "RemoteConnectorSession",
+						},
+					],
+					"tag": "v15",
+				},
+				{
+					"deleted_classes": ["HomeMCP"],
+					"tag": "v16",
+				},
+				{
+					"deleted_classes": ["ChatAgent", "AgentTurnRunner"],
+					"tag": "v17",
+				},
+				{
+					"new_sqlite_classes": ["McpClientHub"],
+					"tag": "v18",
+				},
+				{
+					"new_sqlite_classes": ["OAuthPurgeCoordinator"],
+					"tag": "v19",
+				},
+				{
+					"new_sqlite_classes": ["RunLog"],
+					"tag": "v20",
+				},
+				{
+					"new_sqlite_classes": ["UserMeter"],
+					"tag": "v21",
+				},
+				{
+					"new_sqlite_classes": ["Mailbox"],
+					"tag": "v22",
+				},
+				{
+					"new_sqlite_classes": ["StripePlanRefresh"],
+					"tag": "v23",
+				},
+				{
+					"new_sqlite_classes": ["RepoSessionIndex"],
+					"tag": "v24",
+				},
+				{
+					"deleted_classes": ["RemoteConnectorSession"],
+					"tag": "v25",
+				},
+				{
+					"deleted_classes": ["PackageServiceInstance"],
+					"tag": "v26",
+				},
+			],
+			"ratelimits": [
+				{
+					"name": "AUTH_RATE_LIMITER",
+					"namespace_id": "1002",
+					"simple": {
+						"limit": 10,
+						"period": 60,
+					},
+				},
+				{
+					"name": "SENTRY_TUNNEL_RATE_LIMITER",
+					"namespace_id": "1004",
+					"simple": {
+						"limit": 120,
+						"period": 60,
+					},
+				},
+			],
+			"worker_loaders": [
+				{
+					"binding": "LOADER",
+				},
+				{
+					"binding": "APP_LOADER",
+				},
+			],
+			"workflows": [
+				{
+					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
+					"name": "kody-runtime-preview-dynamic-callable-workflows",
+					"class_name": "DynamicCallableWorkflow",
+					"script_name": "kody-runtime",
+				},
+			],
+			// Preview deploys generate per-PR worker names; the deploy config
+			// generator rewrites "kody-runtime" service/script references to the
+			// PR's runtime worker name (tools/ci/runtime-worker-config.ts).
+			// Jobs and highlight names are rewritten by preview-resources.ts.
+			"services": [
+				{
+					"binding": "RUNTIME_WORKER",
+					"service": "kody-runtime",
+					"entrypoint": "RuntimeWorkerService",
+				},
+				{
+					"binding": "JOBS",
+					"service": "kody-jobs",
+					"entrypoint": "JobsService",
+				},
+				{
+					"binding": "HIGHLIGHT",
+					"service": "kody-highlight",
+				},
+			],
+			"assets": {
+				// Static files in `public/` (styles, favicons). Vite copies this
+				// directory into `dist/client` and the Cloudflare Vite plugin
+				// rewrites the deploy config to that hashed client output.
+				"directory": "./public",
+				"binding": "ASSETS",
+				"run_worker_first": [
+					"/@*/api/package-invocations/*",
+					"/@*/packages/*",
+					"/@*/webhooks/*",
+					"/robots.txt",
+					"/sitemap.xml",
+					"/auth.md",
+					"/.well-known/mcp/*",
+					"/.well-known/api-catalog",
+					"/.well-known/agent-skills/*",
+					"/.well-known/security.txt",
+					"/.well-known/openai-apps-challenge",
+					"/styles.css",
+					"/client-entry.js",
+					"/assets/*",
+				],
+			},
+			"durable_objects": {
+				"bindings": [
+					{
+						"class_name": "MCP",
+						"name": "MCP_OBJECT",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "McpClientHub",
+						"name": "MCP_CLIENT_HUB",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "OAuthPurgeCoordinator",
+						"name": "OAUTH_PURGE_COORDINATOR",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "StorageRunner",
+						"name": "STORAGE_RUNNER",
+						"script_name": "kody-runtime",
+					},
+					{
+						"class_name": "RunLog",
+						"name": "RUN_LOG",
+						"script_name": "kody-runtime",
+					},
+					{
+						"class_name": "UserMeter",
+						"name": "USER_METER",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "Mailbox",
+						"name": "MAILBOX",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "RepoSessionIndex",
+						"name": "REPO_SESSION_INDEX",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "StripePlanRefresh",
+						"name": "STRIPE_PLAN_REFRESH",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "RepoSession",
+						"name": "REPO_SESSION",
+						"script_name": "kody-platform",
+					},
+					{
+						"class_name": "PackageRealtimeSession",
+						"name": "PACKAGE_REALTIME_SESSION",
+						"script_name": "kody-runtime",
+					},
+				],
+			},
+			"d1_databases": [
+				{
+					"binding": "APP_DB",
+					"database_name": "kody-preview",
+					"migrations_dir": "./migrations",
+				},
+				{
+					"binding": "AUDIT_DB",
+					"database_name": "kody-preview-audit",
+					"migrations_dir": "./audit-migrations",
+				},
+			],
+			"send_email": [
+				{
+					"name": "EMAIL",
+				},
+			],
+			"queues": {
+				"producers": [
+					{
+						"binding": "WEBHOOK_DISPATCH_QUEUE",
+						"queue": "kody-preview-webhook-dispatch",
+					},
+				],
+				"consumers": [
+					{
+						"queue": "kody-preview-webhook-dispatch",
+						"max_batch_size": 1,
+						"max_batch_timeout": 5,
+						"max_retries": 10,
+						"max_concurrency": 16,
+						"dead_letter_queue": "kody-preview-webhook-dispatch-dlq",
+					},
+				],
+			},
+			"kv_namespaces": [
+				{
+					"binding": "OAUTH_KV",
+				},
+				{
+					"binding": "BUNDLE_ARTIFACTS_KV",
+				},
+			],
+			"r2_buckets": [
+				{
+					"binding": "COMMUNITY_ASSETS",
+					"bucket_name": "kody-preview-community-assets",
+				},
+				{
+					"binding": "EMAIL_BLOBS",
+					"bucket_name": "kody-preview-email-blobs",
+				},
+				{
+					"binding": "REPO_SESSION_BLOBS",
+					"bucket_name": "kody-preview-repo-session-blobs",
+				},
+			],
+			"vectorize": [
+				{
+					"binding": "CAPABILITY_VECTOR_INDEX",
+					"index_name": "kody-capabilities-preview",
+				},
+			],
+			"analytics_engine_datasets": [
+				{
+					"binding": "USAGE_EVENTS",
+					"dataset": "kody_usage_events_preview",
+				},
+				{
+					"binding": "FLAG_EXPOSURES",
+					"dataset": "kody_flag_exposures_preview",
+				},
+				{
+					"binding": "EMAIL_EVENTS",
+					"dataset": "kody_email_events_preview",
+				},
+				{
+					"binding": "MCP_PROTOCOL_EVENTS",
+					"dataset": "kody_mcp_protocol_events_preview",
+				},
+				{
+					"binding": "PACKAGE_INVOKE_SPECIFIER_EVENTS",
+					"dataset": "kody_package_invoke_specifier_events_preview",
+				},
+				{
+					"binding": "EXECUTE_INTERPRETABLE_EVENTS",
+					"dataset": "kody_execute_interpretable_events_preview",
+				},
+				{
+					"binding": "MCP_SEARCH_EVENTS",
+					"dataset": "kody_mcp_search_events_preview",
+				},
+				{
+					"binding": "ONBOARDING_FUNNEL_EVENTS",
+					"dataset": "kody_onboarding_funnel_events_preview",
+				},
+			],
+			"ai": {
+				"binding": "AI",
+			},
+			"images": {
+				"binding": "IMAGES",
+			},
+			"artifacts": [
+				{
+					"binding": "ARTIFACTS",
+					"namespace": "preview",
+				},
+			],
+			"vars": {
+				"SENTRY_ENVIRONMENT": "preview",
+				"ARTIFACTS_NAMESPACE": "preview",
+				"YOUTUBE_ALLOWED_PLAYLIST_IDS": "PLV5CVI1eNcJhP4nrJt85L7PxHjebFpDfY",
+				"DR_EXPORT_ENABLED": "",
+				"DR_BACKUP_ACCOUNT_ID": "",
+				"DR_BACKUP_BUCKET_NAME": "",
+				"BACKUP_MANIFEST_SIGNING_KEY_ID": "",
+				"BACKUP_MANIFEST_VERIFYING_PUBLIC_KEY_SPKI_BASE64": "",
+			},
+		},
+		"test": {
+			// Local test workers replay the whole migration chain, so it must
+			// not create JobManager/JobRunner: the class is not exported here
+			// anymore (it lives in the jobs worker, ADR 0016). Same chain as the
+			// top level minus the v6/v9 JobManager+JobRunner pair.
+			"migrations": [
+				{
+					"new_sqlite_classes": ["MCP"],
+					"tag": "v1",
+				},
+				{
+					"new_sqlite_classes": ["ChatAgent"],
+					"tag": "v2",
+				},
+				{
+					"new_sqlite_classes": ["HomeConnectorSession", "HomeMCP"],
+					"tag": "v3",
+				},
+				{
+					"new_sqlite_classes": ["SchedulerDO"],
+					"tag": "v4",
+				},
+				{
+					"deleted_classes": ["SchedulerDO"],
+					"tag": "v7",
+				},
+				{
+					"new_sqlite_classes": ["StorageRunner"],
+					"tag": "v8",
+				},
+				{
+					"new_sqlite_classes": ["AgentTurnRunner"],
+					"tag": "v10",
+				},
+				{
+					"new_sqlite_classes": ["RepoSession"],
+					"tag": "v11",
+				},
+				{
+					"new_sqlite_classes": ["PackageRealtimeSession"],
+					"tag": "v13",
+				},
+				{
+					"new_sqlite_classes": ["PackageServiceInstance"],
+					"tag": "v14",
+				},
+				{
+					"renamed_classes": [
+						{
+							"from": "HomeConnectorSession",
+							"to": "RemoteConnectorSession",
+						},
+					],
+					"tag": "v15",
+				},
+				{
+					"deleted_classes": ["HomeMCP"],
+					"tag": "v16",
+				},
+				{
+					"deleted_classes": ["ChatAgent", "AgentTurnRunner"],
+					"tag": "v17",
+				},
+				{
+					"new_sqlite_classes": ["McpClientHub"],
+					"tag": "v18",
+				},
+				{
+					"new_sqlite_classes": ["OAuthPurgeCoordinator"],
+					"tag": "v19",
+				},
+				{
+					"new_sqlite_classes": ["RunLog"],
+					"tag": "v20",
+				},
+				{
+					"new_sqlite_classes": ["UserMeter"],
+					"tag": "v21",
+				},
+				{
+					"new_sqlite_classes": ["Mailbox"],
+					"tag": "v22",
+				},
+				{
+					"new_sqlite_classes": ["StripePlanRefresh"],
+					"tag": "v23",
+				},
+				{
+					"new_sqlite_classes": ["RepoSessionIndex"],
+					"tag": "v24",
+				},
+				{
+					"deleted_classes": ["RemoteConnectorSession"],
+					"tag": "v25",
+				},
+				{
+					"deleted_classes": ["PackageServiceInstance"],
+					"tag": "v26",
+				},
+			],
+			"worker_loaders": [
+				{
+					"binding": "LOADER",
+				},
+				{
+					"binding": "APP_LOADER",
+				},
+			],
+			"workflows": [
+				{
+					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
+					"name": "kody-test-dynamic-callable-workflows",
+					"class_name": "DynamicCallableWorkflow",
+				},
+			],
+			"assets": {
+				// Static files in `public/` (styles, favicons). Vite copies this
+				// directory into `dist/client` and the Cloudflare Vite plugin
+				// rewrites the deploy config to that hashed client output.
+				"directory": "./public",
+				"binding": "ASSETS",
+				"run_worker_first": [
+					"/@*/api/package-invocations/*",
+					"/@*/packages/*",
+					"/@*/webhooks/*",
+					"/robots.txt",
+					"/sitemap.xml",
+					"/auth.md",
+					"/.well-known/mcp/*",
+					"/.well-known/api-catalog",
+					"/.well-known/agent-skills/*",
+					"/.well-known/security.txt",
+					"/.well-known/openai-apps-challenge",
+					"/styles.css",
+					"/client-entry.js",
+					"/assets/*",
+				],
+			},
+			"durable_objects": {
+				"bindings": [
+					{
+						"class_name": "MCP",
+						"name": "MCP_OBJECT",
+					},
+					{
+						"class_name": "McpClientHub",
+						"name": "MCP_CLIENT_HUB",
+					},
+					{
+						"class_name": "OAuthPurgeCoordinator",
+						"name": "OAUTH_PURGE_COORDINATOR",
+					},
+					{
+						"class_name": "StorageRunner",
+						"name": "STORAGE_RUNNER",
+					},
+					{
+						"class_name": "RunLog",
+						"name": "RUN_LOG",
+					},
+					{
+						"class_name": "UserMeter",
+						"name": "USER_METER",
+					},
+					{
+						"class_name": "Mailbox",
+						"name": "MAILBOX",
+					},
+					{
+						"class_name": "RepoSessionIndex",
+						"name": "REPO_SESSION_INDEX",
+					},
+					{
+						"class_name": "StripePlanRefresh",
+						"name": "STRIPE_PLAN_REFRESH",
+					},
+					{
+						"class_name": "RepoSession",
+						"name": "REPO_SESSION",
+					},
+					{
+						"class_name": "PackageRealtimeSession",
+						"name": "PACKAGE_REALTIME_SESSION",
+					},
+				],
+			},
+			"d1_databases": [
+				{
+					"binding": "APP_DB",
+					"database_name": "kody-preview",
+					"migrations_dir": "./migrations",
+				},
+				{
+					"binding": "AUDIT_DB",
+					"database_name": "kody-preview-audit",
+					"migrations_dir": "./audit-migrations",
+				},
+			],
+			"send_email": [
+				{
+					"name": "EMAIL",
+				},
+			],
+			// Jobs + highlight: local dev/e2e runs the secondary configs
+			// together (`wrangler dev --env test` names them
+			// "kody-jobs-test" and "kody-highlight-test").
+			"services": [
+				{
+					"binding": "JOBS",
+					"service": "kody-jobs-test",
+					"entrypoint": "JobsService",
+				},
+				{
+					"binding": "HIGHLIGHT",
+					"service": "kody-highlight-test",
+				},
+			],
+			"queues": {
+				"producers": [
+					{
+						"binding": "WEBHOOK_DISPATCH_QUEUE",
+						"queue": "kody-test-webhook-dispatch",
+					},
+				],
+				"consumers": [
+					{
+						"queue": "kody-test-webhook-dispatch",
+						"max_batch_size": 1,
+						"max_batch_timeout": 0,
+						"max_retries": 10,
+						"dead_letter_queue": "kody-test-webhook-dispatch-dlq",
+					},
+				],
+			},
+			"kv_namespaces": [
+				{
+					"binding": "OAUTH_KV",
+				},
+				{
+					"binding": "BUNDLE_ARTIFACTS_KV",
+				},
+			],
+			// Like the D1 database above, the test env reuses the preview
+			// bucket name; local runs and vitest-pool-workers simulate it.
+			"r2_buckets": [
+				{
+					"binding": "COMMUNITY_ASSETS",
+					"bucket_name": "kody-preview-community-assets",
+				},
+				{
+					"binding": "EMAIL_BLOBS",
+					"bucket_name": "kody-preview-email-blobs",
+				},
+				{
+					"binding": "REPO_SESSION_BLOBS",
+					"bucket_name": "kody-preview-repo-session-blobs",
+				},
+			],
+			"images": {
+				"binding": "IMAGES",
+			},
+			"vars": {
+				"SENTRY_ENVIRONMENT": "test",
+				"ARTIFACTS_NAMESPACE": "default",
+				"COOKIE_SECRET": "LOCAL_AND_PREVIEW_COOKIE_SECRET_32_CHARS_MINIMUM",
+				"SECRET_STORE_KEY": "LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM_OK",
+				"OIDC_SIGNING_KEY_ID": "kody-oidc-local-test",
+				"OIDC_SIGNING_PRIVATE_KEY_PEM": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCt9gzee+ryWGuY\nJW49/6Cyj+pup3CLQ2/+wL1KJ5vfd8YieWUnvaHEZ6JfvDFca38Vh7kfwxh3P0+u\nQuvXEwsUCXnvMPGxbcVwBA6ZlYxtnoXwudQCS2sadsvvN9k4QQn5mOgQ39HDbQpS\nE0IRdDQwNr4od6kSwwjO+zXi/47NYHiZCkxIpZ7wZgvUHUVTO6KZPSRAmGLNz3fo\nFUOepKmrMtuQCTt97EGcoVUM70NzuogjJr/ShUiCz3M9fS3rf1qRmNzTsUAdCQQA\nbThFmrRxOP+EorrT9Qj2qbcYkaYFKzZy1rtBFPwn/aYG69eVbpadUnRa8Hqi9LRK\nwQZGR+FnAgMBAAECggEADMjSBfZqEX4JXONrUv0arI9tCs1ytO6zfVpheYtS+5JM\nKl5s3lsjrKZycBde3Uw9HlzyGvEgjCryn9DlOid5H0jZqt1toGd7z2aiQraTMmnT\nAsT1XWcjgOINd2V4U5exXvmAxzSxBWwEX9HF1OM1rqa8mjFpEyroK9CZvjafzQdU\ndVeHWaWWwMEj0sD7rVeWBbiAg2nrtz4FVBmI+g2K75IOwc8/bcnur2QyF0hxLZPp\nnnnI0lNYXeU7wgMIJ5ql6BM1xBojtjyhryglwLlsTwkgS0kNQ3rh3yD9X8Yp3xaJ\nDr5Jd9739wMFM1yj4Bkdr5a/62p4L4Tec8GWmLwZ+QKBgQDozb+q3X9ILLmAZ8CI\nX2rPNCrwhJQqAhddEkPN7rcIjPN3tXlQzPgVZh+0o0mo6Al9NpsR4RtohVR9zXH+\nqlpv5+Edcub+LxMclNHxA0hoXorgS613tDDuxZQSb8c6+Yz1lFxe1/ukiP9n4QNw\nafYBsWJ6NVDiLOL5mq5j6bHSOwKBgQC/S183h43b0nlK62gtq+d3kQSeOJUyesy3\nIewMspNyrLJS3qeXpby1oVlh3LqlMVztYtLn2wuUxEGgKwcMLOvbXqkIZJq2tAYa\nGoXGLR87zTjisgVfqAqLy7HZarcpDVU2034Wj09jq4Uq+aPpjIusyPmx2c6spFy2\nENNqzNeuxQKBgCpBBdPGZg68h2LF8g0OfH1lM5H6DkZdoM30vbfH5xK3Oo10s7M1\nsKV5prGLnZf5nZdLbPPezrG22XIH8vPNCaMcDCDjNQfXlXlvjXdYKDFBT6WMNszu\nOJ9t3wVFonySxMHiDq3sN7FSaED7dztVECCYiI4z1R1oFj5Fk/dweCT3AoGBAIYN\nZY5eWdTf68vKp9jJjI1HfLr73+HeGDOFfAtx4M4No3FbQoqMxG9rwF1J9ynoK7zW\n8gE0iSsZVPvO60Nm/2ldLosJJTo/cb89Mt2rpSWdLO3/3rAn7CwG9HztwajtBPhE\nwSlCCFpKSinRg0IZEZBlzkUJ40EsdSPJKr6/Ca4ZAoGAE3VXj6bVKPDTbzCt7Bbk\ntJ1f6LGDbEmqlINSP8Gfc8xTYh3xanamhUObUEt5QsW1X0LS6yDH3muc4/NC23ZN\nm+R0RuVx1WwZH1khUSMuby9Ydm/xyV3oTcRIYOo8/QbJa1QZQcqro/yLwDFexXJO\nV+9i7aqe5cG1n80/uE2Mz6E=\n-----END PRIVATE KEY-----",
+				// MOCK_ client ids activate the in-worker social-login mock
+				// flow (non-production runtimes only) so E2E tests can cover
+				// the full redirect round-trip without provider apps.
+				"GITHUB_CLIENT_ID": "MOCK_GITHUB_CLIENT_ID",
+				"GITHUB_CLIENT_SECRET": "MOCK_GITHUB_CLIENT_SECRET",
+				"GOOGLE_CLIENT_ID": "MOCK_GOOGLE_CLIENT_ID",
+				"GOOGLE_CLIENT_SECRET": "MOCK_GOOGLE_CLIENT_SECRET",
+				"X_CLIENT_ID": "MOCK_X_CLIENT_ID",
+				"X_CLIENT_SECRET": "MOCK_X_CLIENT_SECRET",
+				"DISCORD_CLIENT_ID": "MOCK_DISCORD_CLIENT_ID",
+				"DISCORD_CLIENT_SECRET": "MOCK_DISCORD_CLIENT_SECRET",
+				"STRIPE_SECRET_KEY": "sk_test_local",
+				"STRIPE_PRO_PRICE_ID": "price_pro",
+				"STRIPE_PRO_YEARLY_PRICE_ID": "price_pro_yearly",
+				"STRIPE_API_BASE_URL": "https://stripe.mock",
+				"DR_EXPORT_ENABLED": "",
+				"DR_BACKUP_ACCOUNT_ID": "",
+				"DR_BACKUP_BUCKET_NAME": "",
+				"BACKUP_MANIFEST_SIGNING_KEY_ID": "",
+				"BACKUP_MANIFEST_VERIFYING_PUBLIC_KEY_SPKI_BASE64": "",
+			},
+		},
+	},
+}

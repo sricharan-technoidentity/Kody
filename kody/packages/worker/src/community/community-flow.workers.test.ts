@@ -1,0 +1,888 @@
+import { env } from 'cloudflare:workers'
+import { expect, test } from 'vitest'
+import { createMcpCallerContext } from '#mcp/context.ts'
+import { communityForkCapability } from '#mcp/capabilities/community/fork.ts'
+import { communityGetCapability } from '#mcp/capabilities/community/get.ts'
+import { communityPublishCapability } from '#mcp/capabilities/community/publish.ts'
+import { communityRateCapability } from '#mcp/capabilities/community/rate.ts'
+import { communityReportCapability } from '#mcp/capabilities/community/report.ts'
+import { communitySearchCapability } from '#mcp/capabilities/community/search.ts'
+import { communitySetFeaturedCapability } from '#mcp/capabilities/community/set-featured.ts'
+import { communityUnpublishCapability } from '#mcp/capabilities/community/unpublish.ts'
+import { communityContentWarning } from '#mcp/capabilities/community/shared.ts'
+import { getPackageCapability } from '#mcp/capabilities/packages/get-package.ts'
+import { listPackagesCapability } from '#mcp/capabilities/packages/list-packages.ts'
+import { callerCanAccessCapability } from '#mcp/capabilities/access-control.ts'
+import { CommunityActionError } from '#worker/community/errors.ts'
+import {
+	banCommunityUser,
+	listFeaturedCommunityListingsWithAggregates,
+	listCommunityActivityForAdmin,
+	resolveCommunityReport,
+	setCommunityListingFeatured,
+} from '#worker/community/service.ts'
+import { installCommunityListing } from '#worker/community/install.ts'
+import { insertSavedPackage } from '#worker/package-registry/repo.ts'
+import { writePublishedSourceSnapshot } from '#worker/package-runtime/published-runtime-artifacts.ts'
+import { writeArtifactSourceSnapshot } from '#worker/repo/artifact-source-snapshot.ts'
+import { getArtifactsBinding } from '#worker/repo/artifacts.ts'
+import { insertEntitySource } from '#worker/repo/entity-sources.ts'
+import { type EntitySourceRow } from '#worker/repo/types.ts'
+import { createStableUserIdFromEmail } from '#worker/user-id.ts'
+import { createArtifactsMswHandlers } from '#worker/test-support/artifacts-msw-handlers.ts'
+import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
+import { type CommunityActivityDispatchQueueMessage } from './activity-dispatch-queue-producer.ts'
+import { createMswNodeServer } from '#worker/test-support/msw-node-server.ts'
+import { ensureCommunityFlowSchema } from './community-flow-test-schema.ts'
+
+const mockAccountId = 'cf_account_mock_123'
+const artifactsApiBaseUrl = 'https://artifacts-mock.test'
+const baseUrl = 'https://test.kody.dev'
+
+type TestUser = {
+	userId: string
+	email: string
+	username: string
+	displayName: string
+}
+
+async function runSql(sql: string, ...values: Array<unknown>) {
+	await env.APP_DB.prepare(sql)
+		.bind(...values)
+		.run()
+}
+
+async function ensureUsersTable() {
+	await ensureCommunityFlowSchema(env.APP_DB)
+}
+
+async function insertTestUser(input: {
+	email: string
+	username: string
+	accountType?: 'person' | 'platform'
+}): Promise<TestUser> {
+	await ensureUsersTable()
+	const userId = await createStableUserIdFromEmail(input.email)
+	await runSql(
+		`INSERT INTO users
+			(username, email, stable_user_id, password_hash, plan, account_type)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+		input.username,
+		input.email,
+		userId,
+		'test-password-hash',
+		'max',
+		input.accountType ?? 'person',
+	)
+	return {
+		userId,
+		email: input.email,
+		username: input.username,
+		displayName: input.username,
+	}
+}
+
+function createCapabilityContext(testEnv: Env, user: TestUser) {
+	return {
+		env: testEnv,
+		callerContext: createMcpCallerContext({
+			baseUrl,
+			user: {
+				userId: user.userId,
+				email: user.email,
+				username: user.username,
+				displayName: user.displayName,
+			},
+		}),
+	}
+}
+
+async function countSavedPackagesForUser(userId: string) {
+	const row = await env.APP_DB.prepare(
+		`SELECT COUNT(*) AS count
+			FROM saved_packages
+			WHERE user_id = ?`,
+	)
+		.bind(userId)
+		.first<{ count: number }>()
+	return row?.count ?? 0
+}
+
+async function seedOwnerPackage(input: {
+	testEnv: Env
+	owner: TestUser
+	packageId: string
+	sourceId: string
+	kodyId: string
+	publishedCommit: string
+	indexTs?: string
+}) {
+	const packageName = `@${input.owner.username}/${input.kodyId}`
+	const packageJson = `${JSON.stringify(
+		{
+			name: packageName,
+			version: '1.0.4',
+			license: 'MIT',
+			exports: { '.': './src/index.ts' },
+			kody: {
+				id: input.kodyId,
+				description: 'Community flow integration test package',
+			},
+		},
+		null,
+		'\t',
+	)}\n`
+	const readme =
+		'# Community Flow Package\n\n## Intent\n\nDemonstrate community publishing and forking.\n'
+	const indexTs =
+		input.indexTs ??
+		`import { value } from 'kody:@usera/shared-utils/index'\n\nexport default async function main() {\n\treturn { ok: true, value }\n}\n`
+	const files = {
+		'package.json': packageJson,
+		'README.md': readme,
+		'AGENTS.md':
+			'# Agents\n\nImport the community-flow export and smoke-test it.\n',
+		'src/index.ts': indexTs,
+	}
+	const now = new Date().toISOString()
+
+	await insertSavedPackage(env.APP_DB, {
+		id: input.packageId,
+		user_id: input.owner.userId,
+		name: packageName,
+		kody_id: input.kodyId,
+		description: 'Community flow integration test package',
+		tags_json: JSON.stringify(['community', 'integration']),
+		search_text: 'community flow integration websocket',
+		source_id: input.sourceId,
+		has_app: 0,
+		hidden: 0,
+		is_private: 0,
+		created_at: now,
+		updated_at: now,
+	})
+
+	const entitySource: EntitySourceRow = {
+		id: input.sourceId,
+		user_id: input.owner.userId,
+		entity_kind: 'package',
+		entity_id: input.packageId,
+		repo_id: `package-${input.packageId}`,
+		published_commit: input.publishedCommit,
+		indexed_commit: null,
+		manifest_path: 'package.json',
+		source_root: '/',
+		last_external_check_at: null,
+		external_check_until: null,
+		created_at: now,
+		updated_at: now,
+	}
+	await insertEntitySource(env.APP_DB, entitySource)
+	await writePublishedSourceSnapshot({
+		env: input.testEnv,
+		source: entitySource,
+		files,
+	})
+	const artifacts = getArtifactsBinding(input.testEnv)
+	await artifacts.create(entitySource.repo_id, { readOnly: false })
+	await writeArtifactSourceSnapshot({
+		env: input.testEnv,
+		repoId: entitySource.repo_id,
+		files,
+	})
+	return { entitySource, files }
+}
+
+test('public package flow works end-to-end through capability handlers', async () => {
+	silenceIncidentalRuntimeWarnings()
+	using _artifactsMock = createMswNodeServer(
+		createArtifactsMswHandlers({
+			accountId: mockAccountId,
+			apiBaseUrl: artifactsApiBaseUrl,
+		}),
+		{ onUnhandledRequest: 'bypass' },
+	)
+	const queuedActivity: Array<CommunityActivityDispatchQueueMessage> = []
+	const queuedListingPublished: Array<{ eventId: string; listingId: string }> =
+		[]
+	const testEnv = {
+		...env,
+		CLOUDFLARE_ACCOUNT_ID: mockAccountId,
+		CLOUDFLARE_API_TOKEN: 'artifacts-test-token',
+		CLOUDFLARE_API_BASE_URL: artifactsApiBaseUrl,
+		COMMUNITY_ACTIVITY_DISPATCH_QUEUE: {
+			async send(message: CommunityActivityDispatchQueueMessage) {
+				queuedActivity.push(message)
+			},
+		},
+		COMMUNITY_LISTING_PUBLISHED_DISPATCH_QUEUE: {
+			async send(message: { eventId: string; listingId: string }) {
+				queuedListingPublished.push(message)
+			},
+		},
+	} as Env
+
+	const unique = crypto.randomUUID()
+	const owner = await insertTestUser({
+		email: `owner-a-${unique}@example.com`,
+		username: 'usera',
+	})
+	const forker = await insertTestUser({
+		email: `forker-b-${unique}@example.com`,
+		username: 'userb',
+	})
+	const reporter = await insertTestUser({
+		email: `reporter-c-${unique}@example.com`,
+		username: 'userc',
+	})
+	const admin = await insertTestUser({
+		email: `admin-${unique}@example.com`,
+		username: 'admin',
+	})
+
+	const packageId = `package-${unique}`
+	const sourceId = `source-${unique}`
+	const kodyId = `community-flow-${unique}`
+	const publishedCommit = `commit-${unique}`
+
+	const seeded = await seedOwnerPackage({
+		testEnv,
+		owner,
+		packageId,
+		sourceId,
+		kodyId,
+		publishedCommit,
+	})
+
+	const ownerCtx = createCapabilityContext(testEnv, owner)
+	const forkerCtx = createCapabilityContext(testEnv, forker)
+	const reporterCtx = createCapabilityContext(testEnv, reporter)
+
+	const publishResult = await communityPublishCapability.handler(
+		{ package_id: packageId },
+		ownerCtx,
+	)
+	expect(publishResult).toMatchObject({
+		name: `@usera/${kodyId}`,
+		kody_id: kodyId,
+		license: '',
+		version: '1.0.4',
+		status: 'active',
+		pinned_commit: publishedCommit,
+		public_url: `${baseUrl}/@usera/${kodyId}`,
+	})
+	const listingId = publishResult.listing_id
+	expect(queuedListingPublished).toEqual([
+		expect.objectContaining({
+			listingId,
+			eventId: expect.any(String),
+		}),
+	])
+	queuedListingPublished.length = 0
+
+	const searchResult = await communitySearchCapability.handler(
+		{ query: 'community flow integration', limit: 10 },
+		forkerCtx,
+	)
+	expect(searchResult.outcome).toBe('matches')
+	expect(
+		searchResult.matches.some((match) => match.listing_id === listingId),
+	).toBe(true)
+	expect(
+		searchResult.matches.find((match) => match.listing_id === listingId)
+			?.relevance,
+	).toBeGreaterThanOrEqual(0.2)
+	expect(
+		searchResult.matches.find((match) => match.listing_id === listingId)
+			?.public_url,
+	).toBe(`${baseUrl}/@usera/${kodyId}`)
+
+	const getResult = await communityGetCapability.handler(
+		{ listing_id: listingId },
+		forkerCtx,
+	)
+	expect(getResult.readme_untrusted).toContain('## Intent')
+	expect(getResult.content_warning).toBe(communityContentWarning)
+	expect(getResult.owner_username).toBe('usera')
+	expect(getResult.owner_profile_url).toBe(`${baseUrl}/@usera`)
+	expect(getResult.public_url).toBe(`${baseUrl}/@usera/${kodyId}`)
+
+	await runSql(
+		`UPDATE users SET profile_visibility = 'private' WHERE stable_user_id = ?`,
+		owner.userId,
+	)
+	const privateOwnerGet = await communityGetCapability.handler(
+		{ listing_id: listingId },
+		forkerCtx,
+	)
+	expect(privateOwnerGet.owner_profile_url).toBeNull()
+	await runSql(
+		`UPDATE users SET profile_visibility = 'public' WHERE stable_user_id = ?`,
+		owner.userId,
+	)
+
+	const forkResult = await communityForkCapability.handler(
+		{ listing_id: listingId },
+		forkerCtx,
+	)
+	expect(forkResult.target_name).toBe(`@userb/${kodyId}`)
+	expect(forkResult.serverTiming).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				name: 'prepare',
+				durationMs: expect.any(Number),
+			}),
+			expect.objectContaining({
+				name: 'artifacts-fork',
+				durationMs: expect.any(Number),
+			}),
+			expect.objectContaining({
+				name: 'artifacts-repo-ready',
+				durationMs: expect.any(Number),
+			}),
+			expect.objectContaining({
+				name: 'fork-row',
+				durationMs: expect.any(Number),
+			}),
+		]),
+	)
+	for (const entry of forkResult.serverTiming ?? []) {
+		expect(entry.durationMs).toBeGreaterThanOrEqual(0)
+	}
+	expect(forkResult.cross_scope_references).toEqual(
+		expect.arrayContaining([
+			{ file: 'src/index.ts', specifier: 'kody:@usera/' },
+		]),
+	)
+	expect(await countSavedPackagesForUser(forker.userId)).toBe(0)
+	expect(queuedActivity).toEqual([
+		{
+			eventId: expect.any(String),
+			kind: 'fork',
+			activityId: forkResult.fork_id,
+		},
+	])
+
+	const forkedSource = await env.APP_DB.prepare(
+		`SELECT id, user_id, entity_id, published_commit
+				FROM entity_sources
+				WHERE id = ?`,
+	)
+		.bind(forkResult.source_id)
+		.first<{
+			id: string
+			user_id: string
+			entity_id: string
+			published_commit: string | null
+		}>()
+	expect(forkedSource).toMatchObject({
+		id: forkResult.source_id,
+		user_id: forker.userId,
+		entity_id: forkResult.package_id,
+	})
+	expect(forkedSource?.published_commit).toBeTruthy()
+
+	await expect(
+		communityRateCapability.handler(
+			{
+				listing_id: listingId,
+				stars: 4,
+				adaptation_effort: 2,
+			},
+			reporterCtx,
+		),
+	).rejects.toSatisfy(
+		(error: unknown) =>
+			error instanceof CommunityActionError &&
+			error.message === 'Fork this public package before rating it.',
+	)
+
+	await communityRateCapability.handler(
+		{
+			listing_id: listingId,
+			stars: 5,
+			adaptation_effort: 1,
+			note: 'Easy to adapt',
+		},
+		forkerCtx,
+	)
+
+	const ratedListing = await communityGetCapability.handler(
+		{ listing_id: listingId },
+		forkerCtx,
+	)
+	expect(ratedListing.rating_count).toBe(1)
+	expect(ratedListing.average_stars).toBe(5)
+	expect(ratedListing.fork_count).toBe(1)
+	expect(queuedActivity).toEqual([
+		{
+			eventId: expect.any(String),
+			kind: 'fork',
+			activityId: forkResult.fork_id,
+		},
+		{
+			eventId: expect.any(String),
+			kind: 'rating',
+			activityId: expect.any(String),
+		},
+	])
+	const activity = await listCommunityActivityForAdmin({
+		db: testEnv.APP_DB,
+		listingId,
+		pageSize: 10,
+	})
+	expect(activity).toMatchObject({
+		total: 2,
+		page: 1,
+		pageSize: 10,
+	})
+	expect(activity.items).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				kind: 'fork',
+				listingId,
+				listingName: `@usera/${kodyId}`,
+				listingKodyId: kodyId,
+				actingUsername: 'userb',
+			}),
+			expect.objectContaining({
+				kind: 'rating',
+				listingId,
+				actingUsername: 'userb',
+				stars: 5,
+				adaptationEffort: 1,
+			}),
+		]),
+	)
+
+	// Admin curation: featuring is editorial and does not require trust.
+	expect(ratedListing.trusted).toBe(false)
+	const featuredListing = await setCommunityListingFeatured({
+		env: testEnv,
+		listingId,
+		featured: true,
+	})
+	expect(featuredListing.featured).toBe(true)
+	expect(featuredListing.featuredAt).toBeTruthy()
+	// Re-featuring is idempotent: the original featured_at is preserved so
+	// retries never reshuffle the onboarding order.
+	const refeatured = await setCommunityListingFeatured({
+		env: testEnv,
+		listingId,
+		featured: true,
+	})
+	expect(refeatured.featuredAt).toBe(featuredListing.featuredAt)
+	const featuredRows = await listFeaturedCommunityListingsWithAggregates({
+		env: testEnv,
+		limit: 10,
+	})
+	expect(featuredRows.some((row) => row.id === listingId)).toBe(true)
+	const featuredGet = await communityGetCapability.handler(
+		{ listing_id: listingId },
+		forkerCtx,
+	)
+	expect(featuredGet.featured).toBe(true)
+
+	const republishedCommit = `commit-republished-${unique}`
+	await writePublishedSourceSnapshot({
+		env: testEnv,
+		source: { ...seeded.entitySource, published_commit: republishedCommit },
+		files: seeded.files,
+	})
+	await runSql(
+		`UPDATE entity_sources SET published_commit = ? WHERE id = ?`,
+		republishedCommit,
+		sourceId,
+	)
+	const republishResult = await communityPublishCapability.handler(
+		{ package_id: packageId },
+		ownerCtx,
+	)
+	expect(republishResult.pinned_commit).toBe(republishedCommit)
+	expect(queuedListingPublished).toEqual([])
+	const afterRepublish = await communityGetCapability.handler(
+		{ listing_id: listingId },
+		forkerCtx,
+	)
+	// Featured survives republish — it is editorial placement, not trust.
+	expect(afterRepublish.featured).toBe(true)
+	const featuredAfterRepublish =
+		await listFeaturedCommunityListingsWithAggregates({
+			env: testEnv,
+			limit: 10,
+		})
+	expect(featuredAfterRepublish.some((row) => row.id === listingId)).toBe(true)
+	const unfeatured = await setCommunityListingFeatured({
+		env: testEnv,
+		listingId,
+		featured: false,
+	})
+	expect(unfeatured.featured).toBe(false)
+	expect(unfeatured.featuredAt).toBeNull()
+
+	// Access control: only admins may reach the featured curation capability.
+	expect(
+		callerCanAccessCapability(
+			forkerCtx.callerContext,
+			communitySetFeaturedCapability,
+		),
+	).toBe(false)
+
+	const reportResult = await communityReportCapability.handler(
+		{
+			listing_id: listingId,
+			reason: 'Suspicious instructions in README',
+		},
+		reporterCtx,
+	)
+	expect(reportResult.status).toBe('open')
+
+	await resolveCommunityReport({
+		env: testEnv,
+		adminUserId: admin.userId,
+		reportId: reportResult.report_id,
+		action: 'delist',
+		resolutionNote: 'Confirmed policy violation',
+	})
+
+	await expect(
+		communityGetCapability.handler({ listing_id: listingId }, forkerCtx),
+	).rejects.toThrow('Catalog entry not found.')
+
+	await expect(
+		communityPublishCapability.handler({ package_id: packageId }, ownerCtx),
+	).rejects.toThrow('was delisted by an admin and cannot be re-published')
+
+	await expect(
+		setCommunityListingFeatured({
+			env: testEnv,
+			listingId,
+			featured: true,
+		}),
+	).rejects.toThrow('Delisted catalog entries cannot be featured.')
+
+	await banCommunityUser({
+		env: testEnv,
+		adminUserId: admin.userId,
+		userId: reporter.userId,
+		reason: 'Repeated abusive reports',
+	})
+
+	await expect(
+		communityReportCapability.handler(
+			{
+				listing_id: listingId,
+				reason: 'Trying again after ban',
+			},
+			reporterCtx,
+		),
+	).rejects.toThrow('banned from community participation')
+}, 120_000)
+
+test('featured listing survives republish without trust', async () => {
+	silenceIncidentalRuntimeWarnings()
+	using _artifactsMock = createMswNodeServer(
+		createArtifactsMswHandlers({
+			accountId: mockAccountId,
+			apiBaseUrl: artifactsApiBaseUrl,
+		}),
+		{ onUnhandledRequest: 'bypass' },
+	)
+	const testEnv = {
+		...env,
+		CLOUDFLARE_ACCOUNT_ID: mockAccountId,
+		CLOUDFLARE_API_TOKEN: 'artifacts-test-token',
+		CLOUDFLARE_API_BASE_URL: artifactsApiBaseUrl,
+		COMMUNITY_ACTIVITY_DISPATCH_QUEUE: {
+			async send() {},
+		},
+		COMMUNITY_LISTING_PUBLISHED_DISPATCH_QUEUE: {
+			async send() {},
+		},
+	} as Env
+	const unique = crypto.randomUUID()
+	const owner = await insertTestUser({
+		email: `platform-owner-${unique}@example.com`,
+		username: `kody-${unique.slice(0, 8)}`,
+		accountType: 'platform',
+	})
+	const packageId = `platform-package-${unique}`
+	const sourceId = `platform-source-${unique}`
+	const kodyId = `platform-listing-${unique}`
+	const publishedCommit = `platform-commit-${unique}`
+	const seeded = await seedOwnerPackage({
+		testEnv,
+		owner,
+		packageId,
+		sourceId,
+		kodyId,
+		publishedCommit,
+	})
+	const ownerCtx = createCapabilityContext(testEnv, owner)
+
+	const published = await communityPublishCapability.handler(
+		{ package_id: packageId },
+		ownerCtx,
+	)
+	const publishedDetail = await communityGetCapability.handler(
+		{ listing_id: published.listing_id },
+		ownerCtx,
+	)
+	expect(publishedDetail).toMatchObject({
+		pinned_commit: publishedCommit,
+		featured: false,
+	})
+
+	await setCommunityListingFeatured({
+		env: testEnv,
+		listingId: published.listing_id,
+		featured: true,
+	})
+	const republishedCommit = `platform-republished-${unique}`
+	await writePublishedSourceSnapshot({
+		env: testEnv,
+		source: { ...seeded.entitySource, published_commit: republishedCommit },
+		files: seeded.files,
+	})
+	await runSql(
+		`UPDATE entity_sources SET published_commit = ? WHERE id = ?`,
+		republishedCommit,
+		sourceId,
+	)
+
+	await communityPublishCapability.handler({ package_id: packageId }, ownerCtx)
+
+	const republishedDetail = await communityGetCapability.handler(
+		{ listing_id: published.listing_id },
+		ownerCtx,
+	)
+	expect(republishedDetail).toMatchObject({
+		pinned_commit: republishedCommit,
+		featured: true,
+	})
+	const featuredListings = await listFeaturedCommunityListingsWithAggregates({
+		env: testEnv,
+		limit: 10,
+	})
+	expect(
+		featuredListings.some((listing) => listing.id === published.listing_id),
+	).toBe(true)
+}, 120_000)
+
+test('one-click install publishes clean listings and keeps unresolvable forks inert', async () => {
+	// Publish checks and artifact rebuilds run the real worker bundler, which
+	// warns that it is experimental.
+	silenceIncidentalRuntimeWarnings()
+	using _artifactsMock = createMswNodeServer(
+		createArtifactsMswHandlers({
+			accountId: mockAccountId,
+			apiBaseUrl: artifactsApiBaseUrl,
+		}),
+		{ onUnhandledRequest: 'bypass' },
+	)
+	const testEnv = {
+		...env,
+		CLOUDFLARE_ACCOUNT_ID: mockAccountId,
+		CLOUDFLARE_API_TOKEN: 'artifacts-test-token',
+		CLOUDFLARE_API_BASE_URL: artifactsApiBaseUrl,
+		COMMUNITY_ACTIVITY_DISPATCH_QUEUE: {
+			async send(_message: CommunityActivityDispatchQueueMessage) {
+				return undefined
+			},
+		},
+		COMMUNITY_LISTING_PUBLISHED_DISPATCH_QUEUE: {
+			async send(_message: { eventId: string; listingId: string }) {
+				return undefined
+			},
+		},
+	} as Env
+
+	const unique = crypto.randomUUID()
+	const owner = await insertTestUser({
+		email: `install-owner-${unique}@example.com`,
+		username: 'installowner',
+	})
+	const installer = await insertTestUser({
+		email: `installer-${unique}@example.com`,
+		username: 'installer',
+	})
+	const ownerCtx = createCapabilityContext(testEnv, owner)
+
+	// A listing with no cross-scope imports installs end-to-end: the fork
+	// passes publish checks and immediately becomes a live saved package.
+	const cleanKodyId = `install-clean-${unique}`
+	await seedOwnerPackage({
+		testEnv,
+		owner,
+		packageId: `package-clean-${unique}`,
+		sourceId: `source-clean-${unique}`,
+		kodyId: cleanKodyId,
+		publishedCommit: `commit-clean-${unique}`,
+		indexTs:
+			'export default async function main() {\n\treturn { ok: true }\n}\n',
+	})
+	const cleanListing = await communityPublishCapability.handler(
+		{ package_id: `package-clean-${unique}` },
+		ownerCtx,
+	)
+
+	// A stale acknowledgement (from before a hypothetical republish) is
+	// rejected before anything is forked.
+	await expect(
+		installCommunityListing({
+			env: testEnv,
+			baseUrl,
+			userId: installer.userId,
+			userEmail: installer.email,
+			expectedPackageScope: installer.username,
+			listingId: cleanListing.listing_id,
+			expectedPinnedCommit: 'stale-commit-from-before-republish',
+		}),
+	).rejects.toThrow('This listing changed after you confirmed')
+
+	const installed = await installCommunityListing({
+		env: testEnv,
+		baseUrl,
+		userId: installer.userId,
+		userEmail: installer.email,
+		expectedPackageScope: installer.username,
+		listingId: cleanListing.listing_id,
+		expectedPinnedCommit: cleanListing.pinned_commit,
+	})
+	expect(installed.status).toBe('installed')
+	expect(installed.targetName).toBe(`@installer/${cleanKodyId}`)
+	expect(await countSavedPackagesForUser(installer.userId)).toBe(1)
+	const savedRow = await env.APP_DB.prepare(
+		`SELECT name, kody_id, source_id
+			FROM saved_packages
+			WHERE user_id = ?`,
+	)
+		.bind(installer.userId)
+		.first<{ name: string; kody_id: string; source_id: string }>()
+	expect(savedRow).toEqual({
+		name: `@installer/${cleanKodyId}`,
+		kody_id: cleanKodyId,
+		source_id: installed.sourceId,
+	})
+	const installedPackage = await getPackageCapability.handler(
+		{ package_id: installed.packageId },
+		createCapabilityContext(testEnv, installer),
+	)
+	expect(installedPackage).toMatchObject({
+		source_listing_id: cleanListing.listing_id,
+		listing_current: true,
+		listing_kody_id: cleanKodyId,
+	})
+	const installerPackages = await listPackagesCapability.handler(
+		{},
+		createCapabilityContext(testEnv, installer),
+	)
+	expect(installerPackages.packages).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				package_id: installed.packageId,
+				source_listing_id: cleanListing.listing_id,
+				listing_current: true,
+				listing_kody_id: cleanKodyId,
+			}),
+		]),
+	)
+
+	// A listing whose code imports another user's scope cannot auto-publish:
+	// the fork stays inert with the failing checks reported for follow-up.
+	const messyKodyId = `install-messy-${unique}`
+	await seedOwnerPackage({
+		testEnv,
+		owner,
+		packageId: `package-messy-${unique}`,
+		sourceId: `source-messy-${unique}`,
+		kodyId: messyKodyId,
+		publishedCommit: `commit-messy-${unique}`,
+	})
+	const messyListing = await communityPublishCapability.handler(
+		{ package_id: `package-messy-${unique}` },
+		ownerCtx,
+	)
+
+	const adaptationRequired = await installCommunityListing({
+		env: testEnv,
+		baseUrl,
+		userId: installer.userId,
+		userEmail: installer.email,
+		expectedPackageScope: installer.username,
+		listingId: messyListing.listing_id,
+		expectedPinnedCommit: messyListing.pinned_commit,
+	})
+	expect(adaptationRequired.status).toBe('adaptation_required')
+	if (adaptationRequired.status !== 'adaptation_required') return
+	expect(adaptationRequired.crossScopeReferences).toEqual(
+		expect.arrayContaining([
+			{ file: 'src/index.ts', specifier: 'kody:@usera/' },
+		]),
+	)
+	expect(adaptationRequired.failedChecks.map((check) => check.kind)).toContain(
+		'bundle',
+	)
+	// Only the clean install produced a live package; the messy fork is inert.
+	expect(await countSavedPackagesForUser(installer.userId)).toBe(1)
+	const inertSource = await env.APP_DB.prepare(
+		`SELECT id, user_id FROM entity_sources WHERE id = ?`,
+	)
+		.bind(adaptationRequired.sourceId)
+		.first<{ id: string; user_id: string }>()
+	expect(inertSource).toEqual({
+		id: adaptationRequired.sourceId,
+		user_id: installer.userId,
+	})
+
+	await communityUnpublishCapability.handler(
+		{
+			listing_id: cleanListing.listing_id,
+			confirm_name: cleanKodyId,
+		},
+		ownerCtx,
+	)
+	const packageAfterUnpublish = await getPackageCapability.handler(
+		{ package_id: installed.packageId },
+		createCapabilityContext(testEnv, installer),
+	)
+	expect(packageAfterUnpublish).toMatchObject({
+		source_listing_id: cleanListing.listing_id,
+		listing_current: false,
+		listing_kody_id: cleanKodyId,
+	})
+
+	const republishedListing = await communityPublishCapability.handler(
+		{ package_id: `package-clean-${unique}` },
+		ownerCtx,
+	)
+	expect(republishedListing.listing_id).not.toBe(cleanListing.listing_id)
+
+	const packageAfterRepublish = await getPackageCapability.handler(
+		{ package_id: installed.packageId },
+		createCapabilityContext(testEnv, installer),
+	)
+	expect(packageAfterRepublish).toMatchObject({
+		source_listing_id: republishedListing.listing_id,
+		listing_current: true,
+		listing_kody_id: cleanKodyId,
+	})
+	await communityRateCapability.handler(
+		{
+			listing_id: republishedListing.listing_id,
+			stars: 5,
+			adaptation_effort: 1,
+			note: 'Still useful after republishing',
+		},
+		createCapabilityContext(testEnv, installer),
+	)
+	const republishedDetail = await communityGetCapability.handler(
+		{ listing_id: republishedListing.listing_id },
+		createCapabilityContext(testEnv, installer),
+	)
+	expect(republishedDetail).toMatchObject({
+		rating_count: 1,
+		average_stars: 5,
+		fork_count: 1,
+	})
+}, 120_000)

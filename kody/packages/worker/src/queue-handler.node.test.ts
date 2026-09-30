@@ -1,0 +1,138 @@
+import { expect, test, vi } from 'vitest'
+import { packageEventsDispatchQueueName } from '#worker/package-events/dispatch-queue-names.ts'
+import { consoleError } from '#worker/test-support/console-spies.ts'
+import { webhookDispatchQueueName } from '#worker/webhooks/dispatch-queue-names.ts'
+
+const mocks = vi.hoisted(() => ({
+	handleCommunityActivityDispatchQueue: vi.fn(),
+	handleCommunityListingPublishedDispatchQueue: vi.fn(),
+	handleEmailDeliveryQueue: vi.fn(),
+	handleArtifactsRepoEventsQueue: vi.fn(),
+	handlePackageEventsDispatchQueue: vi.fn(),
+	handlePlatformFeedbackDispatchQueue: vi.fn(),
+	handleWebhookDispatchQueue: vi.fn(),
+}))
+
+vi.mock('#worker/community/activity-dispatch-queue.ts', () => ({
+	handleCommunityActivityDispatchQueue:
+		mocks.handleCommunityActivityDispatchQueue,
+}))
+
+vi.mock('#worker/community/activity-dispatch-queue-names.ts', () => ({
+	communityActivityDispatchQueueName: 'kody-community-activity-dispatch',
+}))
+
+vi.mock('#worker/community/listing-published-dispatch-queue.ts', () => ({
+	handleCommunityListingPublishedDispatchQueue:
+		mocks.handleCommunityListingPublishedDispatchQueue,
+}))
+
+vi.mock('#worker/community/listing-published-dispatch-queue-names.ts', () => ({
+	communityListingPublishedDispatchQueueName:
+		'kody-community-listing-published-dispatch',
+}))
+
+vi.mock('#worker/email/delivery-queue.ts', () => ({
+	emailDeliveryQueueName: 'kody-email-delivery',
+	handleEmailDeliveryQueue: mocks.handleEmailDeliveryQueue,
+}))
+
+vi.mock('#worker/repo/artifacts-event-queue.ts', () => ({
+	artifactsRepoEventsQueueName: 'kody-artifacts-repo-events',
+	handleArtifactsRepoEventsQueue: mocks.handleArtifactsRepoEventsQueue,
+}))
+
+vi.mock('#worker/package-events/dispatch-queue.ts', () => ({
+	handlePackageEventsDispatchQueue: mocks.handlePackageEventsDispatchQueue,
+}))
+
+vi.mock('#worker/platform-feedback/dispatch-queue.ts', () => ({
+	handlePlatformFeedbackDispatchQueue:
+		mocks.handlePlatformFeedbackDispatchQueue,
+}))
+
+vi.mock('#worker/webhooks/dispatch-queue.ts', () => ({
+	handleWebhookDispatchQueue: mocks.handleWebhookDispatchQueue,
+	webhookDispatchQueueName: 'kody-webhook-dispatch',
+}))
+
+const { handleQueueBatch } = await import('./queue-handler.ts')
+
+function createBatch(queue: string) {
+	return {
+		queue,
+		messages: [],
+		ackAll: vi.fn(),
+		retryAll: vi.fn(),
+	} as unknown as MessageBatch<unknown>
+}
+
+test('worker queue routing isolates known queues and retries unknown queues', async () => {
+	consoleError.mockImplementation(() => {})
+	const env = {} as Env
+	const ctx = {} as ExecutionContext
+	const emailBatch = createBatch('kody-email-delivery')
+	const artifactsBatch = createBatch('kody-artifacts-repo-events')
+	const feedbackBatch = createBatch('kody-platform-feedback-dispatch')
+	const communityActivityBatch = createBatch('kody-community-activity-dispatch')
+	const communityListingPublishedBatch = createBatch(
+		'kody-community-listing-published-dispatch',
+	)
+	const packageEventsBatch = createBatch(packageEventsDispatchQueueName)
+	const webhookBatch = createBatch(webhookDispatchQueueName)
+	const unknownBatch = createBatch('unexpected-queue')
+
+	await handleQueueBatch(emailBatch, env, ctx)
+	await handleQueueBatch(artifactsBatch, env, ctx)
+	await handleQueueBatch(feedbackBatch, env, ctx)
+	await handleQueueBatch(communityActivityBatch, env, ctx)
+	await handleQueueBatch(communityListingPublishedBatch, env, ctx)
+	await handleQueueBatch(packageEventsBatch, env, ctx)
+	await handleQueueBatch(webhookBatch, env, ctx)
+	await handleQueueBatch(unknownBatch, env, ctx)
+
+	expect(mocks.handleEmailDeliveryQueue).toHaveBeenCalledTimes(1)
+	expect(mocks.handleEmailDeliveryQueue).toHaveBeenCalledWith(
+		emailBatch,
+		env,
+		ctx,
+	)
+	expect(mocks.handleArtifactsRepoEventsQueue).toHaveBeenCalledWith(
+		artifactsBatch,
+		env,
+		ctx,
+	)
+	expect(mocks.handlePlatformFeedbackDispatchQueue).toHaveBeenCalledTimes(1)
+	expect(mocks.handlePlatformFeedbackDispatchQueue).toHaveBeenCalledWith(
+		feedbackBatch,
+		env,
+		ctx,
+	)
+	expect(mocks.handleCommunityActivityDispatchQueue).toHaveBeenCalledTimes(1)
+	expect(mocks.handleCommunityActivityDispatchQueue).toHaveBeenCalledWith(
+		communityActivityBatch,
+		env,
+		ctx,
+	)
+	expect(
+		mocks.handleCommunityListingPublishedDispatchQueue,
+	).toHaveBeenCalledTimes(1)
+	expect(
+		mocks.handleCommunityListingPublishedDispatchQueue,
+	).toHaveBeenCalledWith(communityListingPublishedBatch, env, ctx)
+	expect(mocks.handlePackageEventsDispatchQueue).toHaveBeenCalledTimes(1)
+	expect(mocks.handlePackageEventsDispatchQueue).toHaveBeenCalledWith(
+		packageEventsBatch,
+		env,
+		ctx,
+	)
+	expect(mocks.handleWebhookDispatchQueue).toHaveBeenCalledWith(
+		webhookBatch,
+		env,
+	)
+	expect(unknownBatch.retryAll).toHaveBeenCalledWith({ delaySeconds: 30 })
+	expect(consoleError).toHaveBeenCalledTimes(1)
+	expect(consoleError).toHaveBeenCalledWith('unknown-worker-queue', {
+		queue: 'unexpected-queue',
+	})
+})

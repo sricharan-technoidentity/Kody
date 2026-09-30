@@ -1,0 +1,43 @@
+{
+	"extends": "@epic-web/config/typescript",
+	"compilerOptions": {
+		"composite": true,
+		"allowImportingTsExtensions": true,
+		"target": "ES2023",
+		"lib": ["ES2023", "ESNext.Disposable"],
+		// Force MCP SDK to resolve to the hoisted install to avoid duplicate
+		// private type conflicts when multiple copies are present.
+		"paths": {
+			"@modelcontextprotocol/sdk": ["./node_modules/@modelcontextprotocol/sdk"],
+			"@modelcontextprotocol/sdk/*": [
+				"./node_modules/@modelcontextprotocol/sdk/*"
+			]
+		},
+		"module": "ESNext",
+		"types": ["node"],
+		"moduleResolution": "bundler",
+		"verbatimModuleSyntax": true,
+		"moduleDetection": "force",
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"erasableSyntaxOnly": true,
+		"noFallthroughCasesInSwitch": true,
+		"noUncheckedSideEffectImports": true,
+		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.tools.tsbuildinfo"
+	},
+	"include": [
+		"./playwright.config.ts",
+		"./wrangler-env.ts",
+		"./cli.ts",
+		"./packages/worker/src/mcp/execute-modules/**/*.ts",
+		"./packages/worker/src/mcp/mcp-server.mcp-e2e.test.ts",
+		"./packages/worker/src/mcp/test-process.ts",
+		"./packages/worker/src/test-support/msw-node-server.ts",
+		"./packages/worker/src/test-support/cloudflare-mock-server.ts",
+		"./tools/**/*.ts",
+		"./packages/shared/src/**/*.ts",
+		// Worker identity modules imported by the seeding tools.
+		"./packages/worker/src/identity/username.ts",
+		"./packages/worker/src/identity/reserved-usernames.ts"
+	]
+}

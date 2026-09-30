@@ -1,0 +1,688 @@
+import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
+import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
+import { parseTagsJson } from '@kody-internal/shared/tags-json.ts'
+import * as Sentry from '@sentry/cloudflare'
+import { invalidateCommunityPublicCache } from '#app/data-cache.ts'
+import {
+	deletePackageKodyIdRedirects,
+	releasePackageKodyIdRedirect,
+	retirePackageKodyId,
+} from '#worker/community/package-url.ts'
+import {
+	deleteCommunityForksForPackage,
+	getCommunityListingByOwnerAndPackage,
+} from '#worker/community/repo.ts'
+import { unpublishCommunityListing } from '#worker/community/service.ts'
+import { buildSavedPackageEmbedText } from './embed.ts'
+import { buildPackageSearchProjection } from './manifest.ts'
+import {
+	deleteSavedPackage,
+	getSavedPackageById,
+	insertSavedPackage,
+	updateSavedPackage,
+} from './repo.ts'
+import {
+	loadPackageManifestBySourceId,
+	loadPackageSourceBySourceId,
+	loadPackageSourceFromFiles,
+} from './source.ts'
+import {
+	type AuthoredPackageJson,
+	type SavedPackageRecord,
+	type SavedPackageRow,
+} from './types.ts'
+import { deleteSavedPackageVector } from './vectorize.ts'
+import { scheduleSavedPackageSearchIndexUpsert } from './search-index-debt.ts'
+import { deletePackageInvocationTokensForPackage } from '#worker/package-invocations/repo.ts'
+import { jobsData } from '#worker/jobs/jobs-data.ts'
+import { scheduleKitSubscriberSync } from '#worker/kit/subscriber-sync.ts'
+import { syncJobManagerAlarm } from '#worker/jobs/manager-client.ts'
+import { rebuildPublishedPackageArtifacts } from '#worker/package-runtime/published-bundle-artifacts.ts'
+import {
+	refreshPackageRetrieverManifestCache,
+	removePackageRetrieverManifestCacheEntries,
+} from '#worker/package-retrievers/manifest-cache.ts'
+import { invalidateInvokeContractFreshness } from '#worker/package-invocations/invoke-contract-cache.ts'
+import { cleanupArtifactReposForPackage } from '#worker/repo/artifact-repo-cleanup.ts'
+import { deleteEntitySource } from '#worker/repo/entity-sources.ts'
+import {
+	assertWithinEntitlement,
+	assertWithinStorageBytesEntitlement,
+	estimateEntitlementStorageEntryByteDelta,
+} from '#worker/entitlements/service.ts'
+import {
+	deleteAllPackageScopedSecrets,
+	removeAllSecretApprovalsForPackage,
+	deleteAllAppScopedValues,
+} from '#worker/package-config-cleanup.ts'
+import { listUserStorageBucketIds } from '#worker/storage-buckets/service.ts'
+import {
+	buildPackageStorageId,
+	isPackageOwnedStorageId,
+} from '#worker/storage-ids.ts'
+import { storageRunnerRpc } from '#worker/storage-runner.ts'
+
+function logPackageRetrieverProjectionError(input: {
+	action: 'refresh' | 'delete'
+	packageId: string
+	error: unknown
+}) {
+	console.error(
+		JSON.stringify({
+			message: 'package retriever projection update failed',
+			action: input.action,
+			packageId: input.packageId,
+		}),
+	)
+	Sentry.captureException(input.error, {
+		tags: {
+			scope: 'package-retriever-projection',
+			action: input.action,
+		},
+		extra: {
+			packageId: input.packageId,
+		},
+	})
+}
+
+function serializeTags(tags: Array<string>) {
+	return JSON.stringify(tags)
+}
+
+/**
+ * Inventory prefix matching is UUID-gated on purpose. `packageSave` accepts
+ * arbitrary non-empty package ids, so a raw prefix like `{packageId}:` can
+ * collide with reserved storage namespaces (`job:`, `exec:`, …) or carry LIKE
+ * metacharacters (`%`, `_`; `encodeURIComponent` can also introduce `%`). A
+ * UUID cannot contain `:` or those metacharacters and cannot equal the reserved
+ * namespace literals, which makes `{uuid}:…` and
+ * `job:package-job:{uuid}:…` unambiguous. Non-UUID packages still clear the
+ * deterministic package bucket and raw id; an orphaned facet bucket for a
+ * non-UUID id stays inventoriable for account deletion.
+ */
+export function filterPackageOwnedStorageIdsFromInventory(input: {
+	packageId: string
+	storageIds: ReadonlyArray<string>
+}): Array<string> {
+	const matched = new Set<string>()
+	for (const storageId of input.storageIds) {
+		if (isPackageOwnedStorageId({ packageId: input.packageId, storageId })) {
+			matched.add(storageId)
+		}
+	}
+	return [...matched]
+}
+
+async function listPackageOwnedStorageIdsFromInventory(input: {
+	env: Env
+	userId: string
+	packageId: string
+}): Promise<Array<string>> {
+	const storageIds = await listUserStorageBucketIds({
+		env: input.env,
+		userId: input.userId,
+	})
+	return filterPackageOwnedStorageIdsFromInventory({
+		packageId: input.packageId,
+		storageIds,
+	})
+}
+
+export async function clearPackageOwnedStorageBucket(input: {
+	env: Env
+	userId: string
+	packageId: string
+	storageId: string
+}): Promise<boolean> {
+	let storageCleared = false
+	try {
+		await storageRunnerRpc({
+			env: input.env,
+			userId: input.userId,
+			storageId: input.storageId,
+		}).clearStorage()
+		storageCleared = true
+	} catch (error) {
+		console.warn(
+			JSON.stringify({
+				message: 'package storage clear failed',
+				userId: input.userId,
+				packageId: input.packageId,
+				storageId: input.storageId,
+				error: getErrorMessage(error),
+			}),
+		)
+	}
+	if (!storageCleared) return false
+	try {
+		await input.env.APP_DB.prepare(
+			`DELETE FROM user_storage_buckets WHERE user_id = ? AND storage_id = ?`,
+		)
+			.bind(input.userId, input.storageId)
+			.run()
+		return true
+	} catch (error) {
+		console.warn(
+			JSON.stringify({
+				message: 'package storage bucket unregister failed',
+				userId: input.userId,
+				packageId: input.packageId,
+				storageId: input.storageId,
+				error: getErrorMessage(error),
+			}),
+		)
+		return false
+	}
+}
+
+function toSavedPackageInsertRow(input: {
+	packageId: string
+	userId: string
+	sourceId: string
+	manifest: AuthoredPackageJson
+}): Omit<SavedPackageRow, 'created_at' | 'updated_at' | 'locked_at'> {
+	const projection = buildPackageSearchProjection(input.manifest)
+	return {
+		id: input.packageId,
+		user_id: input.userId,
+		name: projection.name,
+		kody_id: projection.kodyId,
+		description: projection.description,
+		tags_json: serializeTags(projection.tags),
+		search_text: projection.searchText,
+		source_id: input.sourceId,
+		has_app: projection.hasApp ? 1 : 0,
+		hidden: 0,
+		is_private: 1,
+	}
+}
+
+export async function refreshSavedPackageProjection(input: {
+	env: Env
+	baseUrl: string
+	userId: string
+	userEmail?: string | null
+	packageId: string
+	sourceId: string
+	rebuildArtifacts?: boolean
+	/**
+	 * When the caller already holds the published file set (one-click install
+	 * just forked these into the source), skip the KV/Artifacts reload.
+	 */
+	sourceFiles?: Record<string, string>
+	waitUntil?: (promise: Promise<unknown>) => void
+}) {
+	return await withAccountWriteLease({
+		db: input.env.APP_DB,
+		stableUserId: input.userId,
+		env: input.env,
+		async write() {
+			const shouldRebuildArtifacts = input.rebuildArtifacts ?? true
+			const loaded = input.sourceFiles
+				? await loadPackageSourceFromFiles({
+						env: input.env,
+						userId: input.userId,
+						sourceId: input.sourceId,
+						files: input.sourceFiles,
+					})
+				: shouldRebuildArtifacts
+					? await loadPackageSourceBySourceId({
+							env: input.env,
+							baseUrl: input.baseUrl,
+							userId: input.userId,
+							sourceId: input.sourceId,
+						})
+					: await loadPackageManifestBySourceId({
+							env: input.env,
+							baseUrl: input.baseUrl,
+							userId: input.userId,
+							sourceId: input.sourceId,
+						})
+			const row = toSavedPackageInsertRow({
+				packageId: input.packageId,
+				userId: input.userId,
+				sourceId: input.sourceId,
+				manifest: loaded.manifest,
+			})
+			const existing = await getSavedPackageById(input.env.APP_DB, {
+				userId: input.userId,
+				packageId: input.packageId,
+			})
+			await assertWithinStorageBytesEntitlement({
+				db: input.env.APP_DB,
+				env: input.env,
+				userId: input.userId,
+				email: input.userEmail,
+				requested: estimateEntitlementStorageEntryByteDelta({
+					next: {
+						key: row.id,
+						value: {
+							name: row.name,
+							kodyId: row.kody_id,
+							description: row.description,
+							tagsJson: row.tags_json,
+							searchText: row.search_text,
+							sourceId: row.source_id,
+						},
+					},
+					existing: existing
+						? {
+								key: existing.id,
+								value: {
+									name: existing.name,
+									kodyId: existing.kodyId,
+									description: existing.description,
+									tagsJson: JSON.stringify(existing.tags),
+									searchText: existing.searchText,
+									sourceId: existing.sourceId,
+								},
+							}
+						: null,
+				}),
+			})
+			if (existing) {
+				await updateSavedPackage(input.env.APP_DB, {
+					userId: input.userId,
+					packageId: input.packageId,
+					name: row.name,
+					kodyId: row.kody_id,
+					description: row.description,
+					tagsJson: row.tags_json,
+					searchText: row.search_text,
+					sourceId: row.source_id,
+					hasApp: row.has_app === 1,
+				})
+				// `kody.id` is the second half of the package's canonical URL, so
+				// editing it in the manifest moves that URL. Retire the old id here
+				// rather than in the community layer: the id belongs to the package
+				// whether or not it is published.
+				await retirePackageKodyId({
+					db: input.env.APP_DB,
+					userId: input.userId,
+					packageId: input.packageId,
+					oldKodyId: existing.kodyId,
+					newKodyId: row.kody_id,
+				})
+			} else {
+				await assertWithinEntitlement({
+					db: input.env.APP_DB,
+					userId: input.userId,
+					email: input.userEmail,
+					resource: 'saved_packages',
+				})
+				let isFirstSavedPackage = false
+				try {
+					const beforePackage = await input.env.APP_DB.prepare(
+						`SELECT first_saved_package_at FROM users WHERE stable_user_id = ?`,
+					)
+						.bind(input.userId)
+						.first<{ first_saved_package_at: string | null }>()
+					isFirstSavedPackage = !beforePackage?.first_saved_package_at
+				} catch (error) {
+					console.warn('kit-first-package-pre-read-failed', error)
+					isFirstSavedPackage = true
+				}
+				await insertSavedPackage(input.env.APP_DB, row, input.env)
+				if (isFirstSavedPackage) {
+					scheduleKitSubscriberSync({
+						env: input.env,
+						stableUserId: input.userId,
+						email: input.userEmail,
+					})
+				}
+				// A brand new package claims its id outright, so an earlier package's
+				// retirement row must not keep forwarding it elsewhere.
+				await releasePackageKodyIdRedirect({
+					db: input.env.APP_DB,
+					userId: input.userId,
+					kodyId: row.kody_id,
+				})
+			}
+			const refreshedAt = new Date().toISOString()
+			const savedPackage = {
+				id: input.packageId,
+				userId: input.userId,
+				name: row.name,
+				kodyId: row.kody_id,
+				description: row.description,
+				tags: parseTagsJson(row.tags_json),
+				searchText: row.search_text ?? null,
+				sourceId: row.source_id,
+				hasApp: row.has_app === 1,
+				// Preserve visibility across projection refresh / re-save.
+				hidden: existing?.hidden ?? false,
+				// Visibility is a repo setting, not a manifest field.
+				isPrivate: existing?.isPrivate ?? true,
+				// Website lock is not a projection field; keep the stored timestamp.
+				lockedAt: existing?.lockedAt ?? null,
+				createdAt: existing?.createdAt ?? refreshedAt,
+				updatedAt: refreshedAt,
+			} satisfies SavedPackageRecord
+			const loadedFiles: Record<string, string> | null = shouldRebuildArtifacts
+				? (input.sourceFiles ??
+					('files' in loaded ? (loaded.files as Record<string, string>) : null))
+				: null
+			if (loadedFiles) {
+				// Artifacts stay on the hot path: invoke needs them immediately
+				// and there is no safe cold-build substitute for a fresh publish.
+				await rebuildPublishedPackageArtifacts({
+					env: input.env,
+					userId: input.userId,
+					source: loaded.source,
+					savedPackage,
+					manifest: loaded.manifest,
+					buildAppBundle: async ({ entryPoint }) => {
+						const { buildKodyAppBundle } =
+							await import('#worker/package-runtime/module-graph.ts')
+						return await buildKodyAppBundle({
+							env: input.env,
+							baseUrl: input.baseUrl,
+							userId: input.userId,
+							sourceFiles: loadedFiles,
+							entryPoint,
+							rootPackageId: savedPackage.id,
+							cacheKey: null,
+						})
+					},
+					buildAppClientBundle: async ({ entryPoint }) => {
+						const { buildKodyAppClientBundle } =
+							await import('#worker/package-runtime/module-graph.ts')
+						return await buildKodyAppClientBundle({
+							sourceFiles: loadedFiles,
+							entryPoint,
+						})
+					},
+					buildModuleBundle: async ({ entryPoint }) => {
+						const { buildKodyModuleBundle } =
+							await import('#worker/package-runtime/module-graph.ts')
+						return await buildKodyModuleBundle({
+							env: input.env,
+							baseUrl: input.baseUrl,
+							userId: input.userId,
+							sourceFiles: loadedFiles,
+							entryPoint,
+							rootPackageId: savedPackage.id,
+						})
+					},
+					buildImportableModuleBundle: async ({ entryPoint }) => {
+						const { buildKodyImportableModuleBundle } =
+							await import('#worker/package-runtime/module-graph.ts')
+						return await buildKodyImportableModuleBundle({
+							env: input.env,
+							baseUrl: input.baseUrl,
+							userId: input.userId,
+							sourceFiles: loadedFiles,
+							entryPoint,
+							rootPackageId: savedPackage.id,
+						})
+					},
+				})
+			}
+			// Vector upsert is searchable but not needed for the publish
+			// response. Defer via waitUntil with durable debt + Sentry so a
+			// failure cannot leave search silently stale.
+			await scheduleSavedPackageSearchIndexUpsert({
+				env: input.env,
+				packageId: input.packageId,
+				userId: input.userId,
+				embedText: buildSavedPackageEmbedText(loaded.manifest),
+				waitUntil: input.waitUntil,
+			})
+			const retrieverCacheTask = refreshPackageRetrieverManifestCache({
+				env: input.env,
+				userId: input.userId,
+				source: loaded.source,
+				savedPackage,
+				manifest: loaded.manifest,
+			}).catch((error: unknown) => {
+				logPackageRetrieverProjectionError({
+					action: 'refresh',
+					packageId: input.packageId,
+					error,
+				})
+			})
+			if (input.waitUntil) {
+				input.waitUntil(retrieverCacheTask)
+			} else {
+				await retrieverCacheTask
+			}
+			const { syncPackageJobsForPackage } =
+				await import('#worker/jobs/service.ts')
+			const schedulerStateChanged = await syncPackageJobsForPackage({
+				env: input.env,
+				userId: input.userId,
+				baseUrl: input.baseUrl,
+				packageId: input.packageId,
+				sourceId: input.sourceId,
+				manifest: loaded.manifest,
+			})
+			if (schedulerStateChanged) {
+				await syncJobManagerAlarm({
+					env: input.env,
+					userId: input.userId,
+				})
+			}
+			// Same-isolate invoke paths must observe this refresh immediately;
+			// other isolates converge within the freshness-cache TTL.
+			invalidateInvokeContractFreshness({
+				userId: input.userId,
+				packageIdOrKodyIds: [
+					input.packageId,
+					row.kody_id,
+					`kody:${savedPackage.name}`,
+					...(existing && existing.kodyId !== row.kody_id
+						? [existing.kodyId]
+						: []),
+					...(existing && existing.name !== savedPackage.name
+						? [`kody:${existing.name}`]
+						: []),
+				],
+				sourceId: input.sourceId,
+			})
+			return {
+				record: savedPackage,
+				manifest: loaded.manifest,
+				...(loadedFiles ? { files: loadedFiles } : {}),
+			}
+		},
+	})
+}
+
+export async function deleteSavedPackageProjection(input: {
+	env: Env
+	userId: string
+	packageId: string
+	actorUserId?: string
+}) {
+	return await withAccountWriteLease({
+		db: input.env.APP_DB,
+		stableUserId: input.userId,
+		env: input.env,
+		async write() {
+			const savedPackage = await getSavedPackageById(input.env.APP_DB, {
+				userId: input.userId,
+				packageId: input.packageId,
+			})
+			const packageOwnedStorageIds = new Set<string>([
+				buildPackageStorageId(input.packageId),
+				input.packageId,
+			])
+			let packageJobsRemoved = false
+			if (savedPackage) {
+				const listing = await getCommunityListingByOwnerAndPackage(
+					input.env.APP_DB,
+					{
+						ownerUserId: input.userId,
+						packageId: input.packageId,
+					},
+				)
+				if (listing?.status === 'active') {
+					await unpublishCommunityListing({
+						env: input.env,
+						userId: input.userId,
+						actorUserId: input.actorUserId ?? input.userId,
+						listingId: listing.id,
+					})
+				}
+			}
+			// Drop fork metadata before later cleanup so a later failure cannot
+			// leave "Fork outdated" on community listings after the package is
+			// gone. D1 triggers on saved_packages / entity_sources are the
+			// cascade backstop if a future path skips this call.
+			const deletedForks = await deleteCommunityForksForPackage(
+				input.env.APP_DB,
+				{
+					userId: input.userId,
+					packageId: input.packageId,
+					sourceId: savedPackage?.sourceId,
+				},
+			)
+			if (deletedForks > 0) {
+				invalidateCommunityPublicCache()
+			}
+			if (savedPackage) {
+				await cleanupArtifactReposForPackage({
+					env: input.env,
+					userId: input.userId,
+					sourceId: savedPackage.sourceId,
+				}).catch((error) => {
+					console.warn(
+						JSON.stringify({
+							message: 'package artifact repo cleanup failed',
+							userId: input.userId,
+							packageId: input.packageId,
+							sourceId: savedPackage.sourceId,
+							error: getErrorMessage(error),
+						}),
+					)
+				})
+				await deleteEntitySource(input.env, {
+					id: savedPackage.sourceId,
+					userId: input.userId,
+				}).catch((error) => {
+					console.warn(
+						JSON.stringify({
+							message: 'package entity source cleanup failed',
+							userId: input.userId,
+							packageId: input.packageId,
+							sourceId: savedPackage.sourceId,
+							error: getErrorMessage(error),
+						}),
+					)
+				})
+				const jobs = jobsData(input.env)
+				const existingRows = await jobs.listJobsForUser({
+					userId: input.userId,
+				})
+				const packageRows = existingRows.filter(
+					(row) => row.source_id === savedPackage.sourceId,
+				)
+				for (const row of packageRows) {
+					if (row.storage_id) {
+						packageOwnedStorageIds.add(row.storage_id)
+					}
+					await jobs.deleteJob({ userId: input.userId, jobId: row.id })
+				}
+				packageJobsRemoved = packageRows.length > 0
+			}
+			try {
+				const inventoryIds = await listPackageOwnedStorageIdsFromInventory({
+					env: input.env,
+					userId: input.userId,
+					packageId: input.packageId,
+				})
+				for (const storageId of inventoryIds) {
+					packageOwnedStorageIds.add(storageId)
+				}
+			} catch (error) {
+				console.warn(
+					JSON.stringify({
+						message: 'package storage inventory lookup failed',
+						userId: input.userId,
+						packageId: input.packageId,
+						error: getErrorMessage(error),
+					}),
+				)
+			}
+			for (const storageId of packageOwnedStorageIds) {
+				await clearPackageOwnedStorageBucket({
+					env: input.env,
+					userId: input.userId,
+					packageId: input.packageId,
+					storageId,
+				})
+			}
+			await deleteAllPackageScopedSecrets({
+				env: input.env,
+				userId: input.userId,
+				packageId: input.packageId,
+			})
+			await deletePackageInvocationTokensForPackage({
+				db: input.env.APP_DB,
+				userId: input.userId,
+				packageId: input.packageId,
+			})
+			await removeAllSecretApprovalsForPackage({
+				env: input.env,
+				userId: input.userId,
+				packageId: input.packageId,
+			})
+			await deleteAllAppScopedValues({
+				env: input.env,
+				userId: input.userId,
+				appId: input.packageId,
+			}).catch((error) => {
+				console.warn(
+					JSON.stringify({
+						message: 'package app-scoped values cleanup failed',
+						userId: input.userId,
+						packageId: input.packageId,
+						error: getErrorMessage(error),
+					}),
+				)
+			})
+			await deleteSavedPackage(input.env.APP_DB, {
+				userId: input.userId,
+				packageId: input.packageId,
+			})
+			// Retired `kody.id`s only mean something while the package they point
+			// at exists; leaving them behind would hand a later package another
+			// package's redirect history.
+			await deletePackageKodyIdRedirects({
+				db: input.env.APP_DB,
+				userId: input.userId,
+				packageId: input.packageId,
+			})
+			try {
+				await removePackageRetrieverManifestCacheEntries({
+					env: input.env,
+					userId: input.userId,
+					packageId: input.packageId,
+				})
+			} catch (error) {
+				logPackageRetrieverProjectionError({
+					action: 'delete',
+					packageId: input.packageId,
+					error,
+				})
+			}
+			await deleteSavedPackageVector(input.env, input.packageId)
+			invalidateInvokeContractFreshness({
+				userId: input.userId,
+				packageIdOrKodyIds: [
+					input.packageId,
+					...(savedPackage
+						? [savedPackage.kodyId, `kody:${savedPackage.name}`]
+						: []),
+				],
+				sourceId: savedPackage?.sourceId ?? null,
+			})
+			if (packageJobsRemoved) {
+				await syncJobManagerAlarm({
+					env: input.env,
+					userId: input.userId,
+				})
+			}
+		},
+	})
+}

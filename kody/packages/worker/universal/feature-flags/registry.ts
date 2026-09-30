@@ -1,0 +1,233 @@
+/**
+ * Typed registry of feature flags. Flags are created and removed only via
+ * code review by editing `featureFlagDefinitions`. The database stores
+ * runtime state (global toggles/rollouts and per-user overrides), not which
+ * flags exist. Removing a key from this array leaves any leftover DB rows
+ * visible as "stale" in the admin UI until an operator deletes them.
+ *
+ * Flags should declare a `successMetric`: the usage metric the flag is
+ * expected to move, reviewed in the same PR that creates the flag. Flags
+ * with one get exposure recording and an on/off cohort readout on the admin
+ * surfaces (see `docs/contributing/architecture/feature-flags.md`). Optional
+ * `exposureRecording` selects the write site (`evaluation` chokepoints by
+ * default, or `paid-ranked-search` for the Jev experiment frame). The
+ * `successMetric` field stays optional for flags that are genuinely
+ * unmeasurable (such as the permanent `demo-indicator`), and the admin UI and
+ * MCP list surface a notice strongly recommending one everywhere else.
+ */
+
+import {
+	defaultFeatureFlagAudience,
+	type FeatureFlagAudience,
+} from './audiences.ts'
+import { type UsageEventType } from '#universal/usage-event-types.ts'
+
+export type FeatureFlagSuccessMetricMeasure =
+	| 'event_count'
+	| 'error_rate'
+	| 'avg_duration_ms'
+
+export type FeatureFlagSuccessMetric = {
+	/** The metered usage event stream this flag is expected to move. */
+	eventType: UsageEventType
+	/** Which aggregate of that stream the flag is judged against. */
+	measure: FeatureFlagSuccessMetricMeasure
+	/** The direction the flag is supposed to push the measure. */
+	goal: 'increase' | 'decrease'
+	/** One human sentence stating the hypothesis behind the flag. */
+	hypothesis: string
+}
+
+/**
+ * Where success-metric exposures are written for a measured flag.
+ *
+ * - `evaluation` (default): app session cache + MCP caller flag resolver.
+ * - `paid-ranked-search`: only from paid list-mode ranked search (Jev frame);
+ *   free/anonymous never enter the on/off cohorts for that flag.
+ */
+export type FeatureFlagExposureRecording = 'evaluation' | 'paid-ranked-search'
+
+export type FeatureFlagDefinition = {
+	key: string
+	description: string
+	defaultEnabled: boolean
+	/**
+	 * Audience used when no global row exists, and as the first-insert
+	 * default when an operator enables the flag without an explicit
+	 * audience. Omit for `everyone`.
+	 */
+	defaultAudience?: FeatureFlagAudience
+	successMetric?: FeatureFlagSuccessMetric
+	/**
+	 * Exposure write site for measured flags. Omit for `evaluation`.
+	 * Only meaningful when `successMetric` is set.
+	 */
+	exposureRecording?: FeatureFlagExposureRecording
+}
+
+export const featureFlagDefinitions = [
+	{
+		key: 'demo-indicator',
+		defaultEnabled: false,
+		description:
+			'Reserved for exercising the feature flag system end-to-end. When enabled it shows a small demo indicator in the app UI. Safe to toggle.',
+		// Intentionally no successMetric: this permanent flag exists to
+		// exercise the flag system itself (including the "no success metric"
+		// admin notice), not to move a product metric.
+	},
+	{
+		key: 'compact-mcp-server-instructions',
+		defaultEnabled: false,
+		description:
+			'Serves a short MCP server-instruction stub instead of the full always-on manual, so clients that keep only the first ~2048 characters still see how to use search/execute and the user overlay. Delete the flag and the compact branch when the experiment ends.',
+		successMetric: {
+			eventType: 'execute',
+			measure: 'event_count',
+			goal: 'increase',
+			hypothesis:
+				'A stub that fits in a 2048-character head cut makes agents reach for Kody execute more often from vague prompts.',
+		},
+	},
+	{
+		key: 'package-share-grants',
+		defaultEnabled: false,
+		description:
+			'Person-to-person package share grants: invite, accept, UI, MCP, and runtime use of a shared package. Off by default. Signed-in users can turn it on from /docs/package-sharing. No success metric: this is a rollout kill switch, not an experiment.',
+	},
+	{
+		key: 'secret-providers',
+		defaultEnabled: false,
+		description:
+			'Pluggable external secret providers (1Password-shaped placeholders, account bindings, sealed resolve, and package grants). Off by default. Signed-in users can turn it on from /docs/secret-providers. No success metric: this is a rollout kill switch, not an experiment.',
+	},
+	{
+		key: 'jev-search-rerank',
+		defaultEnabled: false,
+		defaultAudience: 'experiments_opt_in',
+		description:
+			'Kill switch for improved ranked search: when on, paid plans (standard/pro/max) widen hybrid recall and may run Workers AI typesafe/jev Score (AI Gateway) when the post-hybrid pool looks ambiguous. Free and anonymous never get Jev (skipped-plan). Necessity skips: skipped-small-pool (≤8), skipped-clear-winner (9–20 with a decisive top hit). Pricing-page improved-search copy is gated by this same flag. List-mode ranked search only. Offline/deterministic paths skip Jev and use hybrid order. Plan gate is a feature gate, not an entitlement. Delete the flag and gate sites when the experiment ends.',
+		exposureRecording: 'paid-ranked-search',
+		successMetric: {
+			eventType: 'execute',
+			measure: 'event_count',
+			goal: 'increase',
+			hypothesis:
+				'Paid ranked-search users with the flag on (Jev-eligible: widen recall + selective Score; necessity may still skip) follow search with more execute calls than comparable paid flag-off searchers.',
+		},
+	},
+	{
+		key: 'execute-invoke',
+		defaultEnabled: false,
+		defaultAudience: 'experiments_opt_in',
+		description:
+			'MCP execute `invoke` shortcut: mint the canonical thin kody:@ passthrough for a package export, then run the existing execute path. Off by default; enable with audience experiments_opt_in. Delete the flag and gate sites when the experiment ends.',
+		successMetric: {
+			eventType: 'dynamic_worker_day',
+			measure: 'event_count',
+			goal: 'decrease',
+			hypothesis:
+				'Invoke-generated thin passthrough reuses one Dynamic Worker per package export, so experiment users burn fewer unique worker-days on execute.',
+		},
+	},
+] as const satisfies ReadonlyArray<FeatureFlagDefinition>
+
+export type FeatureFlagKey = (typeof featureFlagDefinitions)[number]['key']
+
+export const packageShareGrantsFlagKey =
+	'package-share-grants' satisfies FeatureFlagKey
+
+export const secretProvidersFlagKey =
+	'secret-providers' satisfies FeatureFlagKey
+
+export const jevSearchRerankFlagKey =
+	'jev-search-rerank' satisfies FeatureFlagKey
+
+export const executeInvokeFlagKey = 'execute-invoke' satisfies FeatureFlagKey
+
+export const featureFlagKeys: ReadonlyArray<FeatureFlagKey> =
+	featureFlagDefinitions.map((definition) => definition.key)
+
+const featureFlagDefinitionByKey = new Map<
+	FeatureFlagKey,
+	FeatureFlagDefinition
+>(
+	featureFlagDefinitions.map((definition) => [
+		definition.key,
+		definition as FeatureFlagDefinition,
+	]),
+)
+
+/**
+ * Registry flags that declare a success metric. Only these flags get
+ * exposure recording and admin metric readouts.
+ */
+const measuredFeatureFlagDefinitions: ReadonlyArray<
+	FeatureFlagDefinition & { successMetric: FeatureFlagSuccessMetric }
+> = (featureFlagDefinitions as ReadonlyArray<FeatureFlagDefinition>).filter(
+	(
+		definition,
+	): definition is FeatureFlagDefinition & {
+		successMetric: FeatureFlagSuccessMetric
+	} => definition.successMetric !== undefined,
+)
+
+export const measuredFeatureFlagKeys: ReadonlySet<FeatureFlagKey> = new Set(
+	measuredFeatureFlagDefinitions.map(
+		(definition) => definition.key as FeatureFlagKey,
+	),
+)
+
+/**
+ * Shared notice shown by the admin UI and the `adminFeatureFlagList`
+ * capability for registry flags that do not declare a success metric.
+ */
+export const missingSuccessMetricNotice =
+	'No success metric declared. Strongly recommended: add a successMetric to this flag in packages/worker/universal/feature-flags/registry.ts so exposures are recorded and the on/off cohort readout can show whether the flag is moving the metric it exists for.'
+
+export function isFeatureFlagKey(value: string): value is FeatureFlagKey {
+	return featureFlagDefinitionByKey.has(value as FeatureFlagKey)
+}
+
+export function getFeatureFlagDefinition(
+	key: FeatureFlagKey,
+): FeatureFlagDefinition {
+	const definition = featureFlagDefinitionByKey.get(key)
+	if (!definition) {
+		throw new Error(`Unknown feature flag key: ${key}`)
+	}
+	return definition
+}
+
+export function getFeatureFlagDefaultAudience(
+	key: FeatureFlagKey,
+): FeatureFlagAudience {
+	return (
+		getFeatureFlagDefinition(key).defaultAudience ?? defaultFeatureFlagAudience
+	)
+}
+
+/**
+ * Where exposures are written for a measured flag. Unmeasured flags never
+ * record exposures; measured flags default to the evaluation chokepoints.
+ */
+export function getFeatureFlagExposureRecording(
+	key: FeatureFlagKey,
+): FeatureFlagExposureRecording {
+	const definition = getFeatureFlagDefinition(key)
+	if (!definition.successMetric) return 'evaluation'
+	return definition.exposureRecording ?? 'evaluation'
+}
+
+/**
+ * True when the app/MCP evaluation chokepoints should write an exposure for
+ * this measured flag. Flags with a dedicated recording site (for example
+ * paid ranked search) return false here and record only on that path.
+ */
+export function recordsFeatureFlagExposureAtEvaluation(
+	key: FeatureFlagKey,
+): boolean {
+	return (
+		measuredFeatureFlagKeys.has(key) &&
+		getFeatureFlagExposureRecording(key) === 'evaluation'
+	)
+}

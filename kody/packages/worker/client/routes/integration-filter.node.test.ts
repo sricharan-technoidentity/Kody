@@ -1,0 +1,87 @@
+import { expect, test } from 'vitest'
+import {
+	filterIntegrations,
+	groupIntegrationsByApp,
+	integrationDisplayName,
+	oauthAppDisplayName,
+} from './integration-filter.ts'
+
+test('integration filter and app grouping cover search and sibling connections', () => {
+	const integrations = [
+		{
+			name: 'github',
+			appSlug: 'github',
+			provider: 'github',
+			appLabel: null,
+			accountLabel: null,
+			tokenUrl: 'https://github.com/login/oauth/access_token',
+			apiBaseUrl: 'https://api.github.com',
+			clientId: 'github-client-id-value',
+			hasClientSecret: false,
+			requiredHosts: ['api.github.com'],
+			authorization: {
+				authorizeUrl: 'https://github.com/login/oauth/authorize',
+				scopes: ['repo', 'read:user'],
+			},
+		},
+		{
+			name: 'google',
+			appSlug: 'google',
+			provider: 'google',
+			appLabel: null,
+			accountLabel: 'Personal',
+			tokenUrl: 'https://oauth2.googleapis.com/token',
+			clientId: 'shared-google-client',
+			hasClientSecret: false,
+		},
+		{
+			name: 'google-calendar',
+			appSlug: 'google',
+			provider: 'google',
+			appLabel: null,
+			accountLabel: 'Work calendar',
+			tokenUrl: 'https://oauth2.googleapis.com/token',
+			clientId: 'shared-google-client',
+			hasClientSecret: false,
+		},
+		{
+			name: 'spotify',
+			appSlug: 'spotify',
+			provider: 'spotify',
+			appLabel: null,
+			accountLabel: null,
+			tokenUrl: 'https://accounts.spotify.com/api/token',
+			apiBaseUrl: 'https://api.spotify.com',
+			clientId: 'spotify-client-id-value',
+			hasClientSecret: false,
+			requiredHosts: ['api.spotify.com'],
+			authorization: {
+				authorizeUrl: 'https://accounts.spotify.com/authorize',
+				scopes: ['user-read-playback-state'],
+			},
+		},
+	]
+
+	expect(filterIntegrations(integrations, 'GITHUB repo')).toEqual([
+		integrations[0],
+	])
+	expect(filterIntegrations(integrations, 'playback')).toEqual([
+		integrations[3],
+	])
+	expect(filterIntegrations(integrations, 'missing')).toEqual([])
+	expect(filterIntegrations(integrations, '')).toEqual(integrations)
+
+	const groups = groupIntegrationsByApp(integrations)
+	expect(groups).toHaveLength(3)
+	const googleGroup = groups.find((group) => group.appSlug === 'google')
+	expect(googleGroup).toMatchObject({
+		clientId: 'shared-google-client',
+		connections: [
+			expect.objectContaining({ name: 'google' }),
+			expect.objectContaining({ name: 'google-calendar' }),
+		],
+	})
+	expect(oauthAppDisplayName(googleGroup!)).toBe('google')
+	expect(integrationDisplayName(integrations[1]!)).toBe('Personal')
+	expect(integrationDisplayName(integrations[0]!)).toBe('github')
+})

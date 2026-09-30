@@ -1,0 +1,777 @@
+import { Frame, type Handle, type RemixNode, css } from 'remix/ui'
+import { routes } from '#universal/routes.ts'
+import { getPackageTreeHref } from '#universal/package-files.ts'
+import { COMMUNITY_DETAIL_TARGET } from '#universal/community-frame-constants.ts'
+import { readAppSession } from '#client/app-session-context.tsx'
+import {
+	listenToRouterNavigation,
+	readCurrentRouterHref,
+} from '#client/client-router.tsx'
+import { isFeatureFlagEnabled } from '#client/feature-flags.ts'
+import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
+import { consumeStaleNavigationData } from '#client/navigation-data.ts'
+import { readRouterPathname } from '#client/router-location.tsx'
+import { createDoubleCheck } from '#client/double-check.ts'
+import { on } from '#client/event-mixin.ts'
+import { renderMarkdownNodes } from '#client/markdown-view.tsx'
+import { NotFoundPage } from '#client/not-found-page.tsx'
+import { packageShareGrantsFlagKey } from '#universal/feature-flags/registry.ts'
+import { type HighlightedCode } from '#universal/highlighted-code.ts'
+import { readJson } from '#client/routes/account-approval-shared.ts'
+import {
+	installProgressWords,
+	releasePackageTitleInstallProgress,
+	startPackageTitleInstallProgress,
+	stopPackageTitleInstallProgress,
+} from '#client/package-title-install-progress.ts'
+import {
+	createPackageTitleInstallArm,
+	decideCommunityInstallClick,
+	isCommunityInstallConfirmArmed,
+	paintPackageTitleInstallConfirm,
+	shouldResetInstallConfirm,
+	shouldResetInstallOnShellSnapshot,
+} from '#client/routes/community-detail-install.ts'
+import { type AppLoaderData } from '#universal/loader-data.ts'
+import { type PackageShareGrantLoaderView } from '#universal/package-share.ts'
+import {
+	type CommunityDetailApiPayload,
+	type CommunityInstallApiPayload,
+	type CommunityInstallOutcome,
+	type CommunityPackageMovedPayload,
+	type CommunityShellSnapshot,
+	buildCommunityDetailFrameSrc,
+	buildReportApiPath,
+	getListingPageRef,
+	rememberListingId,
+} from './community-detail-shared.ts'
+import {
+	detailArticleCss,
+	renderAdminFeatureSection,
+	renderEmptyReadme,
+	renderInstallStrip,
+	renderMissingListing,
+	renderReadmeSection,
+	renderReportDisclosure,
+	renderShellStatus,
+} from './community-detail-sections.tsx'
+import { renderPackageShareBanners } from './package-share-banners.tsx'
+import { postPackageShareAction } from './package-share-client.ts'
+
+/**
+ * Community detail, ported from the redesign prototype
+ * (`landing/community-detail.html`). A 46rem article mirroring the blog
+ * post: the listing head (back link, `@owner / name`, visibility, Repo /
+ * Files / Settings tabs, tags, quiet meta row) stays server-rendered in the
+ * `community-detail` frame — see `src/app/community-detail-content.tsx` —
+ * while this shell renders the README as `.prose`, admin tools, and the
+ * report disclosure. Fork, verify, open, outdated, and copy-setup live as
+ * icons beside the package name in the frame. Other-account listings use
+ * the same fork icon and `createDoubleCheck` before the POST. Owner
+ * controls live on `/settings`.
+ */
+
+function getCurrentListingId(handle: Handle) {
+	return getListingPageRef(readRouterPathname(handle))?.listingId ?? null
+}
+
+export function CommunityDetailRoute(handle: Handle) {
+	let loggedIn = false
+	let viewerIsAdmin = false
+	let featured = false
+	let featureState: 'idle' | 'submitting' | 'error' = 'idle'
+	let featureMessage: string | null = null
+	let installState: 'idle' | 'submitting' | 'error' = 'idle'
+	let installMessage: string | null = null
+	let installOutcome: CommunityInstallOutcome | null = null
+	const installConfirm = createDoubleCheck(handle)
+	let installConfirmListingId: string | null = null
+	const installArm = createPackageTitleInstallArm({
+		confirm: installConfirm,
+		getListingId: () => installConfirmListingId,
+		setListingId: (listingId) => {
+			installConfirmListingId = listingId
+		},
+	})
+	let readmeContent: string | null = null
+	let readmeFences: Array<HighlightedCode> = []
+	let hasAgentsDocs = false
+	let readmeImageBaseHref: string | null = null
+	let username = ''
+	let kodyId = ''
+	let shellStatus: 'loading' | 'ready' | 'error' = 'loading'
+	let shellLoadRequestId = 0
+	let reportReason = ''
+	let reportState: 'idle' | 'submitting' | 'success' | 'error' = 'idle'
+	let reportMessage: string | null = null
+	// Keyed by pathname, not listing id: the canonical URL's listing id is only
+	// known after the shell resolves, and the page's identity is its URL either
+	// way.
+	let shellLoadedForPathname: string | null = null
+	let shellRequestedForPathname: string | null = null
+	let shellUnauthorized = false
+	let shareGrant: PackageShareGrantLoaderView | null = null
+	let shareBusy = false
+	let shareMessage: string | null = null
+	let shellNotFound = false
+
+	// Re-lexing markdown on every handle.update() would be wasted work; cache
+	// the rendered README per markdown string (same policy as MarkdownView).
+	let renderedForReadme: string | null = null
+	let renderedForReadmeFences: Array<HighlightedCode> | undefined
+	let renderedForReadmeImageBase: string | null = null
+	let renderedReadme: Array<RemixNode> = []
+
+	function renderReadme(
+		markdown: string,
+		fences: Array<HighlightedCode> | undefined,
+		imageBaseHref: string | null,
+	) {
+		if (
+			renderedForReadme !== markdown ||
+			renderedForReadmeFences !== fences ||
+			renderedForReadmeImageBase !== imageBaseHref
+		) {
+			renderedForReadme = markdown
+			renderedForReadmeFences = fences
+			renderedForReadmeImageBase = imageBaseHref
+			// Third-party README in the page's prose voice: authored `##`
+			// sections land on h3 (DESIGN.md's "h3 subheads"; publishing
+			// requires a `## Intent` section), the page keeps its h1, and the
+			// untrusted-content link policy (`nofollow ugc`) stays the default.
+			renderedReadme = renderMarkdownNodes(markdown, {
+				headingOffset: 1,
+				fences,
+				imageBaseHref: imageBaseHref ?? undefined,
+			})
+		}
+		return renderedReadme
+	}
+
+	function applyShellSnapshot(
+		snapshot: CommunityShellSnapshot,
+		pathname: string,
+	) {
+		loggedIn = snapshot.loggedIn
+		viewerIsAdmin = snapshot.viewerIsAdmin
+		featured = snapshot.featured
+		featureState = 'idle'
+		featureMessage = null
+		const releasedProgress = releasePackageTitleInstallProgress(
+			getListingPageRef(pathname)?.listingId ?? null,
+		)
+		// Same-listing snapshots arrive after the fork control is already
+		// clickable. Clearing `submitting` here would let a second click start
+		// another install while the first POST and spinner are still active.
+		if (
+			shouldResetInstallOnShellSnapshot({
+				installState,
+				releasedProgress,
+			})
+		) {
+			installState = 'idle'
+			installMessage = null
+			installOutcome = null
+		}
+		const snapshotListingId = getListingPageRef(pathname)?.listingId ?? null
+		if (
+			shouldResetInstallConfirm({
+				confirmedListingId: installConfirmListingId,
+				listingId: snapshotListingId,
+			})
+		) {
+			installArm.reset()
+		}
+		readmeContent = snapshot.readmeContent
+		readmeFences = snapshot.readmeFences ?? []
+		hasAgentsDocs = snapshot.hasAgentsDocs
+		readmeImageBaseHref = snapshot.imageBaseHref
+		username = snapshot.username
+		kodyId = snapshot.kodyId
+		shareGrant = snapshot.shareGrant ?? null
+		shareBusy = false
+		shareMessage = null
+		reportState = 'idle'
+		reportMessage = null
+		shellUnauthorized = false
+		shellNotFound = false
+		shellLoadedForPathname = pathname
+		shellStatus = 'ready'
+	}
+
+	async function loadDetailShell() {
+		const ref = getListingPageRef(readRouterPathname(handle))
+		if (!ref) return
+
+		const requestId = ++shellLoadRequestId
+		// Same-page revalidations keep showing the current shell while the fetch
+		// is in flight; only brand-new listings show the loading state.
+		if (shellLoadedForPathname !== ref.pathname) {
+			shellStatus = 'loading'
+			handle.update()
+		}
+
+		try {
+			const response = await fetch(ref.detailApiHref, {
+				headers: { Accept: 'application/json' },
+			})
+			if (requestId !== shellLoadRequestId) return
+			const payload = await readJson<
+				CommunityDetailApiPayload | CommunityPackageMovedPayload
+			>(response)
+			if (response.status === 401) {
+				shellLoadedForPathname = ref.pathname
+				shellUnauthorized = true
+				shellStatus = 'ready'
+				handle.update()
+				return
+			}
+			if (response.status === 404) {
+				const movedTo = payload && !payload.ok ? payload.redirectTo : null
+				// A renamed package is a real destination, not a dead link.
+				if (movedTo) {
+					window.location.assign(movedTo)
+					return
+				}
+				shellLoadedForPathname = ref.pathname
+				shellNotFound = true
+				shellUnauthorized = false
+				shellStatus = 'ready'
+				handle.update()
+				return
+			}
+			if (!response.ok || !payload?.ok) {
+				throw new Error('Unable to load public package.')
+			}
+			if (payload.listing) {
+				rememberListingId(ref.pathname, payload.listing.id)
+			}
+			applyShellSnapshot(
+				{
+					loggedIn: payload.loggedIn,
+					viewerIsAdmin: payload.viewerIsAdmin,
+					viewerIsOwner: payload.viewerIsOwner,
+					trusted: payload.listing?.trusted ?? false,
+					featured: payload.listing?.featured ?? false,
+					readmeContent:
+						payload.readmeContent ?? payload.listing?.readmeContent ?? null,
+					readmeFences: payload.readmeFences,
+					hasAgentsDocs: payload.hasAgentsDocs === true,
+					imageBaseHref: payload.imageBaseHref ?? null,
+					ownerPackage: payload.ownerPackage,
+					username: payload.username,
+					kodyId:
+						payload.kodyId ||
+						payload.listing?.kodyId ||
+						payload.ownerPackage?.kodyId ||
+						'',
+					isPrivate:
+						payload.isPrivate ?? payload.ownerPackage?.isPrivate ?? false,
+					invocationUrlOrigin: payload.invocationUrlOrigin,
+					shareGrant: payload.shareGrant ?? null,
+				},
+				ref.pathname,
+			)
+			handle.update()
+		} catch {
+			if (requestId !== shellLoadRequestId) return
+			// Mark the listing as attempted so renders do not requeue the load
+			// in a loop; the user can recover via navigation or reload.
+			shellLoadedForPathname = ref.pathname
+			shellStatus = 'error'
+			handle.update()
+		}
+	}
+
+	async function submitReport() {
+		const listingId = getCurrentListingId(handle)
+		if (!listingId || reportState === 'submitting') return
+
+		reportState = 'submitting'
+		reportMessage = null
+		handle.update()
+
+		try {
+			const response = await fetch(buildReportApiPath(listingId), {
+				method: 'POST',
+				headers: {
+					Accept: 'application/json',
+					'Content-Type': 'application/json',
+				},
+				credentials: 'include',
+				body: JSON.stringify({ reason: reportReason }),
+			})
+			if (response.status === 401) {
+				window.location.assign('/login')
+				return
+			}
+			const payload = await readJson<{ ok: boolean; error?: string }>(response)
+			if (!response.ok || !payload?.ok) {
+				throw new Error(payload?.error ?? 'Unable to submit report.')
+			}
+			reportState = 'success'
+			reportMessage = 'Report submitted. Thank you.'
+			reportReason = ''
+			handle.update()
+		} catch (error) {
+			reportState = 'error'
+			reportMessage =
+				error instanceof Error ? error.message : 'Unable to submit report.'
+			handle.update()
+		}
+	}
+
+	async function submitShareAccept(trustLevel: 'follow' | 'pin') {
+		if (!shareGrant || shareBusy) return
+		const pathname = readRouterPathname(handle)
+		shareBusy = true
+		shareMessage = null
+		handle.update()
+		const result = await postPackageShareAction({
+			intent: 'accept',
+			ownerUsername: username,
+			kodyId,
+			grantId: shareGrant.id,
+			trustLevel,
+		})
+		if (readRouterPathname(handle) !== pathname) return
+		shareBusy = false
+		if (result.status === 'unauthorized') {
+			window.location.assign('/login')
+			return
+		}
+		if (result.status === 'error') {
+			shareMessage = result.message
+			handle.update()
+			return
+		}
+		shareGrant = result.grant
+		handle.update()
+	}
+
+	async function submitShareLeave() {
+		if (!shareGrant || shareBusy) return
+		const pathname = readRouterPathname(handle)
+		shareBusy = true
+		shareMessage = null
+		handle.update()
+		const result = await postPackageShareAction({
+			intent: 'leave',
+			ownerUsername: username,
+			kodyId,
+			grantId: shareGrant.id,
+		})
+		if (readRouterPathname(handle) !== pathname) return
+		shareBusy = false
+		if (result.status === 'unauthorized') {
+			window.location.assign('/login')
+			return
+		}
+		if (result.status === 'error') {
+			shareMessage = result.message
+			handle.update()
+			return
+		}
+		shareGrant = result.grant.status === 'left' ? null : result.grant
+		handle.update()
+	}
+
+	async function submitFeature(nextFeatured: boolean) {
+		const listingId = getCurrentListingId(handle)
+		if (!listingId || featureState === 'submitting') return
+
+		featureState = 'submitting'
+		featureMessage = null
+		handle.update()
+
+		try {
+			const response = await fetch(
+				routes.communityFeatureApiPost.href({ listingId }),
+				{
+					method: 'POST',
+					headers: {
+						Accept: 'application/json',
+						'Content-Type': 'application/json',
+					},
+					credentials: 'include',
+					body: JSON.stringify({ featured: nextFeatured }),
+				},
+			)
+			const payload = await readJson<{
+				ok: boolean
+				featured?: boolean
+				error?: string
+			}>(response)
+			if (!response.ok || !payload?.ok) {
+				throw new Error(payload?.error ?? 'Unable to update featuring.')
+			}
+			featured = payload.featured ?? nextFeatured
+			featureState = 'idle'
+			handle.update()
+			// The featured badge renders inside the server frame; reload it so
+			// the header reflects the new state immediately.
+			const frame = handle.frames.get(COMMUNITY_DETAIL_TARGET)
+			if (frame) void frame.reload()
+		} catch (error) {
+			featureState = 'error'
+			featureMessage =
+				error instanceof Error ? error.message : 'Unable to update featuring.'
+			handle.update()
+		}
+	}
+
+	async function submitInstall() {
+		const listingId = getCurrentListingId(handle)
+		if (!listingId || installState === 'submitting') return
+
+		installState = 'submitting'
+		installMessage = null
+		startPackageTitleInstallProgress(installProgressWords, listingId)
+		handle.update()
+
+		try {
+			const response = await fetch(
+				routes.communityInstallApiPost.href({ listingId }),
+				{
+					method: 'POST',
+					headers: {
+						Accept: 'application/json',
+						'Content-Type': 'application/json',
+					},
+					credentials: 'include',
+					// The title control is the acknowledgement. Third-party installs
+					// still require this flag; the tooltip carries the warning.
+					body: JSON.stringify({ acknowledged: true }),
+				},
+			)
+			if (response.status === 401) {
+				window.location.assign('/login')
+				return
+			}
+			const payload = await readJson<CommunityInstallApiPayload>(response)
+			// A late response for a previous listing must not overwrite the
+			// state of the listing currently on screen, or stop a newer run.
+			if (getCurrentListingId(handle) !== listingId) {
+				stopPackageTitleInstallProgress({ listingId, restore: true })
+				return
+			}
+			if (response.status === 409 && payload?.requiresAcknowledgement) {
+				throw new Error(
+					payload.error ?? 'Unable to install this public package.',
+				)
+			}
+			if (
+				!response.ok ||
+				!payload?.ok ||
+				!payload.status ||
+				!payload.targetName ||
+				!payload.agentPrompt
+			) {
+				throw new Error(
+					payload?.error ?? 'Unable to install this public package.',
+				)
+			}
+			installOutcome = {
+				status: payload.status,
+				targetName: payload.targetName,
+				agentPrompt: payload.agentPrompt,
+				packageId:
+					payload.status === 'installed' ? (payload.packageId ?? null) : null,
+				failedChecks: payload.failedChecks ?? [],
+			}
+			installState = 'idle'
+			stopPackageTitleInstallProgress({ listingId, restore: false })
+			handle.update()
+			const frame = handle.frames.get(COMMUNITY_DETAIL_TARGET)
+			if (frame) void frame.reload()
+		} catch (error) {
+			if (getCurrentListingId(handle) !== listingId) {
+				stopPackageTitleInstallProgress({ listingId, restore: true })
+				return
+			}
+			stopPackageTitleInstallProgress({ listingId })
+			installState = 'error'
+			installMessage =
+				error instanceof Error
+					? error.message
+					: 'Unable to install this public package.'
+			handle.update()
+		}
+	}
+
+	function handleCommunityInstallClick(event: Event) {
+		const target = event.target
+		if (!(target instanceof Element)) return
+		const control = target.closest('[data-community-install]')
+		// A click that does not move focus never fires focusout. Drop the
+		// armed flag here so the next click on the fork icon has to arm again.
+		if (!control) {
+			installArm.disarm()
+			return
+		}
+		const loginLink = control instanceof HTMLAnchorElement
+		const official = control.getAttribute('data-official') === 'true'
+		const listingId = control.getAttribute('data-package-title-listing')
+		const decision = decideCommunityInstallClick({
+			installState: loginLink ? 'idle' : installState,
+			alreadyInstalled: loginLink ? false : installOutcome != null,
+			requiresConfirm: !loginLink && !official,
+			confirmed: isCommunityInstallConfirmArmed({
+				confirmed: installConfirm.doubleCheck,
+				confirmedListingId: installConfirmListingId,
+				listingId,
+			}),
+		})
+		switch (decision) {
+			case 'ignore':
+				if (!loginLink) event.preventDefault()
+				return
+			case 'arm':
+				event.preventDefault()
+				installArm.arm(control, listingId)
+				return
+			case 'submit':
+				if (loginLink) return
+				event.preventDefault()
+				installArm.reset()
+				void submitInstall()
+				return
+			default: {
+				const exhaustive: never = decision
+				throw new Error(`Unhandled install click: ${String(exhaustive)}`)
+			}
+		}
+	}
+
+	function handleCommunityInstallFocusOut(event: FocusEvent) {
+		const target = event.target
+		if (!(target instanceof Element)) return
+		const control = target.closest('[data-community-install]')
+		if (
+			!control ||
+			!isCommunityInstallConfirmArmed({
+				confirmed: installConfirm.doubleCheck,
+				confirmedListingId: installConfirmListingId,
+				listingId: control.getAttribute('data-package-title-listing'),
+			})
+		) {
+			return
+		}
+		const next = event.relatedTarget
+		if (next instanceof Node && control.contains(next)) return
+		installArm.reset()
+		paintPackageTitleInstallConfirm(control, false)
+	}
+
+	listenToRouterNavigation(handle, () => {
+		const ref = getListingPageRef(readRouterPathname(handle))
+		// The path has already changed. Restore the listing that owned the
+		// spinner before a later tick can observe the destination control.
+		if (releasePackageTitleInstallProgress(ref?.listingId ?? null)) {
+			installState = 'idle'
+			installMessage = null
+			installOutcome = null
+		}
+		// Navigation reloads the title frame, so the rebuilt control is idle
+		// Fork even when the listing id is unchanged. Drop the armed flag
+		// here; a same-listing shell snapshot keeps it because that path
+		// does not remount the painted Confirm fork control.
+		installArm.reset()
+		if (!ref) return
+
+		const frame = handle.frames.get(COMMUNITY_DETAIL_TARGET)
+		if (!frame) return
+
+		const nextSrc = buildCommunityDetailFrameSrc(readCurrentRouterHref(handle))
+		if (frame.src !== nextSrc) {
+			frame.src = nextSrc
+		}
+		void frame.reload()
+	})
+
+	function applyRouteShellData(
+		routeData: AppLoaderData['communityDetailShell'],
+		pathname: string,
+		listingId: string | null,
+	) {
+		if (!routeData) return false
+		if (!routeData.ok) {
+			if ('unauthorized' in routeData) {
+				shellUnauthorized = true
+				shellNotFound = false
+			} else if ('notFound' in routeData) {
+				shellNotFound = true
+				shellUnauthorized = false
+			} else {
+				const exhaustive: never = routeData
+				throw new Error(`Unhandled community shell: ${String(exhaustive)}`)
+			}
+			shellLoadedForPathname = pathname
+			shellStatus = 'ready'
+			return true
+		}
+		if (routeData.listingId && listingId && routeData.listingId !== listingId) {
+			return false
+		}
+		applyShellSnapshot(routeData, pathname)
+		return true
+	}
+
+	return () => {
+		const currentHref = readCurrentRouterHref(handle)
+		const pathname = readRouterPathname(handle)
+		const routeData = tryConsumeRouteLoaderData(
+			handle,
+			'communityDetailShell',
+			currentHref,
+		)
+		// The canonical URL carries no listing id, so the server's answer for this
+		// pathname is what makes the page's listing-scoped actions addressable.
+		if (routeData?.ok && routeData.listingId) {
+			rememberListingId(pathname, routeData.listingId)
+		}
+		const ref = getListingPageRef(pathname)
+		const listingId = ref?.listingId ?? null
+
+		if (routeData && !routeData.ok) {
+			applyRouteShellData(routeData, pathname, listingId)
+		}
+		if (
+			(routeData && !routeData.ok && 'unauthorized' in routeData) ||
+			(shellUnauthorized && shellLoadedForPathname === pathname)
+		) {
+			return renderMissingListing(
+				'Unauthorized',
+				'You are not allowed to view this page.',
+			)
+		}
+
+		if (
+			(routeData && !routeData.ok && 'notFound' in routeData) ||
+			(shellNotFound && shellLoadedForPathname === pathname) ||
+			!ref
+		) {
+			return <NotFoundPage />
+		}
+
+		const appliedShellData = applyRouteShellData(routeData, pathname, listingId)
+		// A same-path refresh whose loader failed leaves no preload and the
+		// listing id unchanged; the stale marker forces the fallback refetch.
+		const needsStaleRefresh =
+			consumeStaleNavigationData(currentHref) && !appliedShellData
+		if (
+			(needsStaleRefresh ||
+				(shellLoadedForPathname !== pathname &&
+					shellRequestedForPathname !== pathname)) &&
+			typeof document !== 'undefined'
+		) {
+			// Show the loading state immediately so the previous listing's
+			// shell (fork prompt, README, login state) never renders under the
+			// new listing's header while the refetch is in flight. Same-listing
+			// stale refreshes keep the current shell visible instead. Tracking
+			// the requested listing separately keeps re-renders from enqueueing
+			// duplicate fetches while one is already in flight.
+			if (shellLoadedForPathname !== pathname) {
+				shellStatus = 'loading'
+			}
+			shellRequestedForPathname = pathname
+			handle.queueTask(loadDetailShell)
+		}
+
+		const frameSrc = buildCommunityDetailFrameSrc(currentHref)
+
+		// Never show another listing's shell data: even if an in-flight fetch
+		// for the previous listing resolves late, mismatched pages render the
+		// loading state until the current listing's shell arrives.
+		const shellMatchesListing = shellLoadedForPathname === pathname
+		const showShellReady = shellStatus === 'ready' && shellMatchesListing
+		const showShellError = shellStatus === 'error' && shellMatchesListing
+		const shellStatusMessage = showShellError
+			? 'Unable to load fork and report details for this listing.'
+			: showShellReady
+				? ''
+				: 'Loading package details…'
+		const agentsDocsHref =
+			hasAgentsDocs && username && kodyId
+				? getPackageTreeHref({
+						username,
+						kodyId,
+						listingId: listingId ?? undefined,
+						relativePath: 'AGENTS.md',
+					})
+				: null
+		return (
+			<article
+				mix={[
+					css(detailArticleCss),
+					on('click', handleCommunityInstallClick),
+					on('focusout', handleCommunityInstallFocusOut),
+				]}
+			>
+				<Frame name={COMMUNITY_DETAIL_TARGET} src={frameSrc} />
+
+				{showShellReady &&
+				isFeatureFlagEnabled(
+					readAppSession(handle)?.session,
+					packageShareGrantsFlagKey,
+				)
+					? renderPackageShareBanners({
+							shareGrant,
+							loggedIn,
+							busy: shareBusy,
+							message: shareMessage,
+							onAccept: (trustLevel) => void submitShareAccept(trustLevel),
+							onLeave: () => void submitShareLeave(),
+						})
+					: null}
+
+				{renderShellStatus(shellStatusMessage)}
+
+				{showShellReady ? (
+					<>
+						{listingId
+							? renderInstallStrip({
+									installMessage,
+									installOutcome,
+								})
+							: null}
+
+						{readmeContent
+							? renderReadmeSection(
+									renderReadme(
+										readmeContent,
+										readmeFences,
+										readmeImageBaseHref,
+									),
+									agentsDocsHref,
+								)
+							: renderEmptyReadme(agentsDocsHref)}
+
+						{listingId && viewerIsAdmin
+							? renderAdminFeatureSection({
+									featured,
+									featureState,
+									featureMessage,
+									onToggleFeature: () => void submitFeature(!featured),
+								})
+							: null}
+
+						{listingId
+							? renderReportDisclosure({
+									loggedIn,
+									reportReason,
+									reportState,
+									reportMessage,
+									onReasonInput: (value) => {
+										reportReason = value
+										handle.update()
+									},
+									onSubmitReport: () => void submitReport(),
+								})
+							: null}
+					</>
+				) : null}
+			</article>
+		)
+	}
+}

@@ -1,0 +1,101 @@
+import { parseAccountSecretPath } from '@kody-internal/shared/account-secret-route.ts'
+
+export type AccountStatus = 'loading' | 'ready' | 'error'
+export type ApprovalAction = 'approve' | 'reject'
+export type ApprovalScope = 'session' | 'package' | 'user'
+
+export type ApprovalView = {
+	name: string
+	names: Array<string>
+	scope: ApprovalScope
+	requestedHost: string
+	requestedHosts: Array<string>
+	rejectedHosts: Array<{
+		host: string
+		reason: 'malformed' | 'unknown_suffix'
+		message: string
+	}>
+	currentAllowedHosts: Array<string>
+	requestedPackageId: string | null
+	currentAllowedPackages: Array<string>
+}
+
+export function approvalRequestedHosts(approval: ApprovalView) {
+	if (approval.requestedHosts.length > 0) return approval.requestedHosts
+	return approval.requestedHost ? [approval.requestedHost] : []
+}
+
+export function approvalRejectedHosts(approval: ApprovalView) {
+	return approval.rejectedHosts ?? []
+}
+
+export function allowHostsButtonLabel(
+	validCount: number,
+	rejectedCount: number,
+) {
+	if (validCount <= 1) return 'Allow access'
+	if (rejectedCount > 0) return `Allow ${validCount} valid hosts`
+	return `Allow all ${validCount} hosts`
+}
+
+export function allowPackagesButtonLabel(secretCount: number) {
+	if (secretCount <= 1) return 'Allow access'
+	return `Allow all ${secretCount} secrets`
+}
+
+export const accountSecretsApiPath = '/account/secrets.json'
+export const accountProfileApiPath = '/account/profile.json'
+
+export function getScopeLabel(scope: ApprovalScope) {
+	if (scope === 'package') return 'Package'
+	if (scope === 'session') return 'Session'
+	return 'User'
+}
+
+export async function readJson<T>(response: Response) {
+	return (await response.json().catch(() => null)) as T | null
+}
+
+export function buildHostApprovalRequestUrl(
+	approvalUrl: string,
+	baseUrl = 'http://localhost',
+) {
+	const approvalPageUrl = new URL(approvalUrl, baseUrl)
+	const requestUrl = new URL(accountSecretsApiPath, baseUrl)
+	if (approvalPageUrl.pathname === '/connect/secrets') {
+		requestUrl.search = approvalPageUrl.search
+		return `${requestUrl.pathname}${requestUrl.search}`
+	}
+	const parsedPath = parseAccountSecretPath(approvalPageUrl.pathname)
+	if (!parsedPath) {
+		throw new Error('Invalid approval link.')
+	}
+	requestUrl.search = approvalPageUrl.search
+	requestUrl.searchParams.set('selected', parsedPath.id)
+	return `${requestUrl.pathname}${requestUrl.search}`
+}
+
+export async function submitApprovalRequest<
+	T extends { ok?: boolean; error?: string },
+>(action: ApprovalAction, requestUrl = accountSecretsApiPath) {
+	const response = await fetch(requestUrl, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+		},
+		credentials: 'include',
+		body: JSON.stringify({
+			action,
+		}),
+	})
+	if (response.status === 401) {
+		window.location.assign('/login')
+		return null
+	}
+	const payload = await readJson<T>(response)
+	if (!response.ok || !payload?.ok) {
+		throw new Error(payload?.error || 'Unable to process approval.')
+	}
+	return payload
+}

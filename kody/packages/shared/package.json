@@ -1,0 +1,12 @@
+{
+  "name": "@kody-internal/shared",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*"
+  },
+  "dependencies": {
+    "croner": "^10.0.1",
+    "remix": "3.0.0-rc.2"
+  }
+}

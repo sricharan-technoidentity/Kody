@@ -1,0 +1,70 @@
+import { z } from 'zod'
+import { defineDomainCapability } from '#mcp/capabilities/define-domain-capability.ts'
+import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
+import { type CapabilityContext } from '#mcp/capabilities/types.ts'
+import { requireMcpUser } from '#mcp/capabilities/meta/require-user.ts'
+import { packageHasImplicitUserSecretReadAccess } from '#mcp/secrets/package-access.ts'
+import { listSecrets } from '#mcp/secrets/service.ts'
+import { secretScopeValues } from '#mcp/secrets/types.ts'
+import { secretMetadataSchema, toSecretCapabilityOutput } from './shared.ts'
+
+export const secretListCapability = defineDomainCapability(
+	capabilityDomainNames.secrets,
+	{
+		name: 'secretList',
+		description:
+			'List available secret references for the signed-in user. Results include metadata such as names, descriptions, allowed hosts, allowed packages, and package_id for package-scoped secrets — never plaintext values. Explicit listing includes caller-owned package-scoped metadata from execute (no package runtime); using a package secret still requires package context. From a package runtime, self-authored and adopted packages see user secrets they can already read; unadopted community forks see only explicitly granted user secrets. Listing a secret does not approve a host: outbound `fetch` still resolves `{{secret:name}}` (optionally `{{secret:name|scope=user}}`) only for approved hosts. Use `kody.secretList({ scope })` inside execute-time code for the same metadata. Use `/account/secrets/new` for user-provided API key, token, and credential entry or rotation.',
+		keywords: ['secret', 'list', 'discovery', 'metadata', 'credentials'],
+		readOnly: true,
+		idempotent: true,
+		destructive: false,
+		inputSchema: z.object({
+			scope: z
+				.enum(secretScopeValues)
+				.optional()
+				.describe(
+					'Optional scope filter. When omitted, list all accessible scopes. Package-scoped metadata is included for caller-owned secrets (with package_id) even without a package runtime; session secrets stay session-bound. Using a package secret still requires package context.',
+				),
+		}),
+		outputSchema: z.object({
+			secrets: z.array(secretMetadataSchema),
+		}),
+		async handler(args, ctx: CapabilityContext) {
+			const user = requireMcpUser(ctx.callerContext)
+			const packageId =
+				ctx.callerContext.storageContext?.packageId?.trim() || null
+			const secrets = await listSecrets({
+				env: ctx.env,
+				userId: user.userId,
+				scope: args.scope ?? null,
+				storageContext: {
+					sessionId: ctx.callerContext.storageContext?.sessionId ?? null,
+					appId: ctx.callerContext.storageContext?.appId ?? null,
+					packageId: ctx.callerContext.storageContext?.packageId ?? null,
+					storageId: ctx.callerContext.storageContext?.storageId ?? null,
+				},
+			})
+			const implicitReadAccess =
+				packageId == null
+					? true
+					: await packageHasImplicitUserSecretReadAccess({
+							env: ctx.env,
+							userId: user.userId,
+							packageId,
+						})
+			const accessibleSecrets =
+				packageId && !implicitReadAccess
+					? secrets.filter(
+							(secret) =>
+								secret.scope !== 'user' ||
+								secret.allowedPackages.includes(packageId),
+						)
+					: secrets
+			return {
+				secrets: accessibleSecrets.map((secret) =>
+					toSecretCapabilityOutput(secret),
+				),
+			}
+		},
+	},
+)

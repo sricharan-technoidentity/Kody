@@ -1,0 +1,704 @@
+import * as Sentry from '@sentry/cloudflare'
+import { OAuthProvider } from '@cloudflare/workers-oauth-provider'
+import { getWorkerSentryOptions } from './sentry-options.ts'
+import { handleRequest } from '#app/handler.ts'
+import {
+	apiHandler,
+	handleAuthorizeRouteException,
+	handleAuthorizeRequest,
+	handleAuthorizeInfo,
+	handleOAuthCallback,
+	oauthPaths,
+} from './oauth-handlers.ts'
+import { sharedOAuthProviderOptions } from '#worker/oauth-provider-options.ts'
+import {
+	handleMcpRequest,
+	handleProtectedResourceMetadata,
+	isProtectedResourceMetadataRequest,
+	mcpResourcePath,
+	protectedResourceMetadataPath,
+} from './mcp-auth.ts'
+import { handleMcpClientIdMetadataRequest } from './mcp-client/client-id-metadata.ts'
+import { handleCliClientIdMetadataRequest } from './cli-client-metadata.ts'
+import {
+	handlePackageInvocationApiRequest,
+	isPackageInvocationApiRequest,
+} from './package-invocations/http.ts'
+import {
+	handleWebhookIngressRequest,
+	isWebhookIngressRequest,
+} from './webhooks/http.ts'
+import { withCors } from './utils.ts'
+import { normalizeRedirectTo } from '#app/auth-redirect.ts'
+import { checkAuthRateLimit } from '#app/rate-limit.ts'
+import { getRequestIp } from '#worker/audit-log.ts'
+import { discardUnreadRequestBody } from '#worker/request-body.ts'
+import { handleCapabilityReindexRequest } from './capability-maintenance.ts'
+import { handleExecuteSmokeRequest } from './execute-maintenance.ts'
+import {
+	executeHealthMaintenancePath,
+	handleExecuteHealthProbeRequest,
+} from './execute-health-probe.ts'
+import { handleJobReindexRequest } from './job-maintenance.ts'
+import { handleMemoryReindexRequest } from './memory-maintenance.ts'
+import {
+	handlePackageAppRequest,
+	isPackageAppRequestPath,
+} from '#app/handlers/package-app.ts'
+import { handlePackageAppOriginRequest } from '#app/package-app-origin.ts'
+import { refuseNonCanonicalProductionHost } from '#app/canonical-host.ts'
+import { serveAnonymousHtmlFromCache } from '#app/anonymous-html-edge-cache.ts'
+import { handleInboundEmail } from '#worker/email/inbound.ts'
+import { handleQueueBatch } from '#worker/queue-handler.ts'
+import { handleDrRestoreRequest } from '#worker/dr/dr-restore.ts'
+import { handleDrExportRequest } from '#worker/dr/dr-export-maintenance.ts'
+import { handleDoPitrRequest } from '#worker/dr/do-pitr-maintenance.ts'
+import { handleMailboxImportRequest } from '#worker/dr/mailbox-import-maintenance.ts'
+import { handleStatusIncidentEventRequest } from '#worker/status-incidents/maintenance.ts'
+import { verifyPublicFormProtection } from '#app/public-form-protection.ts'
+import { getLegacyHostRedirectResponse } from '#worker/app-legacy-redirect.ts'
+import { isRuntimeWorkerOwnedRequest } from '#worker/runtime-worker-routing.ts'
+import {
+	isNamespacedAppEndpointPath,
+	isNamespacedPackageInvocationEndpointPath,
+} from '#worker/user-namespace-routes.ts'
+import { handleOpenIdConfigurationRequest } from '#worker/oidc/discovery.ts'
+import { handleOidcJwksRequest } from '#worker/oidc/jwks.ts'
+import { handleOidcUserinfoRequest } from '#worker/oidc/userinfo.ts'
+import { handleOidcLogoutRequest } from '#worker/oidc/logout.ts'
+import { enrichOAuthTokenResponse } from '#worker/oidc/token-enrichment.ts'
+import { handleMcpOAuthTokenRequest } from '#worker/oauth-refresh-family.ts'
+import { runWithDynamicWorkerEvaluationBudget } from '#worker/dynamic-worker-evaluation-budget.ts'
+
+// Immutable caching is only safe when asset URLs are versioned by a real
+// commit sha. In local dev the build id falls back to a constant ('dev'), so
+// an immutable header would pin browsers to a stale bundle across rebuilds.
+type LegacyMcpFetch = Parameters<typeof handleMcpRequest>[0]['fetchMcp']
+let legacyMcpFetchMemo: Promise<LegacyMcpFetch> | null = null
+
+/**
+ * The legacy MCP lane routes through the `MCP` Durable Object stub via the
+ * agents SDK. Loading `./mcp/index.ts` statically would evaluate the agents
+ * and MCP server SDKs during Worker startup; the first legacy request pays
+ * for it instead and the served fetch is cached for the isolate.
+ */
+function loadLegacyMcpFetch(): Promise<LegacyMcpFetch> {
+	legacyMcpFetchMemo ??= import('./mcp/index.ts')
+		.then(
+			({ MCP }) =>
+				MCP.serve(mcpResourcePath, { binding: 'MCP_OBJECT' })
+					.fetch as LegacyMcpFetch,
+		)
+		.catch((error: unknown) => {
+			legacyMcpFetchMemo = null
+			throw error
+		})
+	return legacyMcpFetchMemo
+}
+
+function shouldApplyLongLivedAssetCaching(pathname: string, env: Env) {
+	const commitSha = (env as { APP_COMMIT_SHA?: string }).APP_COMMIT_SHA?.trim()
+	if (!commitSha) return false
+	return (
+		pathname === '/client-entry.js' ||
+		pathname === '/styles.css' ||
+		pathname.startsWith('/assets/')
+	)
+}
+
+// Credential-accepting POST endpoints share one per-IP auth rate-limit bucket
+// so brute-force attempts cannot fan out across parallel paths (password login,
+// OAuth inline login, social-login starts, password-reset request/confirm,
+// two-factor code verification and management, and passkey sign-in).
+const socialLoginStartPaths = new Set([
+	'/auth/github',
+	'/auth/google',
+	'/auth/x',
+	'/auth/discord',
+])
+
+const rateLimitedAuthPaths = new Set([
+	'/auth',
+	...socialLoginStartPaths,
+	'/oauth/authorize',
+	'/password-reset',
+	'/password-reset/confirm',
+	'/verify/2fa.json',
+	'/account/two-factor.json',
+	'/account/password.json',
+	'/webauthn/authentication',
+])
+
+const protectedPublicJsonFormPaths = new Set([
+	'/verify/2fa.json',
+	'/webauthn/authentication',
+])
+
+const appHandler = withCors({
+	getCorsHeaders(request): Record<string, string> | null {
+		const url = new URL(request.url)
+		const origin = request.headers.get('Origin')
+		if (!origin) return null
+		const requestOrigin = url.origin
+		// Remote MCP clients in browser hosts (Gemini custom apps, etc.) call
+		// `/mcp` cross-origin. Reflect any Origin and expose WWW-Authenticate so
+		// the client can read the OAuth challenge; same-origin stays the default
+		// for the rest of the app.
+		if (
+			url.pathname === mcpResourcePath ||
+			url.pathname === `${mcpResourcePath}/`
+		) {
+			return {
+				'Access-Control-Allow-Origin': origin,
+				'Access-Control-Allow-Methods': 'GET, HEAD, POST, DELETE, OPTIONS',
+				'Access-Control-Allow-Headers':
+					'Authorization, Content-Type, Accept, MCP-Protocol-Version, Last-Event-ID, Mcp-Session-Id',
+				'Access-Control-Expose-Headers':
+					'WWW-Authenticate, MCP-Session-Id, Content-Type',
+				Vary: 'Origin',
+			}
+		}
+		if (origin !== requestOrigin) return null
+		return {
+			'Access-Control-Allow-Origin': origin,
+			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+			'Access-Control-Allow-Headers': 'content-type, authorization',
+			Vary: 'Origin',
+		}
+	},
+	async handler(request, env, ctx) {
+		const url = new URL(request.url)
+
+		if (request.method === 'POST' && rateLimitedAuthPaths.has(url.pathname)) {
+			const ip = getRequestIp(request) ?? 'unknown'
+			const rateLimitKey = `auth:ip:${ip}`
+			const result = await checkAuthRateLimit(env, rateLimitKey)
+			if (!result.allowed) {
+				// A non-JSON social-login start is a document navigation, so a
+				// JSON 429 body would render as raw text; bounce back to the
+				// login page instead. 303 forces a GET. (The first-party UI
+				// sends Accept: application/json and gets the JSON 429.)
+				const prefersJson = request.headers
+					.get('Accept')
+					?.toLowerCase()
+					.includes('application/json')
+				if (socialLoginStartPaths.has(url.pathname) && !prefersJson) {
+					const loginUrl = new URL('/login', url)
+					loginUrl.searchParams.set('oauthError', 'rate-limited')
+					const redirectTo = normalizeRedirectTo(
+						url.searchParams.get('redirectTo'),
+					)
+					if (redirectTo) {
+						loginUrl.searchParams.set('redirectTo', redirectTo)
+					}
+					return new Response(null, {
+						status: 303,
+						headers: {
+							Location: loginUrl.toString(),
+							'Retry-After': String(result.retryAfterSeconds ?? 60),
+						},
+					})
+				}
+				return new Response(
+					JSON.stringify({
+						error: 'Too many requests. Please try again later.',
+					}),
+					{
+						status: 429,
+						headers: {
+							'Content-Type': 'application/json',
+							'Retry-After': String(result.retryAfterSeconds ?? 60),
+						},
+					},
+				)
+			}
+		}
+
+		if (
+			request.method === 'POST' &&
+			protectedPublicJsonFormPaths.has(url.pathname)
+		) {
+			const body = (await request
+				.clone()
+				.json()
+				.catch(() => ({}))) as Record<string, unknown>
+			const protection = await verifyPublicFormProtection({
+				env,
+				request,
+				body: typeof body === 'object' && body !== null ? body : {},
+			})
+			if (!protection.ok) {
+				// The clone was the only branch we read. Drain the original
+				// before returning so workerd does not keep a teed body
+				// alive (isolate kill → wrangler ProxyWorker fatal exit).
+				await discardUnreadRequestBody(request)
+				return protection.response
+			}
+		}
+
+		if (url.pathname === '/__maintenance/reindex-capabilities') {
+			return handleCapabilityReindexRequest(request, env)
+		}
+
+		if (url.pathname === '/__maintenance/execute-smoke') {
+			// Origin-only: proves this script's ctx.exports.KodyFetchGateway.
+			// MCP execute looks up the gateway on kody-platform.
+			return handleExecuteSmokeRequest(request, env)
+		}
+
+		if (url.pathname === executeHealthMaintenancePath) {
+			return handleExecuteHealthProbeRequest(
+				request,
+				env,
+				ctx,
+				(mcpRequest, mcpEnv, mcpContext) =>
+					loadLegacyMcpFetch().then((fetchLegacy) =>
+						fetchLegacy(mcpRequest, mcpEnv, mcpContext),
+					),
+			)
+		}
+
+		if (url.pathname === '/__maintenance/reindex-memories') {
+			return handleMemoryReindexRequest(request, env)
+		}
+
+		if (url.pathname === '/__maintenance/reindex-jobs') {
+			return handleJobReindexRequest(request, env)
+		}
+
+		if (url.pathname === '/__maintenance/dr-restore') {
+			return handleDrRestoreRequest(request, env)
+		}
+
+		if (url.pathname === '/__maintenance/dr-export') {
+			return handleDrExportRequest(request, env)
+		}
+
+		if (url.pathname === '/__maintenance/do-pitr') {
+			return handleDoPitrRequest(request, env)
+		}
+
+		if (url.pathname === '/__maintenance/dr-mailbox-import') {
+			return handleMailboxImportRequest(request, env)
+		}
+
+		if (url.pathname === '/__maintenance/status-incidents') {
+			return handleStatusIncidentEventRequest(request, env, ctx)
+		}
+
+		if (url.pathname.startsWith('/__maintenance/')) {
+			return Response.json(
+				{ error: 'Unknown maintenance endpoint.' },
+				{ status: 404 },
+			)
+		}
+
+		if (url.pathname === oauthPaths.authorize) {
+			try {
+				if (
+					request.method === 'POST' &&
+					request.headers
+						.get('Content-Type')
+						?.includes('application/x-www-form-urlencoded')
+				) {
+					const formData = await request.clone().formData()
+					// Only the signed-out inline-login form accepts credentials.
+					// Signed-in approval/denial posts remain protected by session
+					// and OAuth request state rather than a public bot challenge.
+					if (formData.has('email') || formData.has('password')) {
+						const protection = await verifyPublicFormProtection({
+							env,
+							request,
+							body: Object.fromEntries(formData),
+						})
+						if (!protection.ok) {
+							await discardUnreadRequestBody(request)
+							return protection.response
+						}
+					}
+				}
+				return await handleAuthorizeRequest(request, env)
+			} catch (error) {
+				Sentry.captureException(error)
+				return handleAuthorizeRouteException(request)
+			}
+		}
+
+		if (url.pathname === oauthPaths.authorizeInfo) {
+			try {
+				return await handleAuthorizeInfo(request, env)
+			} catch (error) {
+				Sentry.captureException(error)
+				return handleAuthorizeRouteException(request)
+			}
+		}
+
+		if (url.pathname === oauthPaths.callback) {
+			return handleOAuthCallback(request, env)
+		}
+
+		if (url.pathname === '/.well-known/appspecific/com.chrome.devtools.json') {
+			return new Response(null, { status: 204 })
+		}
+
+		if (isProtectedResourceMetadataRequest(url.pathname)) {
+			return handleProtectedResourceMetadata(request, env)
+		}
+
+		// Trailing-slash variants 404 otherwise; some MCP client docs (and paste
+		// habits) include the slash. Keep the protected resource at `/mcp`.
+		if (url.pathname === `${mcpResourcePath}/`) {
+			const canonical = new URL(request.url)
+			canonical.pathname = mcpResourcePath
+			return Response.redirect(canonical.toString(), 308)
+		}
+
+		if (url.pathname === mcpResourcePath) {
+			return handleMcpRequest({
+				request,
+				env,
+				ctx,
+				fetchMcp: (mcpRequest, mcpEnv, mcpContext) =>
+					loadLegacyMcpFetch().then((fetchLegacy) =>
+						fetchLegacy(mcpRequest, mcpEnv, mcpContext),
+					),
+			})
+		}
+
+		// Non-production inline package apps. Production requests normally redirect
+		// in handlePackageAppOriginRequest; this handler independently returns 500
+		// rather than executing package code if that routing invariant is broken.
+		if (isPackageAppRequestPath(url.pathname)) {
+			return handlePackageAppRequest(request, env)
+		}
+
+		if (
+			isNamespacedAppEndpointPath(url.pathname) ||
+			isNamespacedPackageInvocationEndpointPath(url.pathname)
+		) {
+			return new Response('Not Found', { status: 404 })
+		}
+
+		if (url.pathname.startsWith('/connectors/')) {
+			return new Response('Not Found', { status: 404 })
+		}
+
+		// Try to serve static assets for safe methods only. Any non-404 status
+		// (including 304 Not Modified for conditional requests) must be passed
+		// through; treating 304 as a miss would fall through to the app router
+		// and return 404 for every browser revalidation request.
+		if (env.ASSETS && (request.method === 'GET' || request.method === 'HEAD')) {
+			const response = await env.ASSETS.fetch(request)
+			if (response.status !== 404) {
+				if (shouldApplyLongLivedAssetCaching(url.pathname, env)) {
+					const headers = new Headers(response.headers)
+					headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+					return new Response(response.body, {
+						status: response.status,
+						statusText: response.statusText,
+						headers,
+					})
+				}
+				return response
+			}
+		}
+
+		return handleRequest(request, env, ctx)
+	},
+})
+
+// Endpoints, scopes, TTLs, CIMD, and onError live in
+// `#worker/oauth-provider-options.ts` so the handler-less `getOAuthApi`
+// fallback (`#worker/oauth-helpers.ts`) is configured identically.
+const oauthProvider = new OAuthProvider({
+	...sharedOAuthProviderOptions,
+	apiHandler,
+	defaultHandler: {
+		fetch(request, env, ctx) {
+			// @ts-expect-error https://github.com/cloudflare/workers-oauth-provider/issues/71
+			return appHandler(request, env, ctx)
+		},
+	},
+})
+
+/**
+ * Aligns with @cloudflare/workers-oauth-provider's addCorsHeaders for well-known routes.
+ * (See OAuthProviderImpl.fetch in that package.)
+ */
+function addOAuthDiscoveryCorsHeaders(
+	response: Response,
+	request: Request,
+): Response {
+	const origin = request.headers.get('Origin')
+	if (!origin) {
+		return response
+	}
+	const headers = new Headers(response.headers)
+	headers.set('Access-Control-Allow-Origin', origin)
+	const vary = headers.get('Vary')
+	headers.set('Vary', vary ? `${vary}, Origin` : 'Origin')
+	headers.set('Access-Control-Allow-Methods', '*')
+	headers.set('Access-Control-Allow-Headers', 'Authorization, *')
+	headers.set('Access-Control-Max-Age', '86400')
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	})
+}
+
+function isOAuthProviderOwnedPath(pathname: string) {
+	return (
+		pathname === oauthPaths.token ||
+		pathname === oauthPaths.register ||
+		pathname === oauthPaths.discovery ||
+		pathname === protectedResourceMetadataPath ||
+		pathname.startsWith(`${protectedResourceMetadataPath}/`) ||
+		pathname.startsWith(oauthPaths.apiPrefix)
+	)
+}
+
+function isMalformedOAuthClientException(error: unknown, pathname: string) {
+	const message = error instanceof Error ? error.message : ''
+	// @cloudflare/workers-oauth-provider still throws this raw TypeError when a
+	// stored client is missing redirectUris during token redirect_uri checks.
+	return (
+		pathname === oauthPaths.token &&
+		message.includes("Cannot read properties of undefined (reading 'some')")
+	)
+}
+
+function createOAuthProviderExceptionResponse(
+	error: unknown,
+	pathname: string,
+) {
+	const headers = {
+		'Cache-Control': 'no-store',
+		'Content-Type': 'application/json',
+	}
+	if (isMalformedOAuthClientException(error, pathname)) {
+		return new Response(
+			JSON.stringify({
+				error: 'invalid_client',
+				error_description: 'Invalid OAuth client registration.',
+			}),
+			{ status: 401, headers },
+		)
+	}
+
+	const errorDescription =
+		pathname === oauthPaths.register
+			? 'Invalid OAuth client registration.'
+			: 'OAuth provider request failed.'
+	return new Response(
+		JSON.stringify({
+			error:
+				pathname === oauthPaths.register ? 'invalid_request' : 'server_error',
+			error_description: errorDescription,
+		}),
+		{ status: pathname === oauthPaths.register ? 400 : 500, headers },
+	)
+}
+
+const workerHandler = {
+	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+		return runWithDynamicWorkerEvaluationBudget(
+			async () => await fetchWithDynamicWorkerBudget(request, env, ctx),
+		)
+	},
+	async email(
+		message: ForwardableEmailMessage,
+		env: Env,
+		ctx: ExecutionContext,
+	) {
+		await runWithDynamicWorkerEvaluationBudget(async () => {
+			// Let storage/transient failures throw so Email Routing does not
+			// acknowledge the message (retryable). Permanent rejects use
+			// message.setReject inside handleInboundEmail.
+			await handleInboundEmail(message, env, ctx)
+		})
+	},
+	async queue(batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext) {
+		await runWithDynamicWorkerEvaluationBudget(
+			async () => await handleQueueBatch(batch, env, ctx),
+		)
+	},
+} satisfies ExportedHandler<Env>
+
+async function fetchWithDynamicWorkerBudget(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+) {
+	const url = new URL(request.url)
+
+	// Production `*.workers.dev` is not a product origin. `/health` stays
+	// reachable so deploy and status probes can hit the script directly.
+	const nonCanonicalHost = refuseNonCanonicalProductionHost({
+		request,
+		env,
+		allowedHealthPath: '/health',
+	})
+	if (nonCanonicalHost) return nonCanonicalHost
+
+	// Package runtime lane extraction (ADR 0016): when the runtime Worker
+	// service binding is configured, runtime-owned requests (package-app
+	// origin, inline package apps, package invocation API) are forwarded
+	// wholesale to the `kody-runtime` Worker. Without the binding (tests,
+	// single-worker local dev) the in-process handlers below keep serving.
+	if (env.RUNTIME_WORKER && isRuntimeWorkerOwnedRequest(request, env)) {
+		return env.RUNTIME_WORKER.fetch(request)
+	}
+
+	return serveAnonymousHtmlFromCache(request, env, ctx, () =>
+		handleOriginAppFetch(request, env, ctx, url),
+	)
+}
+
+async function handleOriginAppFetch(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+	url: URL,
+) {
+	// Host isolation for hosted package apps runs before every other route:
+	// nothing first-party may be reachable on the package-app origin, and the
+	// app origin must not execute package code once that origin is configured.
+	const packageAppOriginResponse = await handlePackageAppOriginRequest(
+		request,
+		env,
+	)
+	if (packageAppOriginResponse) return packageAppOriginResponse
+
+	if (isPackageInvocationApiRequest(url.pathname)) {
+		return handlePackageInvocationApiRequest(request, env, ctx)
+	}
+	if (isWebhookIngressRequest(url.pathname)) {
+		return handleWebhookIngressRequest(request, env, ctx)
+	}
+
+	if (isNamespacedPackageInvocationEndpointPath(url.pathname)) {
+		return new Response('Not Found', { status: 404 })
+	}
+
+	// Domain-migration redirect for safe browser navigation from legacy app
+	// hosts. Runs after the API-shaped surfaces (package apps, invocation
+	// API, webhooks) so those keep serving on every attached
+	// host, and skips MCP/OAuth/auth/health paths itself. No-op unless
+	// APP_LEGACY_REDIRECT is enabled.
+	const legacyHostRedirect = getLegacyHostRedirectResponse({ request, env })
+	if (legacyHostRedirect) return legacyHostRedirect
+
+	// OAuthProvider serves this URL first and defaults `resource` to the origin only.
+	// MCP clients must use `<origin>/mcp` as the resource (RFC 8707) to match our
+	// token audience; otherwise authorize stores origin but the token request sends
+	// `/mcp` → invalid_target. Serve the same document as the `/mcp` metadata path.
+	const clientIdMetadataResponse =
+		handleMcpClientIdMetadataRequest(request) ??
+		handleCliClientIdMetadataRequest(request)
+	if (clientIdMetadataResponse) {
+		return addOAuthDiscoveryCorsHeaders(clientIdMetadataResponse, request)
+	}
+
+	if (url.pathname === oauthPaths.openidConfiguration) {
+		if (request.method === 'OPTIONS') {
+			return addOAuthDiscoveryCorsHeaders(
+				new Response(null, {
+					status: 204,
+					headers: { 'Content-Length': '0' },
+				}),
+				request,
+			)
+		}
+		return addOAuthDiscoveryCorsHeaders(
+			handleOpenIdConfigurationRequest(request, env),
+			request,
+		)
+	}
+
+	if (url.pathname === oauthPaths.jwks) {
+		if (request.method === 'OPTIONS') {
+			return addOAuthDiscoveryCorsHeaders(
+				new Response(null, {
+					status: 204,
+					headers: { 'Content-Length': '0' },
+				}),
+				request,
+			)
+		}
+		return addOAuthDiscoveryCorsHeaders(
+			await handleOidcJwksRequest(request, env),
+			request,
+		)
+	}
+
+	if (url.pathname === oauthPaths.userinfo) {
+		return handleOidcUserinfoRequest(request, env)
+	}
+
+	if (url.pathname === oauthPaths.logout) {
+		return handleOidcLogoutRequest(request, env)
+	}
+
+	// Serve both RFC 9728 PRM paths before OAuthProvider: the root document
+	// and the path-aware `.../mcp` document. 0.10+ would otherwise publish
+	// origin-only resource metadata on the path-aware URL and disagree with
+	// `<origin>/mcp` token audiences.
+	if (isProtectedResourceMetadataRequest(url.pathname)) {
+		if (request.method === 'OPTIONS') {
+			return addOAuthDiscoveryCorsHeaders(
+				new Response(null, {
+					status: 204,
+					headers: { 'Content-Length': '0' },
+				}),
+				request,
+			)
+		}
+		if (request.method === 'GET' || request.method === 'HEAD') {
+			const metadataRequest =
+				request.method === 'GET'
+					? request
+					: new Request(request.url, {
+							method: 'GET',
+							headers: request.headers,
+						})
+			const metadataResponse = handleProtectedResourceMetadata(
+				metadataRequest,
+				env,
+			)
+			if (request.method === 'HEAD') {
+				return addOAuthDiscoveryCorsHeaders(
+					new Response(null, {
+						status: metadataResponse.status,
+						headers: metadataResponse.headers,
+					}),
+					request,
+				)
+			}
+			return addOAuthDiscoveryCorsHeaders(metadataResponse, request)
+		}
+	}
+	try {
+		if (url.pathname === oauthPaths.token && request.method === 'POST') {
+			const { response, grantType } = await handleMcpOAuthTokenRequest({
+				request,
+				env,
+				fetchProvider: (providerRequest) =>
+					oauthProvider.fetch(providerRequest, env, ctx),
+			})
+			return enrichOAuthTokenResponse(request, response, env, {
+				grantType,
+			})
+		}
+		return await oauthProvider.fetch(request, env, ctx)
+	} catch (error) {
+		if (!isOAuthProviderOwnedPath(url.pathname)) throw error
+		Sentry.captureException(error)
+		return createOAuthProviderExceptionResponse(error, url.pathname)
+	}
+}
+
+export const originWorkerHandler = Sentry.withSentry(
+	(env: Env) => getWorkerSentryOptions(env),
+	workerHandler,
+)

@@ -1,0 +1,59 @@
+import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
+import {
+	userMeterNamespace,
+	userMeterRpc,
+	type UserMeterEnv,
+} from '#worker/entitlements/user-meter-client.ts'
+import { recordUsage, type UsageEnv } from '#worker/usage/record-usage.ts'
+import { type DynamicWorkerDaySurface } from './dynamic-worker-day-surface.ts'
+
+export type DynamicWorkerDayEnv = UsageEnv & UserMeterEnv
+
+/**
+ * Record one `dynamic_worker_day` when this user first uses `workerId` on
+ * the current UTC day. Cloudflare bills unique Dynamic Worker ids per UTC
+ * day, so repeats of the same id must not increment the usage metric.
+ *
+ * `surface` tags the LOADER mint that claimed the day (execute, job,
+ * package_export, …). Uniqueness is still `(user, workerId, day)` — the
+ * first claim's surface is the one stored.
+ *
+ * Never throws. Missing `USER_METER` skips the write so local/tests without
+ * the binding cannot overcount unique days. Returns the claim result so
+ * callers can record a `dynamic_worker_invoke` hit or miss; `undefined`
+ * when the claim did not run.
+ */
+export async function recordUniqueDynamicWorkerDay(input: {
+	env: DynamicWorkerDayEnv
+	userId: string | null | undefined
+	workerId: string
+	surface: DynamicWorkerDaySurface
+	now?: Date
+}): Promise<{ created: boolean } | undefined> {
+	try {
+		if (!input.userId) return
+		if (!userMeterNamespace(input.env)) return
+		const now = input.now ?? new Date()
+		const claimed = await userMeterRpc({
+			env: input.env,
+			userId: input.userId,
+		}).claimDynamicWorkerDay({
+			workerId: input.workerId,
+			day: utcDayKey(now),
+			createdAt: now.toISOString(),
+		})
+		if (claimed.created) {
+			await recordUsage(input.env, {
+				userId: input.userId,
+				eventType: 'dynamic_worker_day',
+				entityId: input.workerId,
+				outcome: 'success',
+				timestamp: now.toISOString(),
+				surface: input.surface,
+			})
+		}
+		return claimed
+	} catch (error) {
+		console.warn('dynamic-worker-day-record-failed', error)
+	}
+}

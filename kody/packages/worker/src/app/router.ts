@@ -1,0 +1,639 @@
+import { createRouter } from 'remix/router'
+import {
+	createAdminHandler,
+	createAdminUsersApiHandler,
+	createAdminUsersHandler,
+	createAdminUserUsageApiHandler,
+} from '#app/handlers/admin-users.ts'
+import {
+	createAdminCommunityReportsApiHandler,
+	createAdminCommunityReportsHandler,
+} from '#app/handlers/admin-community-reports.ts'
+import {
+	createAdminReservedUsernamesApiHandler,
+	createAdminReservedUsernamesHandler,
+} from '#app/handlers/admin-reserved-usernames.ts'
+import {
+	createAdminFeatureFlagsApiHandler,
+	createAdminFeatureFlagsHandler,
+} from '#app/handlers/admin-feature-flags.ts'
+import {
+	createAdminBannersApiHandler,
+	createAdminBannersHandler,
+} from '#app/handlers/admin-banners.ts'
+import { createSiteBannerDismissHandler } from '#app/handlers/site-banner-dismiss.ts'
+import { createYoutubeThumbHandler } from '#app/handlers/youtube-thumb.ts'
+import { createLandingHeroVideosApiHandler } from '#app/handlers/landing-hero-videos.ts'
+import {
+	createAdminPlatformIntegrationsApiHandler,
+	createAdminPlatformIntegrationsHandler,
+} from '#app/handlers/admin-platform-integrations.ts'
+import {
+	createAdminProviderMarksApiHandler,
+	createAdminProviderMarksHandler,
+} from '#app/handlers/admin-provider-marks.ts'
+import {
+	createAdminCodemodsApiHandler,
+	createAdminCodemodsHandler,
+	createAdminCodemodsRunApiHandler,
+	createAdminCodemodsRunStopApiHandler,
+} from '#app/handlers/admin-codemods.ts'
+import {
+	createAdminRolesApiHandler,
+	createAdminRolesHandler,
+} from '#app/handlers/admin-roles.ts'
+import {
+	createAdminInsightsApiHandler,
+	createAdminInsightsHandler,
+} from '#app/handlers/admin-insights.ts'
+import {
+	createAdminPlatformFeedbackApiHandler,
+	createAdminPlatformFeedbackHandler,
+} from '#app/handlers/admin-platform-feedback.ts'
+import {
+	createAdminSystemEmailApiHandler,
+	createAdminSystemEmailHandler,
+} from '#app/handlers/admin-system-email.ts'
+import { createAccountHandler } from '#app/handlers/account.ts'
+import { createAccountDeleteHandler } from '#app/handlers/account-delete.ts'
+import {
+	createAccountEmailApiHandler,
+	createAccountEmailHandler,
+} from '#app/handlers/account-email.ts'
+import { createAccountEmailChangeHandler } from '#app/handlers/account-email-change.ts'
+import { createAccountEmailClaimReleaseHandler } from '#app/handlers/account-email-claim-release.ts'
+import { createAccountPasswordHandler } from '#app/handlers/account-password.ts'
+import { createAccountExportHandler } from '#app/handlers/account-export.ts'
+import {
+	createAccountIntegrationsApiHandler,
+	createAccountIntegrationsHandler,
+} from '#app/handlers/account-integrations.ts'
+import {
+	createAccountActivityApiHandler,
+	createAccountActivityHandler,
+} from '#app/handlers/account-activity.ts'
+import {
+	createAccountJobsApiHandler,
+	createAccountJobsHandler,
+} from '#app/handlers/account-jobs.ts'
+import {
+	createAccountWorkflowsApiHandler,
+	createAccountWorkflowsHandler,
+} from '#app/handlers/account-workflows.ts'
+import {
+	createAccountWebhooksApiHandler,
+	createAccountWebhooksHandler,
+} from '#app/handlers/account-webhooks.ts'
+import {
+	createAccountMcpServersApiHandler,
+	createAccountMcpServersHandler,
+	createAccountMcpServersOauthCallbackHandler,
+} from '#app/handlers/account-mcp-servers.ts'
+import {
+	createAccountMemoriesApiHandler,
+	createAccountMemoriesExportHandler,
+	createAccountMemoriesHandler,
+} from '#app/handlers/account-memories.ts'
+import {
+	createAccountPackageApprovePublishApiHandler,
+	createAccountPackageApprovePublishHandler,
+} from '#app/handlers/account-package-approve-publish.ts'
+import {
+	createAccountPackagesApiHandler,
+	createAccountPackagesHandler,
+} from '#app/handlers/account-packages.ts'
+import {
+	createAccountPackageFilesApiHandler,
+	createAccountPackageFilesHandler,
+	createCommunityDetailFilesApiHandler,
+	createCommunityDetailFilesHandler,
+	createCommunityPackageFilesApiHandler,
+	createCommunityPackageFilesHandler,
+	createCommunityPackageTreeHandler,
+} from '#app/handlers/package-files.ts'
+import {
+	createCommunityDetailRawHandler,
+	createCommunityPackageRawHandler,
+} from '#app/handlers/package-files-raw.ts'
+import {
+	createAccountPasskeysApiHandler,
+	createAccountPasskeysHandler,
+} from '#app/handlers/account-passkeys.ts'
+import {
+	createAccountMcpOauthClientsApiHandler,
+	createAccountMcpOauthClientsHandler,
+} from '#app/handlers/account-mcp-oauth-clients.ts'
+import { createAccountConnectionsApiHandler } from '#app/handlers/account-connections.ts'
+import {
+	createAccountConnectedAgentsApiHandler,
+	createAccountConnectionsHandler,
+} from '#app/handlers/account-connected-agents.ts'
+import { createAccountAvatarApiPostHandler } from '#app/handlers/account-avatar.ts'
+import { createAccountProfileApiHandler } from '#app/handlers/account-profile.ts'
+import {
+	createAccountTwoFactorApiHandler,
+	createAccountTwoFactorHandler,
+} from '#app/handlers/account-two-factor.ts'
+import {
+	createAccountBillingApiHandler,
+	createAccountBillingCancellationFeedbackApiHandler,
+	createAccountBillingCheckoutApiHandler,
+	createAccountBillingHandler,
+	createAccountBillingPortalHandler,
+	createAccountBillingSuccessHandler,
+} from '#app/handlers/account-billing.ts'
+import { createAdminUserCreditsApiHandler } from '#app/handlers/admin-user-credits.ts'
+import {
+	createAccountCreditsHandler,
+	createAccountCreditsSettingsApiHandler,
+	createAccountCreditsTopUpApiHandler,
+} from '#app/handlers/account-credits.ts'
+import {
+	createAccountUsageApiHandler,
+	createAccountUsageHandler,
+} from '#app/handlers/account-usage.ts'
+import {
+	createAccountWaitingApiHandler,
+	createAccountWaitingClickHandler,
+	createAccountWaitingHandler,
+} from '#app/handlers/account-waiting.ts'
+import {
+	createAccountExperimentsApiHandler,
+	createAccountExperimentsHandler,
+} from '#app/handlers/account-experiments.ts'
+import {
+	createAccountSharedApiHandler,
+	createAccountSharedHandler,
+} from '#app/handlers/account-shared.ts'
+import { createCommunityPackageShareApiHandler } from '#app/handlers/package-share.ts'
+import { createCommunityPackageWebhooksApiHandler } from '#app/handlers/package-webhooks.ts'
+import {
+	createCommunityPackageApproveChangesApiHandler,
+	createCommunityPackageApproveChangesHandler,
+} from '#app/handlers/package-share-approve-changes.ts'
+import { createAccountResendVerificationHandler } from '#app/handlers/account-resend-verification.ts'
+import { createPendingVerificationHandler } from '#app/handlers/pending-verification.ts'
+import {
+	createAccountSecretsApiHandler,
+	createAccountSecretsHandler,
+} from '#app/handlers/account-secrets.ts'
+import {
+	createAccountSecretProvidersApiHandler,
+	createAccountSecretProvidersHandler,
+} from '#app/handlers/account-secret-providers.ts'
+import {
+	createAccountValuesApiHandler,
+	createAccountValuesHandler,
+} from '#app/handlers/account-values.ts'
+import { createAuthHandler } from '#app/handlers/auth.ts'
+import {
+	createAuthProviderCallbackHandler,
+	createAuthProviderStartHandler,
+	createAuthProvidersApiHandler,
+} from '#app/handlers/auth-provider.ts'
+import { createConnectOauthHandler } from '#app/handlers/connect-oauth.ts'
+import { createConnectSecretsHandler } from '#app/handlers/connect-secrets.ts'
+import { createConnectWebhookApplyHandler } from '#app/handlers/connect-webhook-apply.ts'
+import { createAccountWebhooksApproveApplyApiHandler } from '#app/handlers/account-webhooks-approve-apply.ts'
+import {
+	createCommunityApiHandler,
+	createCommunityHandler,
+} from '#app/handlers/community.tsx'
+import {
+	createCommunityDetailApiHandler,
+	createCommunityDetailHandler,
+	createCommunityDetailOgImageHandler,
+	createCommunityPackageApiHandler,
+	createCommunityPackageHandler,
+	createCommunityPackageSettingsHandler,
+	createCommunityReportApiPostHandler,
+} from '#app/handlers/community-detail.tsx'
+import { createCommunityFeatureApiPostHandler } from '#app/handlers/community-feature.ts'
+import { createAccountRepoIconHandler } from '#app/handlers/account-repo-icon.ts'
+import { createCommunityIconHandler } from '#app/handlers/community-icon.ts'
+import { createCommunityPackageIconHandler } from '#app/handlers/community-package-icon.ts'
+import {
+	createCommunityDetailAssetHandler,
+	createCommunityPackageAssetHandler,
+} from '#app/handlers/package-readme-assets.ts'
+import { createIntegrationLogoHandler } from '#app/handlers/integration-logo.ts'
+import { createProviderMarkLogoHandler } from '#app/handlers/provider-mark-logo.ts'
+import { createMcpServerLogoHandler } from '#app/handlers/mcp-server-logo.ts'
+import { createCommunityInstallApiPostHandler } from '#app/handlers/community-install.ts'
+import { createCommunityTrustApiPostHandler } from '#app/handlers/community-trust.ts'
+import {
+	createProfileApiHandler,
+	createProfileHandler,
+	createProfileOgImageHandler,
+} from '#app/handlers/profile.tsx'
+import { createProfileAvatarHandler } from '#app/handlers/profile-avatar.ts'
+import { createWebhookIngressHandler } from '#app/handlers/webhook-ingress.ts'
+import { createStripeWebhookHandler } from '#app/handlers/stripe-webhook.ts'
+import {
+	createBlogApiHandler,
+	createBlogHandler,
+	createBlogPostApiHandler,
+	createBlogPostHandler,
+	createBlogPostMarkdownHandler,
+	createBlogPostOgImageHandler,
+	createBlogRssHandler,
+} from '#app/handlers/blog.tsx'
+import {
+	createDocDetailApiHandler,
+	createDocDetailHandler,
+	createDocDetailMarkdownHandler,
+	createDocDetailOgImageHandler,
+	createDocsApiHandler,
+	createDocsConnectApiHandler,
+	createDocsConnectHandler,
+	createDocsConnectMarkdownHandler,
+	createDocsHandler,
+	createDocsLlmsTxtHandler,
+	createDocsMarkdownHandler,
+	createLlmsTxtHandler,
+} from '#app/handlers/docs.tsx'
+import { createPackageSharingOptInHandler } from '#app/handlers/package-sharing-opt-in.ts'
+import { createSecretProvidersOptInHandler } from '#app/handlers/secret-providers-opt-in.ts'
+import {
+	createLegacyGuidesApiRedirectHandler,
+	createLegacyGuidesMarkdownRedirectHandler,
+	createLegacyGuidesPathRedirectHandler,
+	createLegacyGuidesRedirectHandler,
+} from '#app/handlers/legacy-guides-redirect.ts'
+import { createHealthHandler } from '#app/handlers/health.ts'
+import { createHealthComponentsHandler } from '#app/handlers/health-components.ts'
+import { createSentryTunnelHandler } from '#app/handlers/sentry-tunnel.ts'
+import {
+	createAgentSkillMarkdownHandler,
+	createAgentSkillsIndexHandler,
+	createApiCatalogHandler,
+	createAuthMarkdownHandler,
+	createMcpServerCardHandler,
+	createOpenaiAppsChallengeHandler,
+	createRobotsTxtHandler,
+	createSecurityTxtHandler,
+	createSitemapHandler,
+} from '#app/handlers/agent-discovery.ts'
+import { createHomeHandler } from '#app/handlers/home.ts'
+import {
+	createInternalErrorPageHandler,
+	createNotFoundPageHandler,
+	renderIllustratedNotFoundPage,
+} from '#app/handlers/error-pages.ts'
+import { createLoginHandler } from '#app/handlers/login.ts'
+import { createOgPageImageHandler } from '#app/handlers/og-page-image.ts'
+import {
+	createOnboardingApiHandler,
+	createOnboardingChecklistDismissHandler,
+	createOnboardingHandler,
+} from '#app/handlers/onboarding.ts'
+import {
+	createDiscordApiHandler,
+	createDiscordHandler,
+} from '#app/handlers/discord.ts'
+import { createPricingHandler } from '#app/handlers/pricing.ts'
+import { createFaqHandler } from '#app/handlers/faq.ts'
+import { createPrivacyHandler } from '#app/handlers/privacy.ts'
+import { createSupportHandler } from '#app/handlers/support.ts'
+import { createTermsHandler } from '#app/handlers/terms.ts'
+import { createResetPasswordHandler } from '#app/handlers/reset-password.ts'
+import {
+	createTwoFactorVerifyApiHandler,
+	createVerifyHandler,
+} from '#app/handlers/verify.ts'
+import { createUnsubscribeTipsHandler } from '#app/handlers/unsubscribe-tips.ts'
+import { createAccountEmailDestinationsHandler } from '#app/handlers/account-email-destinations.ts'
+import { createVerifyEmailChangeHandler } from '#app/handlers/verify-email-change.ts'
+import { createVerifyEmailClaimReleaseHandler } from '#app/handlers/verify-email-claim-release.ts'
+import { createVerifyEmailDestinationHandler } from '#app/handlers/verify-email-destination.ts'
+import { createVerifyEmailHandler } from '#app/handlers/verify-email.ts'
+import {
+	createWebauthnAuthenticationHandler,
+	createWebauthnRegistrationHandler,
+} from '#app/handlers/webauthn.ts'
+import { logout } from '#app/handlers/logout.ts'
+import {
+	createPasswordResetConfirmHandler,
+	createPasswordResetRequestHandler,
+} from '#app/handlers/password-reset.ts'
+import { createSessionHandler } from '#app/handlers/session.ts'
+import { createSignupHandler } from '#app/handlers/signup.ts'
+import { routes } from '#universal/routes.ts'
+import { createAccountWriteLeaseMiddleware } from '#app/account-write-lease-middleware.ts'
+import { remixCrossOriginProtection } from '#app/cross-origin-protection.ts'
+import { createReferralCookieMiddleware } from '#app/referral-cookie-middleware.ts'
+export function createAppRouter(env: Env) {
+	const router = createRouter({
+		middleware: [
+			remixCrossOriginProtection,
+			createReferralCookieMiddleware(),
+			createAccountWriteLeaseMiddleware(env),
+		],
+		async defaultHandler({ request }) {
+			return renderIllustratedNotFoundPage({ request, env })
+		},
+	})
+
+	router.map(routes, {
+		actions: {
+			home: createHomeHandler(env),
+			landingHeroVideosApi: createLandingHeroVideosApiHandler(env),
+			notFoundPage: createNotFoundPageHandler(env),
+			internalErrorPage: createInternalErrorPageHandler(env),
+			robotsTxt: createRobotsTxtHandler(env),
+			sitemap: createSitemapHandler(env),
+			authMarkdown: createAuthMarkdownHandler(env),
+			mcpServerCard: createMcpServerCardHandler(env),
+			apiCatalog: createApiCatalogHandler(env),
+			agentSkillsIndex: createAgentSkillsIndexHandler(env),
+			agentSkillMarkdown: createAgentSkillMarkdownHandler(env),
+			securityTxt: createSecurityTxtHandler(env),
+			openaiAppsChallenge: createOpenaiAppsChallengeHandler(env),
+			health: createHealthHandler(env),
+			healthComponents: createHealthComponentsHandler(env),
+			sentryTunnel: createSentryTunnelHandler(env),
+			login: createLoginHandler(env),
+			ogPageImage: createOgPageImageHandler(env),
+			blog: createBlogHandler(env),
+			blogApi: createBlogApiHandler(env),
+			blogRss: createBlogRssHandler(env),
+			blogPost: createBlogPostHandler(env),
+			blogPostApi: createBlogPostApiHandler(env),
+			blogPostMarkdown: createBlogPostMarkdownHandler(env),
+			blogPostOgImage: createBlogPostOgImageHandler(env),
+			docs: createDocsHandler(env),
+			docsApi: createDocsApiHandler(env),
+			docsMarkdown: createDocsMarkdownHandler(env),
+			docsLlmsTxt: createDocsLlmsTxtHandler(env),
+			docsConnect: createDocsConnectHandler(env),
+			docsConnectApi: createDocsConnectApiHandler(env),
+			docsConnectMarkdown: createDocsConnectMarkdownHandler(env),
+			docDetail: createDocDetailHandler(env),
+			docDetailApi: createDocDetailApiHandler(env),
+			docDetailMarkdown: createDocDetailMarkdownHandler(env),
+			docDetailOgImage: createDocDetailOgImageHandler(env),
+			packageSharingOptInPost: createPackageSharingOptInHandler(env),
+			secretProvidersOptInPost: createSecretProvidersOptInHandler(env),
+			llmsTxt: createLlmsTxtHandler(env),
+			legacyGuides: createLegacyGuidesRedirectHandler(env),
+			legacyGuidesApi: createLegacyGuidesApiRedirectHandler(env),
+			legacyGuidesMarkdown: createLegacyGuidesMarkdownRedirectHandler(env),
+			legacyGuidesPath: createLegacyGuidesPathRedirectHandler(env),
+			pricing: createPricingHandler(env),
+			faq: createFaqHandler(env),
+			support: createSupportHandler(env),
+			privacy: createPrivacyHandler(env),
+			terms: createTermsHandler(env),
+			discord: createDiscordHandler(env),
+			discordApi: createDiscordApiHandler(env),
+			onboarding: createOnboardingHandler(env),
+			onboardingStep1: createOnboardingHandler(env),
+			onboardingStep1Agent: createOnboardingHandler(env),
+			onboardingStep2: createOnboardingHandler(env),
+			onboardingStep2Service: createOnboardingHandler(env),
+			onboardingStep3: createOnboardingHandler(env),
+			onboardingStep3Agent: createOnboardingHandler(env),
+			onboardingApi: createOnboardingApiHandler(env),
+			onboardingChecklistDismissPost:
+				createOnboardingChecklistDismissHandler(env),
+			resetPassword: createResetPasswordHandler(env),
+			verifyEmail: createVerifyEmailHandler(env),
+			verifyEmailChange: createVerifyEmailChangeHandler(env),
+			verifyEmailClaimRelease: createVerifyEmailClaimReleaseHandler(env),
+			verifyEmailDestination: createVerifyEmailDestinationHandler(env),
+			unsubscribeTips: createUnsubscribeTipsHandler(env),
+			pendingVerification: createPendingVerificationHandler(env),
+			signup: createSignupHandler(env),
+			siteBannerDismissPost: createSiteBannerDismissHandler(env),
+			youtubeThumb: createYoutubeThumbHandler(env),
+			account: createAccountHandler(env),
+			accountDelete: createAccountDeleteHandler(env),
+			accountExport: createAccountExportHandler(env),
+			accountIntegrations: createAccountIntegrationsHandler(env),
+			accountOauthAppDetail: createAccountIntegrationsHandler(env),
+			accountIntegrationsApprove: createAccountIntegrationsHandler(env),
+			accountIntegrationDetail: createAccountIntegrationsHandler(env),
+			accountIntegrationsApi: createAccountIntegrationsApiHandler(env),
+			accountIntegrationsApiPost: createAccountIntegrationsApiHandler(env),
+			accountMcpServers: createAccountMcpServersHandler(env),
+			accountMcpServerNew: createAccountMcpServersHandler(env),
+			accountMcpServerLogo: createMcpServerLogoHandler(env),
+			accountMcpServerDetail: createAccountMcpServersHandler(env),
+			accountMcpServersOauthCallback:
+				createAccountMcpServersOauthCallbackHandler(env),
+			accountMcpServersApi: createAccountMcpServersApiHandler(env),
+			accountMcpServersApiPost: createAccountMcpServersApiHandler(env),
+			accountPackages: createAccountPackagesHandler(env),
+			accountPackageDetail: createAccountPackagesHandler(env),
+			accountPackageApprovePublish:
+				createAccountPackageApprovePublishHandler(env),
+			accountPackageApprovePublishApi:
+				createAccountPackageApprovePublishApiHandler(env),
+			communityPackageApprovePublish:
+				createAccountPackageApprovePublishHandler(env),
+			communityPackageApprovePublishApi:
+				createAccountPackageApprovePublishApiHandler(env),
+			communityPackageApproveChanges:
+				createCommunityPackageApproveChangesHandler(env),
+			communityPackageApproveChangesApi:
+				createCommunityPackageApproveChangesApiHandler(env),
+			communityPackageShareApi: createCommunityPackageShareApiHandler(env),
+			communityPackageShareApiPost: createCommunityPackageShareApiHandler(env),
+			communityPackageWebhooksApi:
+				createCommunityPackageWebhooksApiHandler(env),
+			communityPackageWebhooksApiPost:
+				createCommunityPackageWebhooksApiHandler(env),
+			accountPackageFiles: createAccountPackageFilesHandler(env),
+			accountPackageFilesApi: createAccountPackageFilesApiHandler(env),
+			accountPackagesApi: createAccountPackagesApiHandler(env),
+			accountPackagesApiPost: createAccountPackagesApiHandler(env),
+			accountConnections: createAccountConnectionsHandler(env),
+			accountConnectionNew: createAccountConnectionsHandler(env),
+			accountConnectionNewAgent: createAccountConnectionsHandler(env),
+			accountConnectionsApi: createAccountConnectionsApiHandler(env),
+			accountConnectionsApiPost: createAccountConnectionsApiHandler(env),
+			accountConnectedAgentsApi: createAccountConnectedAgentsApiHandler(env),
+			accountConnectedAgentsApiPost:
+				createAccountConnectedAgentsApiHandler(env),
+			accountPasskeys: createAccountPasskeysHandler(env),
+			accountPasskeysApi: createAccountPasskeysApiHandler(env),
+			accountPasskeysApiPost: createAccountPasskeysApiHandler(env),
+			accountMcpOauthClients: createAccountMcpOauthClientsHandler(env),
+			accountMcpOauthClientsApi: createAccountMcpOauthClientsApiHandler(env),
+			accountMcpOauthClientsApiPost:
+				createAccountMcpOauthClientsApiHandler(env),
+			accountProfileApi: createAccountProfileApiHandler(env),
+			accountProfileApiPost: createAccountProfileApiHandler(env),
+			accountAvatarApiPost: createAccountAvatarApiPostHandler(env),
+			accountTwoFactor: createAccountTwoFactorHandler(env),
+			accountTwoFactorApi: createAccountTwoFactorApiHandler(env),
+			accountTwoFactorApiPost: createAccountTwoFactorApiHandler(env),
+			accountBilling: createAccountBillingHandler(env),
+			accountBillingApi: createAccountBillingApiHandler(env),
+			accountBillingCheckoutPost: createAccountBillingCheckoutApiHandler(env),
+			accountBillingCancellationFeedbackPost:
+				createAccountBillingCancellationFeedbackApiHandler(env),
+			accountBillingSuccess: createAccountBillingSuccessHandler(env),
+			accountBillingPortal: createAccountBillingPortalHandler(env),
+			accountCredits: createAccountCreditsHandler(),
+			accountCreditsTopUpPost: createAccountCreditsTopUpApiHandler(env),
+			accountCreditsSettingsPost: createAccountCreditsSettingsApiHandler(env),
+			accountUsage: createAccountUsageHandler(env),
+			accountUsageApi: createAccountUsageApiHandler(env),
+			accountWaiting: createAccountWaitingHandler(env),
+			accountWaitingApi: createAccountWaitingApiHandler(env),
+			accountWaitingClickPost: createAccountWaitingClickHandler(env),
+			accountExperiments: createAccountExperimentsHandler(env),
+			accountExperimentsApi: createAccountExperimentsApiHandler(env),
+			accountExperimentsApiPost: createAccountExperimentsApiHandler(env),
+			accountShared: createAccountSharedHandler(env),
+			accountSharedApi: createAccountSharedApiHandler(env),
+			accountSharedApiPost: createAccountSharedApiHandler(env),
+			accountEmailChange: createAccountEmailChangeHandler(env),
+			accountEmailDestinationsApi: createAccountEmailDestinationsHandler(env),
+			accountEmailDestinationsApiPost:
+				createAccountEmailDestinationsHandler(env),
+			accountEmailClaimRelease: createAccountEmailClaimReleaseHandler(env),
+			accountPassword: createAccountPasswordHandler(env),
+			accountResendVerification: createAccountResendVerificationHandler(env),
+			accountSecrets: createAccountSecretsHandler(env),
+			accountSecretNew: createAccountSecretsHandler(env),
+			accountSecretsApprove: createAccountSecretsHandler(env),
+			accountSecretUserDetail: createAccountSecretsHandler(env),
+			accountSecretSessionDetail: createAccountSecretsHandler(env),
+			accountSecretPackageDetail: createAccountSecretsHandler(env),
+			accountSecretsApi: createAccountSecretsApiHandler(env),
+			accountSecretsApiPost: createAccountSecretsApiHandler(env),
+			accountSecretProviders: createAccountSecretProvidersHandler(env),
+			accountSecretProvidersApprove: createAccountSecretProvidersHandler(env),
+			accountSecretProvidersApi: createAccountSecretProvidersApiHandler(env),
+			accountSecretProvidersApiPost:
+				createAccountSecretProvidersApiHandler(env),
+			accountValues: createAccountValuesHandler(env),
+			accountValueNew: createAccountValuesHandler(env),
+			accountValueDetail: createAccountValuesHandler(env),
+			accountValuesApi: createAccountValuesApiHandler(env),
+			accountValuesApiPost: createAccountValuesApiHandler(env),
+			accountJobs: createAccountJobsHandler(env),
+			accountJobDetail: createAccountJobsHandler(env),
+			accountJobsApi: createAccountJobsApiHandler(env),
+			accountJobsApiPost: createAccountJobsApiHandler(env),
+			accountWorkflows: createAccountWorkflowsHandler(env),
+			accountWorkflowDetail: createAccountWorkflowsHandler(env),
+			accountWorkflowsApi: createAccountWorkflowsApiHandler(env),
+			accountWorkflowsApiPost: createAccountWorkflowsApiHandler(env),
+			accountWebhooks: createAccountWebhooksHandler(env),
+			accountWebhooksApi: createAccountWebhooksApiHandler(env),
+			accountWebhooksApproveApplyApi:
+				createAccountWebhooksApproveApplyApiHandler(env),
+			accountWebhooksApproveApplyApiPost:
+				createAccountWebhooksApproveApplyApiHandler(env),
+			accountActivity: createAccountActivityHandler(env),
+			accountActivityDetail: createAccountActivityHandler(env),
+			accountActivityApi: createAccountActivityApiHandler(env),
+			accountMemories: createAccountMemoriesHandler(env),
+			accountMemoriesExport: createAccountMemoriesExportHandler(env),
+			accountMemoryDetail: createAccountMemoriesHandler(env),
+			accountMemoriesApi: createAccountMemoriesApiHandler(env),
+			accountMemoriesApiPost: createAccountMemoriesApiHandler(env),
+			accountEmail: createAccountEmailHandler(env),
+			accountEmailDetail: createAccountEmailHandler(env),
+			accountEmailApi: createAccountEmailApiHandler(env),
+			admin: createAdminHandler(env),
+			adminUsers: createAdminUsersHandler(env),
+			adminUserDetail: createAdminUsersHandler(env),
+			adminUsersApi: createAdminUsersApiHandler(env),
+			adminUsersApiPost: createAdminUsersApiHandler(env),
+			adminReservedUsernames: createAdminReservedUsernamesHandler(env),
+			adminReservedUsernamesApi: createAdminReservedUsernamesApiHandler(env),
+			adminReservedUsernamesApiPost:
+				createAdminReservedUsernamesApiHandler(env),
+			adminFeatureFlags: createAdminFeatureFlagsHandler(env),
+			adminFeatureFlagsApi: createAdminFeatureFlagsApiHandler(env),
+			adminFeatureFlagsApiPost: createAdminFeatureFlagsApiHandler(env),
+			adminBanners: createAdminBannersHandler(env),
+			adminBannersApi: createAdminBannersApiHandler(env),
+			adminBannersApiPost: createAdminBannersApiHandler(env),
+			adminPlatformIntegrations: createAdminPlatformIntegrationsHandler(env),
+			adminPlatformIntegrationNew: createAdminPlatformIntegrationsHandler(env),
+			adminPlatformIntegrationDetail:
+				createAdminPlatformIntegrationsHandler(env),
+			adminPlatformIntegrationsApi:
+				createAdminPlatformIntegrationsApiHandler(env),
+			adminPlatformIntegrationsApiPost:
+				createAdminPlatformIntegrationsApiHandler(env),
+			adminProviderMarks: createAdminProviderMarksHandler(env),
+			adminProviderMarksApi: createAdminProviderMarksApiHandler(env),
+			adminProviderMarksApiPost: createAdminProviderMarksApiHandler(env),
+			adminCodemods: createAdminCodemodsHandler(env),
+			adminCodemodsApi: createAdminCodemodsApiHandler(env),
+			adminCodemodsRunApi: createAdminCodemodsRunApiHandler(env),
+			adminCodemodsRunStopApi: createAdminCodemodsRunStopApiHandler(env),
+			adminRoles: createAdminRolesHandler(env),
+			adminRolesApi: createAdminRolesApiHandler(env),
+			adminCommunityReports: createAdminCommunityReportsHandler(env),
+			adminCommunityReportsApi: createAdminCommunityReportsApiHandler(env),
+			adminCommunityReportsApiPost: createAdminCommunityReportsApiHandler(env),
+			adminUserUsageApi: createAdminUserUsageApiHandler(env),
+			adminUserCreditsApi: createAdminUserCreditsApiHandler(env),
+			adminUserCreditsApiPost: createAdminUserCreditsApiHandler(env),
+			adminInsights: createAdminInsightsHandler(env),
+			adminInsightsApi: createAdminInsightsApiHandler(env),
+			adminPlatformFeedback: createAdminPlatformFeedbackHandler(env),
+			adminPlatformFeedbackApi: createAdminPlatformFeedbackApiHandler(env),
+			adminSystemEmail: createAdminSystemEmailHandler(env),
+			adminSystemEmailApi: createAdminSystemEmailApiHandler(env),
+			community: createCommunityHandler(env),
+			communityApi: createCommunityApiHandler(env),
+			communityDetail: createCommunityDetailHandler(env),
+			communityDetailApi: createCommunityDetailApiHandler(env),
+			communityDetailFiles: createCommunityDetailFilesHandler(env),
+			communityDetailFilesApi: createCommunityDetailFilesApiHandler(env),
+			communityDetailRaw: createCommunityDetailRawHandler(env),
+			communityPackage: createCommunityPackageHandler(env),
+			communityPackageApi: createCommunityPackageApiHandler(env),
+			communityPackageSettings: createCommunityPackageSettingsHandler(env),
+			communityPackageFiles: createCommunityPackageFilesHandler(env),
+			communityPackageTree: createCommunityPackageTreeHandler(env),
+			communityPackageRaw: createCommunityPackageRawHandler(env),
+			communityPackageFilesApi: createCommunityPackageFilesApiHandler(env),
+			communityPackageAsset: createCommunityPackageAssetHandler(env),
+			communityDetailAsset: createCommunityDetailAssetHandler(env),
+			communityDetailIcon: createCommunityIconHandler(env),
+			communityPackageIcon: createCommunityPackageIconHandler(env),
+			accountRepoIcon: createAccountRepoIconHandler(env),
+			integrationLogo: createIntegrationLogoHandler(env),
+			providerMarkLogo: createProviderMarkLogoHandler(env),
+			communityDetailOgImage: createCommunityDetailOgImageHandler(env),
+			communityReportApiPost: createCommunityReportApiPostHandler(env),
+			communityTrustApiPost: createCommunityTrustApiPostHandler(env),
+			communityFeatureApiPost: createCommunityFeatureApiPostHandler(env),
+			communityInstallApiPost: createCommunityInstallApiPostHandler(env),
+			profile: createProfileHandler(env),
+			profileApi: createProfileApiHandler(env),
+			profileAvatar: createProfileAvatarHandler(env),
+			profileOgImage: createProfileOgImageHandler(env),
+			webhookIngress: createWebhookIngressHandler(env),
+			stripeWebhook: createStripeWebhookHandler(env),
+			connectOauth: createConnectOauthHandler(env),
+			connectSecrets: createConnectSecretsHandler(env),
+			connectWebhookApply: createConnectWebhookApplyHandler(env),
+			auth: createAuthHandler(env),
+			authProvidersApi: createAuthProvidersApiHandler(env),
+			authProviderStart: createAuthProviderStartHandler(env),
+			authProviderCallback: createAuthProviderCallbackHandler(env),
+			session: createSessionHandler(env),
+			logout,
+			passwordResetRequest: createPasswordResetRequestHandler(env),
+			passwordResetConfirm: createPasswordResetConfirmHandler(env),
+			verify: createVerifyHandler(env),
+			verifyTwoFactorApi: createTwoFactorVerifyApiHandler(env),
+			webauthnRegistration: createWebauthnRegistrationHandler(env),
+			webauthnRegistrationPost: createWebauthnRegistrationHandler(env),
+			webauthnAuthentication: createWebauthnAuthenticationHandler(env),
+			webauthnAuthenticationPost: createWebauthnAuthenticationHandler(env),
+		},
+	})
+
+	return router
+}

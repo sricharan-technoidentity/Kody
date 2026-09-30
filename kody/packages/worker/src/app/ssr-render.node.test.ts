@@ -1,0 +1,1998 @@
+import { expect, test, vi } from 'vitest'
+import { type CommunityListingWithAggregates } from '#worker/community/types.ts'
+import {
+	createAuthCookie,
+	resetAuthSessionSecretForTests,
+	setAuthSessionSecret,
+	type AuthSession,
+} from '#app/auth-session.ts'
+import { createAccountHandler } from '#app/handlers/account.ts'
+import { createAccountConnectionsHandler } from '#app/handlers/account-connected-agents.ts'
+import { createAccountPasskeysHandler } from '#app/handlers/account-passkeys.ts'
+import { createAccountMcpOauthClientsHandler } from '#app/handlers/account-mcp-oauth-clients.ts'
+import { createAccountTwoFactorHandler } from '#app/handlers/account-two-factor.ts'
+import { createAccountWaitingHandler } from '#app/handlers/account-waiting.ts'
+import { createCommunityHandler } from '#app/handlers/community.tsx'
+import {
+	createCommunityDetailHandler,
+	createCommunityPackageHandler,
+} from '#app/handlers/community-detail.tsx'
+import { createOnboardingHandler } from '#app/handlers/onboarding.ts'
+import { createPendingVerificationHandler } from '#app/handlers/pending-verification.ts'
+import { createResetPasswordHandler } from '#app/handlers/reset-password.ts'
+import { resetInlineStylesheetCache } from '#app/inline-stylesheet.ts'
+import { renderAppPage, resolveOriginClientEntry } from '#app/ssr-render.tsx'
+import {
+	getReadNextBlogPost,
+	listBlogPosts,
+	toBlogPostSummary,
+} from '#worker/blog/catalog.ts'
+import { resetDataCacheForTests } from '#app/data-cache.ts'
+import { firstPartySecurityHeaders } from '#app/security-headers.ts'
+import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
+import { BLOG_PLACEHOLDER_CALLOUT } from '#universal/blog-display.ts'
+import { getScrollRestorationInlineScript } from '#universal/router-scroll-restoration.ts'
+import type * as CommunityProfileRepo from '#worker/community/profile-repo.ts'
+import type * as PackageUrlModule from '#worker/community/package-url.ts'
+import { createMemoryKv } from '#worker/test-support/auth-provider-harness.ts'
+import { testOidcSigningEnv } from '#worker/test-support/oidc-signing-env.ts'
+
+const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
+
+const communityMockModule = vi.hoisted(() => ({
+	listCommunityIndexOverview: vi.fn(),
+	getCommunityCategoryCounts: vi.fn(),
+	listCommunityListingsWithAggregates: vi.fn(),
+	searchCommunityListings: vi.fn(),
+	getCommunityListingWithAggregates: vi.fn(),
+	getUserSocialRowByUsername: vi.fn(),
+	resolveCommunityListingRoute: vi.fn(),
+	resolveCanonicalListingPath: vi.fn(),
+	resolvePackagePageUrl: vi.fn(),
+}))
+
+vi.mock('#worker/community/service.ts', () => ({
+	listCommunityIndexOverview: (...args: Array<unknown>) =>
+		communityMockModule.listCommunityIndexOverview(...args),
+	getCommunityCategoryCounts: (...args: Array<unknown>) =>
+		communityMockModule.getCommunityCategoryCounts(...args),
+	listCommunityListingsWithAggregates: (...args: Array<unknown>) =>
+		communityMockModule.listCommunityListingsWithAggregates(...args),
+	searchCommunityListings: (...args: Array<unknown>) =>
+		communityMockModule.searchCommunityListings(...args),
+	getCommunityListingWithAggregates: (...args: Array<unknown>) =>
+		communityMockModule.getCommunityListingWithAggregates(...args),
+	reportCommunityListing: vi.fn(),
+	listFeaturedCommunityListingsWithAggregates: vi.fn(async () => []),
+	getCommunityListingsByIds: vi.fn(async () => []),
+}))
+
+// Owner/kody-id resolution is covered against the real schema in
+// `community/package-url` tests; here it only has to hand the handler a
+// listing id so the page itself can be rendered.
+vi.mock('#app/community-package-route.ts', () => ({
+	resolveCommunityListingRoute: (...args: Array<unknown>) =>
+		communityMockModule.resolveCommunityListingRoute(...args),
+	resolveCanonicalListingPath: (...args: Array<unknown>) =>
+		communityMockModule.resolveCanonicalListingPath(...args),
+}))
+
+vi.mock('#worker/community/package-url.ts', async (importOriginal) => {
+	const actual = await importOriginal<typeof PackageUrlModule>()
+	return {
+		...actual,
+		resolvePackagePageUrl: (...args: Array<unknown>) =>
+			communityMockModule.resolvePackagePageUrl(...args),
+	}
+})
+
+vi.mock('#worker/community/profile-repo.ts', async (importOriginal) => {
+	const actual = await importOriginal<typeof CommunityProfileRepo>()
+	return {
+		...actual,
+		getUserSocialRowByUsername: (...args: Array<unknown>) =>
+			communityMockModule.getUserSocialRowByUsername(...args),
+	}
+})
+
+const sampleListing = {
+	id: 'listing-1',
+	ownerUserId: 'owner-mcp-id',
+	packageId: 'pkg-1',
+	sourceId: 'src-1',
+	kodyId: 'github-triage',
+	name: '@kentcdodds/github-triage',
+	description: 'Triage GitHub issues.',
+	tags: ['github'],
+	category: 'integrations',
+	searchText: null,
+	readmeContent: '# README',
+	license: 'MIT',
+	pinnedCommit: 'abc1234567890',
+	iconCommit: 'abc1234567890',
+	status: 'active',
+	trustedCommit: null,
+	trustedAt: null,
+	trusted: false,
+	featuredAt: null,
+	featured: false,
+	createdAt: '2026-01-01T00:00:00.000Z',
+	updatedAt: '2026-01-01T00:00:00.000Z',
+	publishedAt: '2026-01-01T00:00:00.000Z',
+	averageStars: 4.5,
+	ratingCount: 2,
+	averageAdaptationEffort: 3,
+	forkCount: 1,
+} satisfies CommunityListingWithAggregates
+
+type TestUser = {
+	id: number
+	email: string
+	username: string
+	password_hash: string
+	stable_user_id: string
+	created_at: string
+	updated_at: string
+}
+
+function createUserTestDb(users: Array<TestUser>) {
+	const userRecords = new Map(users.map((user) => [user.id, { ...user }]))
+
+	function createStatement(query: string, params: Array<unknown> = []) {
+		const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
+		const executeAll = async () => {
+			if (
+				normalizedQuery.startsWith('select') &&
+				normalizedQuery.includes('from "users"') &&
+				/"stable_user_id"\s*=/.test(normalizedQuery)
+			) {
+				const user = [...userRecords.values()].find(
+					(row) => row.stable_user_id === params[0],
+				)
+				return {
+					results: user ? [{ ...user }] : [],
+					meta: { changes: 0, last_row_id: 0 },
+				}
+			}
+			if (normalizedQuery.includes('from user_roles')) {
+				return {
+					results: [],
+					meta: { changes: 0, last_row_id: 0 },
+				}
+			}
+			// Feature-flag evaluation during SSR session load; empty state uses
+			// registry defaults without throwing.
+			if (
+				normalizedQuery.includes('from feature_flags') ||
+				normalizedQuery.includes('from feature_flag_user_overrides')
+			) {
+				return {
+					results: [],
+					meta: { changes: 0, last_row_id: 0 },
+				}
+			}
+			return {
+				results: [],
+				meta: { changes: 0, last_row_id: 0 },
+			}
+		}
+		return {
+			query,
+			bind(...nextParams: Array<unknown>) {
+				return createStatement(query, nextParams)
+			},
+			async all() {
+				return executeAll()
+			},
+			async first() {
+				const result = await executeAll()
+				return result.results[0] ?? null
+			},
+			async run() {
+				return { meta: { changes: 0, last_row_id: 0 } }
+			},
+		}
+	}
+
+	return {
+		prepare(query: string) {
+			return createStatement(query)
+		},
+		async batch(statements: Array<{ query?: string }>) {
+			return await executePreparedD1Batch(statements)
+		},
+		async exec() {
+			return
+		},
+	} as unknown as D1Database
+}
+
+function createTestEnv(db: D1Database) {
+	return {
+		COOKIE_SECRET: testCookieSecret,
+		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		...testOidcSigningEnv,
+		APP_DB: db,
+		BUNDLE_ARTIFACTS_KV: createMemoryKv(),
+		JOB_MANAGER: {},
+		STORAGE_RUNNER: {},
+		PACKAGE_REALTIME_SESSION: {},
+		MCP_CLIENT_HUB: {},
+	} as unknown as Env
+}
+
+async function readResponseText(response: Response) {
+	return await response.text()
+}
+
+function parseRmxData(html: string) {
+	const match = html.match(
+		/<script type="application\/json" id="rmx-data">([\s\S]*?)<\/script>/,
+	)
+	if (!match?.[1]) {
+		throw new Error('rmx-data script not found in HTML response')
+	}
+	return JSON.parse(match[1]) as {
+		h: Record<
+			string,
+			{
+				exportName?: string
+				moduleUrl?: string
+				props: {
+					url: string
+					session: unknown
+					loaderData?: Record<string, unknown>
+					notFound?: boolean
+					internalError?: boolean
+				}
+			}
+		>
+	}
+}
+
+function readAppRootProps(html: string) {
+	const rmxData = parseRmxData(html)
+	const entry = Object.values(rmxData.h)[0]
+	if (!entry) {
+		throw new Error('AppRoot hydration entry not found in rmx-data')
+	}
+	return entry.props
+}
+
+async function runHtmlHandler(
+	handler: { handler: (context: never) => Promise<Response> },
+	request: Request,
+) {
+	return handler.handler({
+		request,
+		url: new URL(request.url),
+		params: {},
+	} as never)
+}
+
+test('resolveOriginClientEntry maps Remix entry IDs onto the Vite client href', () => {
+	expect(
+		resolveOriginClientEntry({
+			entryId: '/client-entry.js#AppRoot',
+			href: '/assets/entry-DU-pHDbL.js',
+			preloads: ['/assets/auth-area-BZaLSnX1.js'],
+		}),
+	).toEqual({
+		href: '/assets/entry-DU-pHDbL.js',
+		exportName: 'AppRoot',
+		preloads: ['/assets/auth-area-BZaLSnX1.js'],
+	})
+	expect(
+		resolveOriginClientEntry({
+			entryId: 'file:///app/app-root.tsx',
+			href: '/assets/entry-DU-pHDbL.js',
+			preloads: [],
+		}),
+	).toEqual({
+		href: '/assets/entry-DU-pHDbL.js',
+		exportName: 'AppRoot',
+		preloads: [],
+	})
+	// Pitlane's dev `<HMR />` island names its own dev-server module; the client
+	// entry bundle does not export it.
+	expect(
+		resolveOriginClientEntry({
+			entryId: '/@id/__x00__pitlane:dev#HMR',
+			href: '/packages/worker/client/entry.tsx',
+			preloads: ['/packages/worker/client/routes/auth-area.ts'],
+		}),
+	).toEqual({
+		href: '/@id/__x00__pitlane:dev',
+		exportName: 'HMR',
+		preloads: [],
+	})
+})
+
+test('SSR HTML routes render page content and embedded loader data', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(
+		createUserTestDb([
+			{
+				id: 1,
+				email: 'user@example.com',
+				username: 'account-user',
+				password_hash: 'unused',
+				stable_user_id: testStableUserIdFromEmail('user@example.com'),
+				created_at: new Date(0).toISOString(),
+				updated_at: new Date(0).toISOString(),
+			},
+		]),
+	)
+
+	communityMockModule.listCommunityIndexOverview.mockReset()
+	communityMockModule.listCommunityIndexOverview.mockResolvedValue({
+		listings: [sampleListing],
+		groups: [
+			{
+				category: 'integrations',
+				listings: [sampleListing],
+				total: 1,
+			},
+		],
+		categoryCounts: {
+			integrations: 1,
+			examples: 0,
+			productivity: 0,
+			apps: 0,
+			utilities: 0,
+			other: 0,
+		},
+	})
+
+	const communityResponse = await runHtmlHandler(
+		createCommunityHandler(env),
+		new Request('https://example.com/community'),
+	)
+	expect(communityResponse.status).toBe(200)
+	expect(communityResponse.headers.get('Content-Type')).toContain('text/html')
+	const communityHtml = await readResponseText(communityResponse)
+	expect(communityHtml).toContain('data-testid="community-listings-frame"')
+	expect(communityHtml).toContain('@kentcdodds/github-triage')
+	expect(communityHtml).not.toContain('data-testid="community-listings-empty"')
+	expect(communityHtml).toContain('data-rmx-target="community-listings"')
+	expect(communityHtml).toContain('data-rmx-history="push"')
+	expect(communityHtml).toContain('<!-- rmx:h:')
+	const communityRmx = parseRmxData(communityHtml)
+	const communityEntry = Object.values(communityRmx.h)[0]
+	expect(communityEntry?.exportName).toBe('AppRoot')
+	expect(communityEntry?.moduleUrl).toBe('/client-entry.js')
+	const communityProps = readAppRootProps(communityHtml)
+	expect(communityProps.loaderData?.community).toBeUndefined()
+	expect(communityMockModule.listCommunityIndexOverview).toHaveBeenCalledTimes(
+		1,
+	)
+
+	const communityFrameResponse = await runHtmlHandler(
+		createCommunityHandler(env),
+		new Request('https://example.com/community', {
+			headers: { 'x-remix-target': 'community-listings' },
+		}),
+	)
+	expect(communityFrameResponse.status).toBe(200)
+	expect(communityFrameResponse.headers.get('Cache-Control')).toBe('no-store')
+	const communityFrameHtml = await readResponseText(communityFrameResponse)
+	expect(communityFrameHtml).toContain('data-testid="community-listings-frame"')
+	expect(communityFrameHtml).not.toContain('<html')
+
+	const accountCookie = await createAuthCookie(
+		{
+			stableUserId: testStableUserIdFromEmail('user@example.com'),
+			email: 'user@example.com',
+			rememberMe: false,
+		} satisfies AuthSession,
+		false,
+	)
+	const accountResponse = await runHtmlHandler(
+		createAccountHandler(env),
+		new Request('https://example.com/account', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(accountResponse.status).toBe(200)
+	const accountHtml = await readResponseText(accountResponse)
+	expect(accountHtml).toContain('aria-label="Account sections"')
+	expect(accountHtml).toContain('data-testid="site-header-account"')
+	expect(accountHtml).toContain('data-testid="site-header-profile"')
+	expect(accountHtml).toContain('data-testid="site-header-account-menu"')
+	expect(accountHtml).toContain('href="/@account-user"')
+	expect(accountHtml).toContain('aria-label="@account-user"')
+	const accountProps = readAppRootProps(accountHtml)
+	expect(accountProps.loaderData?.accountProfile).toEqual({
+		ok: true,
+		email: 'user@example.com',
+		emailVerified: false,
+		emailVerificationDelivery: null,
+		username: 'account-user',
+		displayName: 'account-user',
+		bio: null,
+		avatarUrl: null,
+		profileVisibility: 'public',
+		formerEmails: [],
+	})
+	expect(accountProps.loaderData?.accountConnections).toEqual({
+		ok: true,
+		connections: [],
+		canDisconnect: false,
+		hasUsablePassword: false,
+		availableProviders: [],
+		canSyncDiscordRoles: false,
+	})
+	// Connected agents moved to `/account/connections`; Overview only links there.
+	expect(accountProps.loaderData?.accountConnectedAgents).toBeUndefined()
+	expect(accountHtml).toContain('data-testid="account-connections-link"')
+	expect(accountHtml).toContain('href="/account/connections"')
+	expect(accountHtml).not.toContain('aria-label="Connected agents"')
+	// The rail carries Connections and Repositories (the profile is the canonical
+	// repository list, so the nav links there rather than the `/account/packages`
+	// redirect).
+	expect(accountHtml).toContain('>Connections</a>')
+	expect(accountHtml).toContain('data-icon="link"')
+	expect(accountHtml).toMatch(
+		/href="\/@account-user"[^>]*>[\s\S]*?Repositories<\/a>/,
+	)
+	expect(accountHtml).toContain('data-icon="box"')
+	expect(accountProps.loaderData?.onboarding).toEqual({
+		ok: true,
+		loggedIn: true,
+		username: 'account-user',
+		mcpServerUrl: '',
+		setupPrompt: '',
+		discoveryPrompt: expect.stringContaining('what-is-kody'),
+		persistPrompt: '',
+		hasAccessWin: false,
+		hasSecondMcpClient: false,
+		hasMcpClient: false,
+		connectedAgents: [],
+		secondAgentStandardGift: {
+			received: false,
+			active: false,
+			status: 'none',
+			expiresAt: null,
+			grantedAt: null,
+		},
+		emailVerified: false,
+		needsOnboarding: true,
+		featuredListings: [],
+		featuredMcpServers: [],
+		customMcpServers: [],
+		persistedPackageName: null,
+		accessWinMemorySubject: null,
+		checklist: null,
+	})
+	expect(accountHtml).toContain('/pending-verification')
+	expect(accountHtml).toContain('action="/logout"')
+	expect(accountHtml).toContain('Log out')
+	expect(accountHtml).toContain('aria-label="Session"')
+
+	const pendingVerificationResponse = await runHtmlHandler(
+		createPendingVerificationHandler(env),
+		new Request('https://example.com/pending-verification', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(pendingVerificationResponse.status).toBe(200)
+	const pendingVerificationHtml = await readResponseText(
+		pendingVerificationResponse,
+	)
+	expect(pendingVerificationHtml).toContain('Check your email')
+	expect(pendingVerificationHtml).toContain('src="/images/kody-envelope.png"')
+	expect(pendingVerificationHtml).toContain(
+		'data-testid="pending-verification-page"',
+	)
+	expect(
+		readAppRootProps(pendingVerificationHtml).loaderData?.pendingVerification,
+	).toEqual({
+		ok: true,
+		email: 'user@example.com',
+		emailVerificationDelivery: null,
+	})
+
+	// Two-factor and passkeys embed the same payload their .json endpoints
+	// serve, so the page server-renders its real state instead of a loading
+	// placeholder plus a client fetch.
+	const twoFactorResponse = await runHtmlHandler(
+		createAccountTwoFactorHandler(env),
+		new Request('https://example.com/account/two-factor', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(twoFactorResponse.status).toBe(200)
+	const twoFactorHtml = await readResponseText(twoFactorResponse)
+	expect(readAppRootProps(twoFactorHtml).loaderData?.accountTwoFactor).toEqual({
+		ok: true,
+		enabled: false,
+	})
+	expect(twoFactorHtml).not.toContain('action="/logout"')
+
+	const passkeysResponse = await runHtmlHandler(
+		createAccountPasskeysHandler(env),
+		new Request('https://example.com/account/passkeys', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(passkeysResponse.status).toBe(200)
+	const passkeysHtml = await readResponseText(passkeysResponse)
+	expect(readAppRootProps(passkeysHtml).loaderData?.accountPasskeys).toEqual({
+		ok: true,
+		passkeys: [],
+	})
+
+	const waitingResponse = await runHtmlHandler(
+		createAccountWaitingHandler(env),
+		new Request('https://example.com/account/waiting', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(waitingResponse.status).toBe(200)
+	const waitingHtml = await readResponseText(waitingResponse)
+	expect(waitingHtml).toContain('>Waiting<')
+	expect(readAppRootProps(waitingHtml).loaderData?.accountWaiting).toEqual({
+		ok: true,
+		items: expect.any(Array),
+	})
+
+	// The Connections page embeds the connected-agents payload. The MCP URL is
+	// gated on email verification (this fixture is unverified), so the page
+	// server-renders the verify note instead of a copy card.
+	const connectionsResponse = await runHtmlHandler(
+		createAccountConnectionsHandler(env),
+		new Request('https://example.com/account/connections', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(connectionsResponse.status).toBe(200)
+	const connectionsHtml = await readResponseText(connectionsResponse)
+	expect(connectionsHtml).toContain('>Connections<')
+	expect(connectionsHtml).toContain('aria-label="Account sections"')
+	expect(connectionsHtml).toMatch(
+		/href="\/account\/connections"[^>]*aria-current="page"/,
+	)
+	expect(connectionsHtml).toContain('aria-label="Connected agents"')
+	expect(connectionsHtml).toContain('aria-label="MCP URL"')
+	expect(connectionsHtml).toContain(
+		'data-testid="account-connections-verify-note"',
+	)
+	expect(connectionsHtml).toContain('href="/account/mcp-oauth-clients"')
+	expect(connectionsHtml).toContain('data-entity-explainer="connections"')
+	expect(
+		readAppRootProps(connectionsHtml).loaderData?.accountConnectedAgents,
+	).toEqual({
+		ok: true,
+		agents: [],
+		mcpServerUrl: '',
+	})
+	expect(connectionsHtml).toContain('data-testid="account-connections-add"')
+
+	// `/new` is its own page; the per-agent step shares the handler; unknown
+	// agent segments 404 instead of rendering an empty grid.
+	const addGridHtml = await readResponseText(
+		await runHtmlHandler(
+			createAccountConnectionsHandler(env),
+			new Request('https://example.com/account/connections/new', {
+				headers: { Cookie: accountCookie },
+			}),
+		),
+	)
+	expect(addGridHtml).toContain('← back to connections')
+	expect(addGridHtml).not.toContain('aria-label="Connected agents"')
+
+	const addConnectionResponse = await runHtmlHandler(
+		createAccountConnectionsHandler(env),
+		new Request('https://example.com/account/connections/new/cursor', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(addConnectionResponse.status).toBe(200)
+	const addConnectionHtml = await readResponseText(addConnectionResponse)
+	expect(addConnectionHtml).toContain('<title>Connect Cursor')
+	expect(addConnectionHtml).toContain('aria-label="Connect Cursor"')
+	expect(addConnectionHtml).toMatch(
+		/href="\/account\/connections"[^>]*aria-current="page"/,
+	)
+	const unknownAgentResponse = await runHtmlHandler(
+		createAccountConnectionsHandler(env),
+		new Request('https://example.com/account/connections/new/not-a-client', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(unknownAgentResponse.status).toBe(404)
+
+	const mcpOauthClientsResponse = await runHtmlHandler(
+		createAccountMcpOauthClientsHandler(env),
+		new Request('https://example.com/account/mcp-oauth-clients', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(mcpOauthClientsResponse.status).toBe(200)
+	const mcpOauthClientsHtml = await readResponseText(mcpOauthClientsResponse)
+	expect(
+		readAppRootProps(mcpOauthClientsHtml).loaderData?.accountMcpOauthClients,
+	).toEqual({
+		ok: true,
+		clients: [],
+	})
+
+	const accountLinkedResponse = await runHtmlHandler(
+		createAccountHandler(env),
+		new Request('https://example.com/account?oauthLinked=google', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(accountLinkedResponse.status).toBe(200)
+	const accountLinkedHtml = await readResponseText(accountLinkedResponse)
+	expect(
+		readAppRootProps(accountLinkedHtml).loaderData?.accountConnections,
+	).toEqual({
+		ok: true,
+		connections: [],
+		canDisconnect: false,
+		hasUsablePassword: false,
+		availableProviders: [],
+		canSyncDiscordRoles: false,
+	})
+
+	const anonymousOnboardingIndex = await runHtmlHandler(
+		createOnboardingHandler(env),
+		new Request('https://example.com/onboarding'),
+	)
+	expect(anonymousOnboardingIndex.status).toBe(302)
+	expect(anonymousOnboardingIndex.headers.get('Location')).toBe(
+		'https://example.com/onboarding/step-1',
+	)
+
+	const anonymousOnboardingResponse = await runHtmlHandler(
+		createOnboardingHandler(env),
+		new Request('https://example.com/onboarding/step-1'),
+	)
+	expect(anonymousOnboardingResponse.status).toBe(200)
+	const anonymousOnboardingHtml = await readResponseText(
+		anonymousOnboardingResponse,
+	)
+	expect(anonymousOnboardingHtml).toContain(
+		'data-testid="onboarding-join-discord"',
+	)
+	expect(anonymousOnboardingHtml).toContain(
+		'data-testid="onboarding-agent-picker"',
+	)
+	expect(anonymousOnboardingHtml).toContain('data-testid="onboarding-step-2"')
+	expect(anonymousOnboardingHtml).toContain('href="/onboarding/step-2"')
+	expect(anonymousOnboardingHtml.indexOf('onboarding-steps-nav')).toBeLessThan(
+		anonymousOnboardingHtml.indexOf('onboarding-agent-picker'),
+	)
+	expect(
+		anonymousOnboardingHtml.indexOf('onboarding-agent-picker'),
+	).toBeLessThan(anonymousOnboardingHtml.indexOf('onboarding-join-discord'))
+
+	const anonymousAccountResponse = await runHtmlHandler(
+		createAccountHandler(env),
+		new Request('https://example.com/account'),
+	)
+	expect(anonymousAccountResponse.status).toBe(302)
+	expect(anonymousAccountResponse.headers.get('Location')).toBe(
+		'https://example.com/login?redirectTo=%2Faccount',
+	)
+
+	const notFoundResponse = await renderAppPage({
+		request: new Request('https://example.com/missing-page'),
+		env,
+		title: 'Not found',
+		notFound: true,
+		status: 404,
+	})
+	expect(notFoundResponse.status).toBe(404)
+	const notFoundHtml = await readResponseText(notFoundResponse)
+	expect(notFoundHtml).toContain("This doesn't quite connect.")
+	expect(notFoundHtml).toContain('src="/images/kody-404-disappointed.png"')
+	expect(readAppRootProps(notFoundHtml).notFound).toBe(true)
+
+	const internalErrorResponse = await renderAppPage({
+		request: new Request('https://example.com/account'),
+		env,
+		title: 'Something went wrong',
+		internalError: true,
+		status: 500,
+	})
+	expect(internalErrorResponse.status).toBe(500)
+	const internalErrorHtml = await readResponseText(internalErrorResponse)
+	expect(internalErrorHtml).toContain('We got a little zapped.')
+	expect(internalErrorHtml).toContain('src="/images/kody-500-zapped.png"')
+	expect(internalErrorHtml).toContain('Try again')
+	expect(readAppRootProps(internalErrorHtml).internalError).toBe(true)
+
+	const resetConfirmResponse = await runHtmlHandler(
+		createResetPasswordHandler(env),
+		new Request('https://example.com/reset-password?token=reset-token'),
+	)
+	expect(resetConfirmResponse.status).toBe(200)
+	const resetConfirmHtml = await readResponseText(resetConfirmResponse)
+	expect(resetConfirmHtml).toContain('New password')
+	expect(resetConfirmHtml).not.toContain('Send reset link')
+	expect(readAppRootProps(resetConfirmHtml).url).toBe(
+		'/reset-password?token=reset-token',
+	)
+})
+
+test('renderAppPage embeds the Fathom tracker only when FATHOM_SITE_ID is set', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	const withoutFathom = await renderAppPage({
+		request: new Request('https://example.com/login'),
+		env,
+	})
+	expect(withoutFathom.status).toBe(200)
+	const withoutFathomHtml = await readResponseText(withoutFathom)
+	expect(withoutFathomHtml).not.toContain('cdn.usefathom.com')
+
+	const whitespaceOnly = await renderAppPage({
+		request: new Request('https://example.com/login'),
+		env: { ...env, FATHOM_SITE_ID: '   ' } as Env,
+	})
+	expect(await readResponseText(whitespaceOnly)).not.toContain(
+		'cdn.usefathom.com',
+	)
+
+	const padded = await renderAppPage({
+		request: new Request('https://example.com/login'),
+		env: { ...env, FATHOM_SITE_ID: ' WKKSDJGN ' } as Env,
+	})
+	expect(await readResponseText(padded)).toContain('data-site="WKKSDJGN"')
+
+	const withFathom = await renderAppPage({
+		request: new Request('https://example.com/login'),
+		env: { ...env, FATHOM_SITE_ID: 'WKKSDJGN' } as Env,
+	})
+	expect(withFathom.status).toBe(200)
+	const withFathomHtml = await readResponseText(withFathom)
+	expect(withFathomHtml).toContain('https://cdn.usefathom.com/script.js')
+	expect(withFathomHtml).toContain('data-site="WKKSDJGN"')
+	expect(withFathomHtml).toContain('data-spa="auto"')
+	const csp = withFathom.headers.get('Content-Security-Policy')
+	expect(csp).toContain("script-src 'self' 'sha256-")
+	expect(csp).toContain(
+		'https://cdn.usefathom.com https://static.cloudflareinsights.com',
+	)
+	expect(csp).toContain("img-src 'self' data: blob: https://cdn.usefathom.com")
+	expect(csp).toContain(
+		"connect-src 'self' https://cdn.usefathom.com https://cloudflareinsights.com",
+	)
+})
+
+test('renderAppPage emits a pre-hydration scroll restoration script in the document body', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+	const restoreScript = getScrollRestorationInlineScript()
+
+	const response = await renderAppPage({
+		request: new Request('https://example.com/'),
+		env,
+	})
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	const restoreScriptIndex = html.indexOf(restoreScript)
+	const clientEntryIndex = html.indexOf('type="module" src="')
+	expect(restoreScriptIndex).toBeGreaterThan(html.indexOf('<div id="root">'))
+	expect(restoreScriptIndex).toBeGreaterThan(0)
+	expect(clientEntryIndex).toBeGreaterThan(restoreScriptIndex)
+	expect(response.headers.get('Content-Security-Policy')).toBe(
+		firstPartySecurityHeaders['Content-Security-Policy'],
+	)
+	expect(response.headers.get('Content-Security-Policy')).toContain("'sha256-")
+})
+
+test('renderAppPage emits a doctype, meta description, and inlines the stylesheet when assets provide it', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	resetInlineStylesheetCache()
+	const env = createTestEnv(createUserTestDb([]))
+
+	// Without an ASSETS binding: doctype plus the stylesheet <link> fallback.
+	const withoutAssets = await renderAppPage({
+		request: new Request('https://example.com/'),
+		env,
+	})
+	const withoutAssetsHtml = await readResponseText(withoutAssets)
+	expect(withoutAssetsHtml.startsWith('<!DOCTYPE html>')).toBe(true)
+	expect(withoutAssetsHtml).toContain('href="/styles.css')
+	expect(withoutAssetsHtml).toContain('name="description"')
+	// Proof stage: one agent list around Kody, travelling orbs.
+	expect(withoutAssetsHtml).toContain('landing-hero-agents')
+	expect(withoutAssetsHtml).toContain('/images/kody-mark.png')
+	expect(
+		withoutAssetsHtml.match(/aria-label="Agents Kody plugs into"/g),
+	).toEqual(['aria-label="Agents Kody plugs into"'])
+	expect(withoutAssetsHtml).toContain('landing-hero-agent-light')
+	expect(withoutAssetsHtml).toContain('landing-hero-agent-track')
+	expect(withoutAssetsHtml).toContain('class="landing-path-rail"')
+	expect(withoutAssetsHtml).toContain('href="/images/hero/kody-base-640.webp"')
+	expect(withoutAssetsHtml).toContain('kody-base-960.webp')
+	expect(withoutAssetsHtml).toContain('as="image"')
+	expect(withoutAssets.headers.get('Cache-Control')).toBe(
+		'public, max-age=60, stale-while-revalidate=300',
+	)
+	expect(withoutAssets.headers.get('Vary')).toBe('Cookie')
+
+	// With ASSETS serving the stylesheet: inline <style>, no stylesheet link.
+	const assets = {
+		fetch: async (request: Request) =>
+			new URL(request.url).pathname === '/styles.css'
+				? new Response(':root { --inline-marker: 1; }')
+				: new Response('not found', { status: 404 }),
+	}
+	const withAssets = await renderAppPage({
+		request: new Request('https://example.com/'),
+		env: { ...env, ASSETS: assets } as Env,
+	})
+	const withAssetsHtml = await readResponseText(withAssets)
+	expect(withAssetsHtml).toContain(
+		'<style>:root { --inline-marker: 1; }</style>',
+	)
+	expect(withAssetsHtml).not.toContain('href="/styles.css')
+
+	// Comments may mention HTML (`<main>`) without blocking inlining.
+	resetInlineStylesheetCache()
+	const commentedAssets = {
+		fetch: async () =>
+			new Response(
+				'/* The router moves focus to <main> */\n:root { --comment-ok: 1; }',
+			),
+	}
+	const withCommentedCss = await renderAppPage({
+		request: new Request('https://example.com/'),
+		env: { ...env, ASSETS: commentedAssets } as Env,
+	})
+	const withCommentedCssHtml = await readResponseText(withCommentedCss)
+	expect(withCommentedCssHtml).toContain(
+		'<style>:root { --comment-ok: 1; }</style>',
+	)
+	expect(withCommentedCssHtml).not.toContain('href="/styles.css')
+	expect(withCommentedCssHtml).not.toContain('<main>')
+
+	expect(withoutAssetsHtml).toContain('src="/page-init.js"')
+
+	// CSS needing HTML escaping must fall back to the <link> (the stream
+	// renderer escapes text children, which would corrupt selectors).
+	resetInlineStylesheetCache()
+	const unsafeAssets = {
+		fetch: async () => new Response('.card > p { color: red; }'),
+	}
+	const withUnsafeCss = await renderAppPage({
+		request: new Request('https://example.com/'),
+		env: { ...env, ASSETS: unsafeAssets } as Env,
+	})
+	const withUnsafeCssHtml = await readResponseText(withUnsafeCss)
+	expect(withUnsafeCssHtml).toContain('href="/styles.css')
+	expect(withUnsafeCssHtml).not.toContain('.card &gt; p')
+})
+
+test('renderAppPage caches anonymous marketing HTML and keeps session pages private', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	const anonymousHome = await renderAppPage({
+		request: new Request('https://example.com/'),
+		env,
+	})
+	expect(anonymousHome.headers.get('Cache-Control')).toBe(
+		'public, max-age=60, stale-while-revalidate=300',
+	)
+	expect(anonymousHome.headers.get('Vary')).toBe('Cookie')
+	const anonymousOnboarding = await renderAppPage({
+		request: new Request('https://example.com/onboarding'),
+		env,
+	})
+	expect(anonymousOnboarding.headers.get('Cache-Control')).toBe(
+		'public, max-age=60, stale-while-revalidate=300',
+	)
+	const anonymousGuide = await renderAppPage({
+		request: new Request('https://example.com/docs/how-kody-works'),
+		env,
+	})
+	expect(anonymousGuide.headers.get('Cache-Control')).toBe(
+		'public, max-age=60, stale-while-revalidate=300',
+	)
+	const homeTiming = anonymousHome.headers.get('Server-Timing') ?? ''
+	expect(homeTiming).toContain('session;dur=')
+	expect(homeTiming).toContain('ssr;dur=')
+
+	const staleCookieHome = await renderAppPage({
+		request: new Request('https://example.com/', {
+			headers: { Cookie: 'kody_session=stale-or-unsigned' },
+		}),
+		env,
+	})
+	expect(staleCookieHome.headers.get('Cache-Control')).toBe('no-store')
+
+	const cookie = await createAuthCookie(
+		{
+			stableUserId: testStableUserIdFromEmail('user@example.com'),
+			email: 'user@example.com',
+			rememberMe: false,
+		} satisfies AuthSession,
+		false,
+	)
+	const signedInHome = await renderAppPage({
+		request: new Request('https://example.com/', {
+			headers: { Cookie: cookie },
+		}),
+		env,
+	})
+	expect(signedInHome.headers.get('Cache-Control')).toBe('no-store')
+
+	const login = await renderAppPage({
+		request: new Request('https://example.com/login'),
+		env,
+	})
+	expect(login.headers.get('Cache-Control')).toBe('no-store')
+})
+
+test('renderAppPage embeds the homepage factory-loop conversation teaser', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+	const response = await renderAppPage({
+		request: new Request('https://example.com/'),
+		env,
+	})
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	expect(html).toContain('class="landing-loop"')
+	expect(html).toContain('/docs/how-kody-works')
+	// Combined playing/pause control is on the teaser so the header does
+	// not shift when playback starts. Icons, not the word Pause.
+	expect(html).toContain('class="landing-loop-toggle-slot"')
+	expect(html).toContain('class="landing-loop-toggle"')
+	expect(html).toContain('aria-label="Pause"')
+	expect(html).toContain('aria-label="Skip to the end"')
+	expect(html).toContain('class="landing-loop-status-dot"')
+	expect(html).toContain('class="landing-path-rail"')
+	expect(html).toContain('href="/docs"')
+	expect(html).toContain('href="/community"')
+})
+
+test('signup social buttons are icon-only with accessible names', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+	const response = await renderAppPage({
+		request: new Request('https://example.com/signup'),
+		env,
+		loaderData: {
+			authProviders: {
+				ok: true,
+				turnstileSiteKey: null,
+				providers: [
+					{ id: 'github', label: 'GitHub' },
+					{ id: 'google', label: 'Google' },
+					{ id: 'x', label: 'X' },
+					{ id: 'discord', label: 'Discord' },
+				],
+			},
+		},
+	})
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	expect(html).toContain('aria-label="Continue with GitHub"')
+	expect(html).toContain('aria-label="Continue with Google"')
+	expect(html).toContain('aria-label="Continue with X"')
+	expect(html).toContain('aria-label="Continue with Discord"')
+})
+
+test('renderAppPage configures session secret and server-renders oauth authorize', async () => {
+	resetDataCacheForTests()
+	resetAuthSessionSecretForTests()
+	const env = createTestEnv(
+		createUserTestDb([
+			{
+				id: 1,
+				email: 'user@example.com',
+				username: 'account-user',
+				password_hash: 'unused',
+				stable_user_id: testStableUserIdFromEmail('user@example.com'),
+				created_at: new Date(0).toISOString(),
+				updated_at: new Date(0).toISOString(),
+			},
+		]),
+	)
+
+	const anonymousAuthorizeUrl =
+		'https://example.com/oauth/authorize?response_type=code&client_id=client-1&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&scope=profile'
+	const anonymousResponse = await renderAppPage({
+		request: new Request(anonymousAuthorizeUrl, {
+			headers: { Cookie: 'kody_session=stale-or-unsigned; other=1' },
+		}),
+		env,
+		loaderData: {
+			oauthAuthorize: {
+				ok: true,
+				client: { id: 'client-1', name: 'Cursor' },
+				scopes: ['profile', 'email'],
+				emailVerified: null,
+				requireCredentials: false,
+			},
+		},
+	})
+	expect(anonymousResponse.status).toBe(200)
+	const anonymousHtml = await readResponseText(anonymousResponse)
+	expect(anonymousHtml).not.toContain('OAuth authorization failed')
+	expect(anonymousHtml).not.toContain('href="/images/hero/kody-base.webp"')
+	expect(anonymousHtml).toContain('data-testid="oauth-authorize-grant"')
+	expect(anonymousHtml).toContain('data-testid="oauth-authorize-oidc-scopes"')
+	expect(anonymousHtml).toContain('<code>profile</code>')
+	expect(anonymousHtml).toContain('<code>email</code>')
+	expect(anonymousHtml).not.toContain('Unknown client')
+	expect(anonymousHtml).not.toContain('Loading authorization details')
+	expect(anonymousHtml).toContain('data-testid="oauth-authorize-form"')
+	expect(anonymousHtml).toContain('method="post"')
+	expect(anonymousHtml).toContain(
+		'action="/oauth/authorize?response_type=code&amp;client_id=client-1',
+	)
+	expect(anonymousHtml).toContain('name="decision"')
+	expect(anonymousHtml).toContain('value="approve"')
+	expect(anonymousHtml).toMatch(
+		/data-testid="oauth-authorize-approve"[^>]*disabled/,
+	)
+	expect(anonymousHtml).toContain('aria-busy="true"')
+	expect(anonymousHtml).toContain('available after the page finishes loading')
+
+	setAuthSessionSecret(testCookieSecret)
+	const cookie = await createAuthCookie(
+		{
+			stableUserId: testStableUserIdFromEmail('user@example.com'),
+			email: 'user@example.com',
+			rememberMe: false,
+		} satisfies AuthSession,
+		false,
+	)
+	const signedInResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/oauth/authorize?response_type=code&client_id=client-1&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&scope=profile',
+			{ headers: { Cookie: cookie } },
+		),
+		env,
+		loaderData: {
+			oauthAuthorize: {
+				ok: true,
+				client: { id: 'client-1', name: 'Cursor' },
+				scopes: ['profile', 'email'],
+				emailVerified: false,
+				requireCredentials: false,
+			},
+		},
+	})
+	expect(signedInResponse.status).toBe(200)
+	const signedInHtml = await readResponseText(signedInResponse)
+	expect(signedInHtml).toContain('aria-label="Email verification status"')
+	expect(signedInHtml).not.toContain('Approve connection')
+	expect(signedInHtml).toMatch(
+		/data-testid="oauth-authorize-email-verify-deny"[^>]*disabled/,
+	)
+})
+
+test('renderAppPage server-renders connect-oauth provider visits without a loading flash', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	// A stored user-lane confidential google connection whose client secret
+	// already exists: the page must SSR straight into "ready to connect"
+	// with the Redirect URI card, not "Loading provider configuration…".
+	const response = await renderAppPage({
+		request: new Request('https://example.com/connect/oauth?provider=google'),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: 'google',
+				integration: {
+					name: 'google',
+					appSlug: 'google',
+					provider: 'google',
+					appLabel: 'Google',
+					accountLabel: null,
+					tokenUrl: 'https://oauth2.googleapis.com/token',
+					apiBaseUrl: 'https://www.googleapis.com',
+					flow: 'confidential',
+					usePkce: false,
+					clientId: 'google-client-id-value',
+					hasClientSecret: true,
+					requiredHosts: ['oauth2.googleapis.com', 'www.googleapis.com'],
+					authorization: {
+						authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+						scopes: ['openid', 'email', 'profile'],
+						scopeSeparator: null,
+						extraAuthorizeParams: { access_type: 'offline' },
+					},
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+				},
+				builtInAvailable: false,
+				hasStoredClientSecret: true,
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	expect(html).toContain('data-testid="provider-mark"')
+	expect(html).toContain('data-testid="connect-oauth-advanced"')
+	expect(html).toContain('data-testid="connect-oauth-scopes"')
+	expect(html).toContain('https://accounts.google.com/o/oauth2/v2/auth')
+
+	// Reconnecting a platform connection is bring-your-own setup: the page
+	// asks for the user's client credentials instead of one-click authorize.
+	const replaceResponse = await renderAppPage({
+		request: new Request('https://example.com/connect/oauth?provider=google'),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: 'google',
+				integration: {
+					name: 'google',
+					appSlug: 'google',
+					provider: 'google',
+					appLabel: 'Google',
+					accountLabel: null,
+					tokenUrl: 'https://oauth2.googleapis.com/token',
+					apiBaseUrl: 'https://www.googleapis.com',
+					flow: 'confidential',
+					usePkce: true,
+					clientId: '',
+					hasClientSecret: false,
+					requiredHosts: ['oauth2.googleapis.com'],
+					authorization: {
+						authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+						scopes: ['openid'],
+						scopeSeparator: null,
+						extraAuthorizeParams: {},
+					},
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+				},
+				builtInAvailable: false,
+				existingConnection: { lane: 'platform', appSlug: 'google' },
+				hasStoredClientSecret: false,
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+	expect(replaceResponse.status).toBe(200)
+	const replaceHtml = await readResponseText(replaceResponse)
+	expect(replaceHtml).toContain('Paste the client ID')
+	expect(replaceHtml).toContain('https://example.com/connect/oauth')
+
+	// First-time bring-your-own setup: credentials form and redirect URL are
+	// visible; endpoints and allowed hosts stay behind the disclosure.
+	const setupResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/connect/oauth?provider=github&authorizeUrl=https%3A%2F%2Fgithub.com%2Flogin%2Foauth%2Fauthorize&tokenUrl=https%3A%2F%2Fgithub.com%2Flogin%2Foauth%2Faccess_token',
+		),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: 'github',
+				integration: null,
+				builtInAvailable: false,
+				hasStoredClientSecret: false,
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+	expect(setupResponse.status).toBe(200)
+	const setupHtml = await readResponseText(setupResponse)
+	expect(setupHtml).toContain('https://example.com/connect/oauth')
+	expect(setupHtml).toContain('data-testid="connect-oauth-advanced"')
+	expect(setupHtml).toContain('https://github.com/login/oauth/authorize')
+
+	// Provider without stored or query endpoints: the missing-config error
+	// is a single alert, not also repeated as the header description.
+	const missingResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/connect/oauth?provider=unknown-provider',
+		),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: 'unknown-provider',
+				integration: null,
+				builtInAvailable: false,
+				hasStoredClientSecret: false,
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+	expect(missingResponse.status).toBe(200)
+	const missingHtml = await readResponseText(missingResponse)
+	expect(missingHtml).toContain('role="alert"')
+	expect(missingHtml).toContain('data-testid="connect-oauth-incomplete"')
+	expect(
+		missingHtml.split('Missing required OAuth configuration parameters.')
+			.length - 1,
+	).toBe(1)
+
+	const chooserResponse = await renderAppPage({
+		request: new Request('https://example.com/connect/oauth'),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: null,
+				integration: null,
+				chooser: {
+					options: [
+						{
+							id: 'connection:google',
+							href: '/connect/oauth?provider=google&app=google',
+							label: 'Google',
+							detail: 'Reconnect your OAuth app',
+							providerKey: 'google',
+							logoPath: null,
+							autoLogoPath: null,
+							catalogLogoPath: null,
+							kind: 'connection',
+						},
+					],
+				},
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+	expect(chooserResponse.status).toBe(200)
+	const chooserHtml = await readResponseText(chooserResponse)
+	expect(chooserHtml).toContain('data-testid="connect-oauth-chooser"')
+	expect(chooserHtml).toContain('data-testid="connect-oauth-chooser-list"')
+	expect(chooserHtml).not.toContain(
+		'data-testid="connect-oauth-chooser-filter"',
+	)
+	expect(chooserHtml).toContain('/connect/oauth?provider=google&app=google')
+
+	const longChooserOptions = [
+		'google',
+		'github',
+		'slack',
+		'discord',
+		'notion',
+		'spotify',
+		'linear',
+	].map((slug) => ({
+		id: `connection:${slug}`,
+		href: `/connect/oauth?provider=${slug}&app=${slug}`,
+		label: slug,
+		detail: 'Reconnect your OAuth app',
+		providerKey: slug,
+		logoPath: null,
+		autoLogoPath: null,
+		catalogLogoPath: null,
+		kind: 'connection' as const,
+	}))
+	const sixChooserResponse = await renderAppPage({
+		request: new Request('https://example.com/connect/oauth'),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: null,
+				integration: null,
+				chooser: { options: longChooserOptions.slice(0, 6) },
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+	expect(sixChooserResponse.status).toBe(200)
+	const sixChooserHtml = await readResponseText(sixChooserResponse)
+	expect(sixChooserHtml).toContain('data-testid="connect-oauth-chooser-list"')
+	expect(sixChooserHtml).not.toContain(
+		'data-testid="connect-oauth-chooser-filter"',
+	)
+
+	const longChooserResponse = await renderAppPage({
+		request: new Request('https://example.com/connect/oauth'),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: null,
+				integration: null,
+				chooser: { options: longChooserOptions },
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+	expect(longChooserResponse.status).toBe(200)
+	const longChooserHtml = await readResponseText(longChooserResponse)
+	expect(longChooserHtml).toContain(
+		'data-testid="connect-oauth-chooser-filter"',
+	)
+	expect(longChooserHtml).toContain('data-testid="connect-oauth-chooser-list"')
+	expect(longChooserHtml).toContain('/connect/oauth?provider=linear&app=linear')
+
+	const callbackResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/connect/oauth?code=auth-code&state=abc',
+		),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: null,
+				integration: null,
+				chooser: { options: [] },
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+	expect(callbackResponse.status).toBe(200)
+	const callbackHtml = await readResponseText(callbackResponse)
+	expect(callbackHtml).toContain('data-testid="connect-oauth-callback"')
+	expect(callbackHtml).not.toContain('data-testid="connect-oauth-chooser"')
+})
+
+test('renderAppPage server-renders simplified integration and secret-approval pages', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(
+		createUserTestDb([
+			{
+				id: 1,
+				email: 'user@example.com',
+				username: 'account-user',
+				password_hash: 'unused',
+				stable_user_id: testStableUserIdFromEmail('user@example.com'),
+				created_at: new Date(0).toISOString(),
+				updated_at: new Date(0).toISOString(),
+			},
+		]),
+	)
+	const cookie = await createAuthCookie(
+		{
+			stableUserId: testStableUserIdFromEmail('user@example.com'),
+			email: 'user@example.com',
+			rememberMe: false,
+		} satisfies AuthSession,
+		false,
+	)
+	const googleConnection = {
+		name: 'google',
+		appSlug: 'google',
+		provider: 'google',
+		appLabel: 'Google',
+		accountLabel: 'me@example.com',
+		tokenUrl: 'https://oauth2.googleapis.com/token',
+		apiBaseUrl: 'https://www.googleapis.com',
+		flow: 'confidential' as const,
+		usePkce: false,
+		clientId: 'google-client-id-value',
+		hasClientSecret: true,
+		requiredHosts: ['oauth2.googleapis.com', 'www.googleapis.com'],
+		authorization: {
+			authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+			scopes: ['openid', 'email', 'profile'],
+			scopeSeparator: null,
+			extraAuthorizeParams: { access_type: 'offline' },
+		},
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z',
+	}
+	const googleApp = {
+		slug: 'google',
+		provider: 'google',
+		label: 'Google',
+		clientId: 'google-client-id-value',
+		hasClientSecret: true,
+		tokenUrl: 'https://oauth2.googleapis.com/token',
+		authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+		apiBaseUrl: 'https://www.googleapis.com',
+		flow: 'confidential' as const,
+		usePkce: false,
+		tokenExchangeStyle: null,
+		scopeSeparator: null,
+		extraAuthorizeParams: {},
+		connectionCount: 1,
+		connections: [{ name: 'google', accountLabel: 'me@example.com' }],
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z',
+	}
+
+	const connectionResponse = await renderAppPage({
+		request: new Request('https://example.com/account/integrations/google', {
+			headers: { Cookie: cookie },
+		}),
+		env,
+		loaderData: {
+			accountIntegrations: {
+				ok: true,
+				email: 'user@example.com',
+				username: 'account-user',
+				integrations: [googleConnection],
+				apps: [googleApp],
+			},
+		},
+	})
+	expect(connectionResponse.status).toBe(200)
+	const connectionHtml = await readResponseText(connectionResponse)
+	expect(connectionHtml).toContain('1 account connected.')
+	expect(connectionHtml).toContain('data-testid="add-account-open"')
+	expect(connectionHtml).toContain('Add another account')
+	expect(connectionHtml).toContain(
+		'href="/account/integrations/google?add-account=1#add-account"',
+	)
+	expect(connectionHtml).toContain('data-prevent-scroll-reset')
+	expect(connectionHtml).not.toContain('data-testid="add-account-form"')
+	expect(connectionHtml).toContain('>Reconnect<')
+	expect(connectionHtml).toContain('data-testid="provider-mark"')
+	expect(connectionHtml).toContain('data-testid="integration-advanced"')
+	expect(connectionHtml).toContain('data-testid="integration-connection"')
+	expect(connectionHtml).toContain('data-highlighted="true"')
+	expect(connectionHtml).toContain('Services you connect so Kody can use them.')
+	expect(connectionHtml).toContain('aria-label="Integrations"')
+
+	const appResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/account/integrations/apps/google',
+			{ headers: { Cookie: cookie } },
+		),
+		env,
+		loaderData: {
+			accountIntegrations: {
+				ok: true,
+				email: 'user@example.com',
+				username: 'account-user',
+				integrations: [googleConnection],
+				apps: [googleApp],
+			},
+		},
+	})
+	expect(appResponse.status).toBe(200)
+	const appHtml = await readResponseText(appResponse)
+	expect(appHtml).toContain('1 account connected.')
+	expect(appHtml).toContain('data-testid="integration-advanced"')
+	expect(appHtml).toContain('Rotate credentials')
+	expect(appHtml).not.toContain('data-highlighted="true"')
+	expect(appHtml).not.toContain('data-testid="built-in-indicator"')
+
+	const builtInApp = {
+		...googleApp,
+		platform: true,
+		hasClientSecret: false,
+		connectionCount: 2,
+		connections: [
+			{ name: 'google', accountLabel: 'me@example.com' },
+			{ name: 'google-work', accountLabel: 'work@example.com' },
+		],
+	}
+	const builtInConnection = {
+		...googleConnection,
+		platform: true,
+	}
+	const needsSetupConnection = {
+		...builtInConnection,
+		name: 'google-work',
+		accountLabel: 'work@example.com',
+		authorization: null,
+	}
+	const builtInResponse = await renderAppPage({
+		request: new Request('https://example.com/account/integrations/google', {
+			headers: { Cookie: cookie },
+		}),
+		env,
+		loaderData: {
+			accountIntegrations: {
+				ok: true,
+				email: 'user@example.com',
+				username: 'account-user',
+				integrations: [builtInConnection, needsSetupConnection],
+				apps: [builtInApp],
+			},
+		},
+	})
+	const builtInHtml = await readResponseText(builtInResponse)
+	expect(builtInHtml).toContain('data-testid="built-in-indicator"')
+	expect(builtInHtml).toContain('Provided by Kody')
+	expect(builtInHtml).toContain('2 accounts connected.')
+	expect(builtInHtml).toContain('data-testid="add-account-open"')
+	expect(builtInHtml).toContain('Add another account')
+	expect(builtInHtml).not.toContain('data-testid="add-account-form"')
+
+	const addAccountResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/account/integrations/google?add-account=1#add-account',
+			{ headers: { Cookie: cookie } },
+		),
+		env,
+		loaderData: {
+			accountIntegrations: {
+				ok: true,
+				email: 'user@example.com',
+				username: 'account-user',
+				integrations: [googleConnection],
+				apps: [googleApp],
+			},
+		},
+	})
+	expect(addAccountResponse.status).toBe(200)
+	const addAccountHtml = await readResponseText(addAccountResponse)
+	expect(addAccountHtml).toContain('data-testid="add-account-form"')
+	expect(addAccountHtml).toContain('id="add-account"')
+	expect(addAccountHtml).toContain('Connection name')
+	expect(addAccountHtml).toContain('value="google-2"')
+	expect(addAccountHtml).not.toContain('data-testid="add-account-open"')
+	expect(builtInHtml).toContain('Needs setup')
+	expect(builtInHtml).toContain('>Connect<')
+	expect(builtInHtml).toContain('/connect/oauth?provider=google-work')
+	expect(builtInHtml).not.toContain('Rotate credentials')
+
+	const missingConnectionResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/account/integrations/missing-connection',
+			{ headers: { Cookie: cookie } },
+		),
+		env,
+		loaderData: {
+			accountIntegrations: {
+				ok: true,
+				email: 'user@example.com',
+				username: 'account-user',
+				integrations: [googleConnection],
+				apps: [googleApp],
+			},
+		},
+	})
+	const missingConnectionHtml = await readResponseText(
+		missingConnectionResponse,
+	)
+	expect(missingConnectionHtml).toContain('data-testid="connection-not-found"')
+	expect(missingConnectionHtml).toContain('Connection not found')
+
+	const missingIntegrationResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/account/integrations/apps/missing-app',
+			{ headers: { Cookie: cookie } },
+		),
+		env,
+		loaderData: {
+			accountIntegrations: {
+				ok: true,
+				email: 'user@example.com',
+				username: 'account-user',
+				integrations: [googleConnection],
+				apps: [googleApp],
+			},
+		},
+	})
+	const missingIntegrationHtml = await readResponseText(
+		missingIntegrationResponse,
+	)
+	expect(missingIntegrationHtml).toContain(
+		'data-testid="integration-not-found"',
+	)
+	expect(missingIntegrationHtml).toContain('Integration not found')
+
+	const emptyResponse = await renderAppPage({
+		request: new Request('https://example.com/account/integrations', {
+			headers: { Cookie: cookie },
+		}),
+		env,
+		loaderData: {
+			accountIntegrations: {
+				ok: true,
+				email: 'user@example.com',
+				username: 'account-user',
+				integrations: [],
+				apps: [],
+			},
+		},
+	})
+	const emptyHtml = await readResponseText(emptyResponse)
+	expect(emptyHtml).toContain('No integrations yet.')
+	expect(emptyHtml).toContain(
+		'Pick a service and copy its prompt into your agent',
+	)
+
+	const approvalResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/account/secrets/user/googleAccessToken?allowed-host=gmail.googleapis.com',
+			{ headers: { Cookie: cookie } },
+		),
+		env,
+		loaderData: {
+			accountSecrets: {
+				ok: true,
+				email: 'user@example.com',
+				packageOptions: [],
+				packages: [],
+				secrets: [
+					{
+						id: 'user:googleAccessToken',
+						name: 'googleAccessToken',
+						scope: 'user',
+						description: '',
+						packageId: null,
+						packageTitle: null,
+						allowedHosts: ['oauth2.googleapis.com'],
+						allowedPackages: [],
+						createdAt: '2026-01-01T00:00:00.000Z',
+						updatedAt: '2026-01-01T00:00:00.000Z',
+						expiresAt: null,
+						ttlMs: null,
+					},
+				],
+				selectedSecret: {
+					id: 'user:googleAccessToken',
+					name: 'googleAccessToken',
+					scope: 'user',
+					description: '',
+					packageId: null,
+					packageTitle: null,
+					allowedHosts: ['oauth2.googleapis.com'],
+					allowedPackages: [],
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+					expiresAt: null,
+					ttlMs: null,
+					value: 'redacted',
+				},
+				approval: {
+					name: 'googleAccessToken',
+					names: ['googleAccessToken'],
+					scope: 'user',
+					requestedHost: 'gmail.googleapis.com',
+					requestedHosts: ['gmail.googleapis.com'],
+					rejectedHosts: [],
+					requestedPackageId: null,
+					currentAllowedHosts: ['oauth2.googleapis.com'],
+					currentAllowedPackages: [],
+				},
+				approvalError: null,
+			},
+		},
+	})
+	expect(approvalResponse.status).toBe(200)
+	const approvalHtml = await readResponseText(approvalResponse)
+	expect(approvalHtml).toContain('Allow access')
+	expect(approvalHtml).toContain('Let Kody use this connection at')
+	expect(approvalHtml).toContain('gmail.googleapis.com')
+	expect(approvalHtml).toContain('data-testid="secret-approval-advanced"')
+})
+
+test('renderAppPage renders the redesigned blog index', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	const posts = listBlogPosts().map(toBlogPostSummary)
+	const response = await renderAppPage({
+		request: new Request('https://example.com/blog'),
+		env,
+		loaderData: { blog: { ok: true, posts } },
+	})
+
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	expect(posts.length).toBeGreaterThan(0)
+	for (const post of posts) {
+		expect(html).toContain(`href="/blog/${post.slug}"`)
+	}
+})
+
+test('canonical package URL SSR renders the redesigned article', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	const detailListing = {
+		...sampleListing,
+		id: 'listing-detail-1',
+		trusted: true,
+		trustedCommit: 'abc1234567890',
+		trustedAt: '2026-01-02T00:00:00.000Z',
+		readmeContent:
+			'# @kentcdodds/github-triage\n\n## Intent\n\nTriage GitHub issues for me.\n\n## Exports\n\n- `./triage` — run the triage pass.',
+	} satisfies CommunityListingWithAggregates
+	communityMockModule.getCommunityListingWithAggregates.mockResolvedValue(
+		detailListing,
+	)
+	communityMockModule.getUserSocialRowByUsername.mockResolvedValue({
+		profile_visibility: 'public',
+		stable_user_id: 'owner-mcp-id',
+	})
+
+	communityMockModule.resolveCommunityListingRoute.mockResolvedValue({
+		kind: 'listing',
+		listingId: 'listing-detail-1',
+	})
+	communityMockModule.resolvePackagePageUrl.mockResolvedValue({
+		kind: 'package',
+		username: 'kentcdodds',
+		kodyId: 'github-triage',
+		userId: 'owner-mcp-id',
+		savedPackage: null,
+		listingId: 'listing-detail-1',
+	})
+
+	const response = await createCommunityPackageHandler(env).handler({
+		request: new Request('https://example.com/@kentcdodds/github-triage'),
+		url: new URL('https://example.com/@kentcdodds/github-triage'),
+		params: { username: 'kentcdodds', kodyId: 'github-triage' },
+	} as never)
+
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	expect(html).toContain('data-testid="community-detail-frame"')
+	expect(html).toContain('data-testid="community-listing-icon-detail"')
+	expect(html).toContain('/community/listing-detail-1/icon/abc1234567890')
+	expect(html).toContain('data-testid="community-readme"')
+	expect(html).toContain('data-testid="community-detail-install"')
+	const props = readAppRootProps(html)
+	expect(props.loaderData?.communityDetailShell).toMatchObject({
+		ok: true,
+		listingId: 'listing-detail-1',
+		name: '@kentcdodds/github-triage',
+		trusted: false,
+	})
+})
+
+test('listing-uuid URLs redirect to the canonical pair when possible and keep serving otherwise', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	communityMockModule.getCommunityListingWithAggregates.mockResolvedValue({
+		...sampleListing,
+		id: 'listing-detail-1',
+	})
+	communityMockModule.getUserSocialRowByUsername.mockResolvedValue({
+		profile_visibility: 'public',
+		stable_user_id: 'owner-mcp-id',
+	})
+
+	communityMockModule.resolveCanonicalListingPath.mockResolvedValue(
+		'/@kentcdodds/github-triage',
+	)
+
+	// Query strings ride the hop so a shared or bookmarked listing-uuid URL
+	// does not drop its extra params on the way to the canonical pair.
+	const redirect = await createCommunityDetailHandler(env).handler({
+		request: new Request(
+			'https://example.com/community/listing-detail-1?source=share',
+		),
+		url: new URL('https://example.com/community/listing-detail-1?source=share'),
+		params: { listingId: 'listing-detail-1' },
+	} as never)
+
+	expect(redirect.status).toBe(301)
+	expect(redirect.headers.get('location')).toBe(
+		'https://example.com/@kentcdodds/github-triage?source=share',
+	)
+	// The same URL serves frame HTML, which must not get this redirect back.
+	expect(redirect.headers.get('vary')).toBe('x-remix-target')
+
+	// A stale owner scope in the listing name: redirecting would cache a 404.
+	communityMockModule.resolveCanonicalListingPath.mockResolvedValue(null)
+	const fallback = await createCommunityDetailHandler(env).handler({
+		request: new Request('https://example.com/community/listing-detail-1'),
+		url: new URL('https://example.com/community/listing-detail-1'),
+		params: { listingId: 'listing-detail-1' },
+	} as never)
+
+	expect(fallback.status).toBe(200)
+	const props = readAppRootProps(await readResponseText(fallback))
+	expect(props.loaderData?.communityDetailShell).toMatchObject({
+		ok: true,
+		listingId: 'listing-detail-1',
+	})
+})
+
+test('unlisted package rename redirects stay owner-only and uncached', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const ownerUserId = testStableUserIdFromEmail('owner@example.com')
+	const env = createTestEnv(
+		createUserTestDb([
+			{
+				id: 1,
+				email: 'owner@example.com',
+				username: 'owner',
+				password_hash: 'unused',
+				stable_user_id: ownerUserId,
+				created_at: new Date(0).toISOString(),
+				updated_at: new Date(0).toISOString(),
+			},
+		]),
+	)
+	communityMockModule.resolvePackagePageUrl.mockResolvedValue({
+		kind: 'redirect',
+		username: 'owner',
+		kodyId: 'renamed',
+		userId: ownerUserId,
+		listingId: null,
+	})
+
+	const anonymous = await createCommunityPackageHandler(env).handler({
+		request: new Request('https://example.com/@owner/old-notes'),
+		url: new URL('https://example.com/@owner/old-notes'),
+		params: { username: 'owner', kodyId: 'old-notes' },
+	} as never)
+	expect(anonymous.status).toBe(404)
+
+	const cookie = await createAuthCookie(
+		{
+			stableUserId: ownerUserId,
+			email: 'owner@example.com',
+			rememberMe: false,
+		} satisfies AuthSession,
+		false,
+	)
+	const ownerRedirect = await createCommunityPackageHandler(env).handler({
+		request: new Request('https://example.com/@owner/old-notes', {
+			headers: { Cookie: cookie },
+		}),
+		url: new URL('https://example.com/@owner/old-notes'),
+		params: { username: 'owner', kodyId: 'old-notes' },
+	} as never)
+	expect(ownerRedirect.status).toBe(302)
+	expect(ownerRedirect.headers.get('location')).toBe(
+		'https://example.com/@owner/renamed',
+	)
+	expect(ownerRedirect.headers.get('cache-control')).toBe('private, no-store')
+	expect(ownerRedirect.headers.get('vary')).toBe('x-remix-target, Cookie')
+})
+
+test('listed package rename does not 301 anonymous visitors to the unpublished id', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+	const detailListing = {
+		...sampleListing,
+		id: 'listing-detail-1',
+		kodyId: 'github-triage',
+	} satisfies CommunityListingWithAggregates
+	communityMockModule.getCommunityListingWithAggregates.mockResolvedValue(
+		detailListing,
+	)
+	communityMockModule.getUserSocialRowByUsername.mockResolvedValue({
+		profile_visibility: 'public',
+		stable_user_id: 'owner-mcp-id',
+	})
+	communityMockModule.resolvePackagePageUrl.mockResolvedValue({
+		kind: 'package',
+		username: 'kentcdodds',
+		kodyId: 'github-triage',
+		userId: 'owner-mcp-id',
+		savedPackage: {
+			id: 'pkg-1',
+			kodyId: 'github-triage-two',
+			hidden: false,
+			isPrivate: false,
+		},
+		listingId: 'listing-detail-1',
+		listingKodyId: 'github-triage',
+	})
+
+	const listingUrl = await createCommunityPackageHandler(env).handler({
+		request: new Request('https://example.com/@kentcdodds/github-triage'),
+		url: new URL('https://example.com/@kentcdodds/github-triage'),
+		params: { username: 'kentcdodds', kodyId: 'github-triage' },
+	} as never)
+	expect(listingUrl.status).toBe(200)
+	expect(listingUrl.headers.get('location')).toBeNull()
+
+	communityMockModule.resolvePackagePageUrl.mockResolvedValue({
+		kind: 'redirect',
+		username: 'kentcdodds',
+		kodyId: 'github-triage',
+		userId: 'owner-mcp-id',
+		listingId: 'listing-detail-1',
+		listingKodyId: 'github-triage',
+	})
+	const caseCorrect = await createCommunityPackageHandler(env).handler({
+		request: new Request('https://example.com/@KentCDodds/GITHUB-TRIAGE'),
+		url: new URL('https://example.com/@KentCDodds/GITHUB-TRIAGE'),
+		params: { username: 'KentCDodds', kodyId: 'GITHUB-TRIAGE' },
+	} as never)
+	expect(caseCorrect.status).toBe(301)
+	expect(caseCorrect.headers.get('location')).toBe(
+		'https://example.com/@kentcdodds/github-triage',
+	)
+	expect(caseCorrect.headers.get('location')).not.toContain('github-triage-two')
+})
+
+test('renderAppPage renders the redesigned blog post', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	// A real catalog post whose own title and read-next title carry no
+	// apostrophes (JSX escaping would rewrite them in the HTML output).
+	const post = listBlogPosts().find(
+		(candidate) => candidate.slug === 'every-install-is-a-fork-you-own',
+	)
+	expect(post).toBeDefined()
+	const readNext = getReadNextBlogPost(post!.slug)
+	expect(readNext).not.toBeNull()
+
+	const response = await renderAppPage({
+		request: new Request(`https://example.com/blog/${post!.slug}`),
+		env,
+		loaderData: {
+			blogPost: {
+				ok: true,
+				slug: post!.slug,
+				title: post!.title,
+				date: post!.date,
+				description: post!.description,
+				placeholder: post!.placeholder,
+				image: post!.image,
+				imageAlt: post!.imageAlt,
+				ogImage: post!.ogImage,
+				body: post!.body,
+				readNext,
+			},
+		},
+	})
+
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	expect(html).toContain(`href="/blog"`)
+	expect(html).toContain(`href="/blog/${readNext!.slug}"`)
+	// Markdown body renders in the prose voice: authored `##` stays h2 (not
+	// the README demotion to h4) and first-party links skip the ugc rel.
+	expect(html).toMatch(/<h2[^>]*>/)
+	expect(html).not.toMatch(/<h4[^>]*>/)
+	expect(html).toContain(BLOG_PLACEHOLDER_CALLOUT)
+})
+
+test('renderAppPage shows reviewed blog artwork and hides the placeholder callout', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	const post = listBlogPosts().find(
+		(candidate) => candidate.slug === 'kody-vs-executor',
+	)
+	expect(post).toBeDefined()
+	expect(post!.placeholder).toBe(false)
+	expect(post!.image).toBe('/images/kody-vs-executor.webp')
+	expect(post!.ogImage).toBe('/images/kody-vs-executor-og.jpg')
+
+	const response = await renderAppPage({
+		request: new Request(`https://example.com/blog/${post!.slug}`),
+		env,
+		loaderData: {
+			blogPost: {
+				ok: true,
+				slug: post!.slug,
+				title: post!.title,
+				date: post!.date,
+				description: post!.description,
+				placeholder: post!.placeholder,
+				image: post!.image,
+				imageAlt: post!.imageAlt,
+				ogImage: post!.ogImage,
+				body: post!.body,
+				readNext: getReadNextBlogPost(post!.slug),
+			},
+		},
+	})
+
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	expect(html).toContain('src="/images/kody-vs-executor.webp"')
+	expect(html).toContain(
+		'property="og:image" content="https://example.com/blog/kody-vs-executor/og.png"',
+	)
+	expect(html).not.toContain(BLOG_PLACEHOLDER_CALLOUT)
+})

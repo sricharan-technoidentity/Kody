@@ -1,0 +1,336 @@
+import { accountConnectionAgentIds } from '../packages/worker/universal/account-connections.ts'
+import {
+	collectJsonRequests,
+	expectSingleCommitTransition,
+	observeMainTransitions,
+	readMainTransitions,
+} from './main-transitions.ts'
+import {
+	expect,
+	test,
+	type Locator,
+	type Page,
+	waitForClientHydration,
+} from './playwright-utils.ts'
+
+/**
+ * Account and admin pages sit in a persistent shell; moving between them is
+ * tab switching. Each hop must replace the previous page in one commit: the
+ * heading never disappears, no "Loading…" copy takes the content's place,
+ * and the destination payload the router preloaded is never fetched twice.
+ */
+async function clickThroughSections(
+	page: Page,
+	navName: string,
+	hops: Array<{ link: string; heading: string | RegExp }>,
+	fromHeading: string | RegExp,
+) {
+	const requests = collectJsonRequests(page)
+	let previousHeading = fromHeading
+	for (const hop of hops) {
+		requests.reset()
+		await observeMainTransitions(page)
+		await page
+			.getByRole('navigation', { name: navName })
+			.getByRole('link', { name: hop.link, exact: true })
+			.click()
+		await expect(
+			page.getByRole('heading', { level: 1, name: hop.heading }),
+		).toBeVisible()
+		// Let any stray follow-up render land before reading the log.
+		await page.waitForTimeout(250)
+		expectSingleCommitTransition(await readMainTransitions(page), {
+			fromHeading: previousHeading,
+			toHeading: hop.heading,
+		})
+		expect(requests.duplicates(), requests.paths.join(', ')).toEqual([])
+		previousHeading = hop.heading
+	}
+}
+
+test('account section switches keep the current page on screen (no loading flash, no refetch)', async ({
+	page,
+	seedE2eUser,
+	login,
+}) => {
+	test.setTimeout(process.env.CI ? 90_000 : 60_000)
+	const runId = Date.now()
+	const user = await seedE2eUser({
+		email: `account-nav-${runId}@example.com`,
+		username: `account-nav-${runId}`,
+		password: 'account-nav-password',
+	})
+	await login({ email: user.email, password: user.password, mode: 'login' })
+	await page.goto('/account/jobs')
+	await waitForClientHydration(page)
+	await expect(
+		page.getByRole('heading', { level: 1, name: 'Jobs' }),
+	).toBeVisible()
+
+	await clickThroughSections(
+		page,
+		'Account sections',
+		[
+			{ link: 'Memories', heading: 'Memories' },
+			{ link: 'Secrets', heading: 'Secrets' },
+			{ link: 'Connections', heading: 'Connections' },
+			{ link: 'Workflows', heading: 'Workflows' },
+			{ link: 'Webhooks', heading: 'Webhooks' },
+			{ link: 'Overview', heading: 'Account' },
+			{ link: 'Jobs', heading: 'Jobs' },
+		],
+		'Jobs',
+	)
+
+	// Repositories sits in the rail at the same level as the other sections and
+	// points at the profile, which is the canonical repository list.
+	await expect(
+		page
+			.getByRole('navigation', { name: 'Account sections' })
+			.getByRole('link', { name: 'Repositories', exact: true }),
+	).toHaveAttribute('href', `/@${user.username}`)
+})
+
+test('credits live on the usage page: /account/credits redirects there and the rail has no Credits item', async ({
+	page,
+	seedE2eUser,
+	login,
+}) => {
+	test.setTimeout(process.env.CI ? 90_000 : 60_000)
+	const runId = Date.now()
+	const user = await seedE2eUser({
+		email: `account-credits-${runId}@example.com`,
+		username: `account-credits-${runId}`,
+		password: 'account-credits-password',
+	})
+	await login({ email: user.email, password: user.password, mode: 'login' })
+	await page.goto('/account/credits')
+	await expect(page).toHaveURL(/\/account\/usage#credits$/)
+	await expect(
+		page.getByRole('heading', { level: 1, name: 'Usage' }),
+	).toBeVisible()
+	const credits = page.locator('#credits')
+	await expect(
+		credits.getByRole('heading', { level: 2, name: 'Credits' }),
+	).toBeVisible()
+	await expect(credits).toContainText('Credits are available on Pro.')
+	await expect(page.locator('[data-credits-balance]')).toHaveCount(0)
+	await expect(page.getByLabel('Custom amount ($)')).toHaveCount(0)
+
+	const rail = page.getByRole('navigation', { name: 'Account sections' })
+	await expect(
+		rail.getByRole('link', { name: 'Usage', exact: true }),
+	).toHaveAttribute('aria-current', 'page')
+	await expect(
+		rail.getByRole('link', { name: 'Credits', exact: true }),
+	).toHaveCount(0)
+})
+
+test('Add connection opens its own page with the client wall, then a host step (no loading flash, no double fetch)', async ({
+	page,
+	seedE2eUser,
+	login,
+}) => {
+	test.setTimeout(process.env.CI ? 90_000 : 60_000)
+	const runId = Date.now()
+	const user = await seedE2eUser({
+		email: `connections-${runId}@example.com`,
+		username: `connections-${runId}`,
+		password: 'connections-password',
+	})
+	await login({ email: user.email, password: user.password, mode: 'login' })
+	await page.goto('/account/connections')
+	await waitForClientHydration(page)
+	await expect(
+		page.getByRole('heading', { level: 1, name: 'Connections' }),
+	).toBeVisible()
+	await expect(
+		page.getByRole('region', { name: 'Connected agents' }),
+	).toBeVisible()
+	await expect(page.getByTestId('account-connections-agent-grid')).toHaveCount(
+		0,
+	)
+	await expect(page.getByTestId('account-connections-back')).toHaveCount(0)
+
+	const requests = collectJsonRequests(page)
+	await observeMainTransitions(page)
+	await page.getByTestId('account-connections-add').click()
+	await expect(page).toHaveURL(/\/account\/connections\/new$/)
+	const grid = page.getByTestId('account-connections-agent-grid')
+	await expect(grid).toBeVisible()
+	await expect(page.getByTestId('account-connections-back')).toBeVisible()
+	await expect(
+		page.getByRole('region', { name: 'Connected agents' }),
+	).toHaveCount(0)
+	// The heading never leaves the screen: list and add share the account
+	// shell while the body swaps in one commit.
+	await page.waitForTimeout(250)
+	expectSingleCommitTransition(await readMainTransitions(page), {
+		fromHeading: 'Connections',
+		toHeading: 'Connections',
+	})
+	// Like every router hop, the destination loader (or its intent prefetch)
+	// fetches the payload once before commit; the contract here is that the
+	// route never asks for the same payload a second time.
+	expect(requests.duplicates(), requests.paths.join(', ')).toEqual([])
+	requests.reset()
+	// Every named client is a card link. Connected marks (if any) stay on
+	// those links — never a dead-end span — and none is hidden by viewport.
+	await expect(grid.getByRole('link')).toHaveCount(
+		accountConnectionAgentIds.length,
+	)
+	await expect(grid.locator('[data-greyed="true"]:not(a)')).toHaveCount(0)
+	await expect(page.getByTestId('onboarding-agent-claude-code')).toBeVisible()
+	await expect(page.getByTestId('onboarding-agent-grok')).toBeVisible()
+	await expect(page.getByTestId('onboarding-agent-muse')).toBeVisible()
+
+	await page.getByTestId('onboarding-agent-claude-code').click()
+	await expect(page).toHaveURL(/\/account\/connections\/new\/claude-code$/)
+	await expect(
+		page.getByRole('heading', { level: 2, name: 'Connect Claude Code' }),
+	).toBeVisible()
+	await expect(
+		page.getByTestId('account-connections-agent-instructions'),
+	).toBeVisible()
+	await expect(
+		page.getByRole('region', { name: 'Connected agents' }),
+	).toHaveCount(0)
+	// Connections stays current in the rail on the add views.
+	await expect(
+		page
+			.getByRole('navigation', { name: 'Account sections' })
+			.getByRole('link', { name: 'Connections', exact: true }),
+	).toHaveAttribute('aria-current', 'page')
+
+	expect(requests.duplicates(), requests.paths.join(', ')).toEqual([])
+	requests.reset()
+
+	await page.getByTestId('account-connections-change-agent').click()
+	await expect(grid).toBeVisible()
+	expect(requests.duplicates(), requests.paths.join(', ')).toEqual([])
+	requests.reset()
+
+	await page.getByTestId('account-connections-back').click()
+	await expect(page).toHaveURL(/\/account\/connections$/)
+	await expect(page.getByTestId('account-connections-add')).toBeVisible()
+	await expect(
+		page.getByRole('region', { name: 'Connected agents' }),
+	).toBeVisible()
+	await expect(page.getByTestId('account-connections-agent-grid')).toHaveCount(
+		0,
+	)
+	expect(requests.duplicates(), requests.paths.join(', ')).toEqual([])
+})
+
+async function markSearchNode(search: Locator) {
+	await search.evaluate((element) => {
+		;(element as HTMLElement).dataset.kodySearchMount = '1'
+	})
+}
+
+test('account live search keeps the same focused input while the list filters', async ({
+	page,
+	seedE2eUser,
+	login,
+}) => {
+	test.setTimeout(process.env.CI ? 90_000 : 60_000)
+	const runId = Date.now()
+	const user = await seedE2eUser({
+		email: `account-search-${runId}@example.com`,
+		username: `account-search-${runId}`,
+		password: 'account-search-password',
+	})
+	await login({ email: user.email, password: user.password, mode: 'login' })
+
+	const alphaSecret = await page.request.post('/account/secrets.json', {
+		data: {
+			action: 'save',
+			name: `alphaSecret${runId}`,
+			scope: 'user',
+			value: 'alpha-secret-value',
+			description: 'Matches the alpha query',
+			allowedHosts: ['api.example.com'],
+			allowedPackages: [],
+		},
+		headers: { 'Content-Type': 'application/json' },
+	})
+	expect(alphaSecret.ok()).toBe(true)
+	const betaSecret = await page.request.post('/account/secrets.json', {
+		data: {
+			action: 'save',
+			name: `betaSecret${runId}`,
+			scope: 'user',
+			value: 'beta-secret-value',
+			description: 'Does not match the alpha query',
+			allowedHosts: ['api.example.com'],
+			allowedPackages: [],
+		},
+		headers: { 'Content-Type': 'application/json' },
+	})
+	expect(betaSecret.ok()).toBe(true)
+
+	await page.goto('/account/secrets')
+	await waitForClientHydration(page)
+	await expect(
+		page.getByRole('heading', { level: 1, name: 'Secrets' }),
+	).toBeVisible()
+	await expect(page.getByText(`alphaSecret${runId}`)).toBeVisible()
+	await expect(page.getByText(`betaSecret${runId}`)).toBeVisible()
+
+	const secretsSearch = page.getByRole('searchbox', { name: 'Search secrets' })
+	await secretsSearch.click()
+	await markSearchNode(secretsSearch)
+	await secretsSearch.pressSequentially(`alphaSecret${runId}`, { delay: 20 })
+	await expect(secretsSearch).toBeFocused()
+	await expect(secretsSearch).toHaveAttribute('data-kody-search-mount', '1')
+	await expect(secretsSearch).toHaveValue(`alphaSecret${runId}`)
+	await expect(page.getByText(`alphaSecret${runId}`)).toBeVisible()
+	await expect(page.getByText(`betaSecret${runId}`)).toHaveCount(0)
+
+	await page.goto('/account/jobs')
+	await waitForClientHydration(page)
+	const jobsSearch = page.getByRole('searchbox', { name: 'Search jobs' })
+	await jobsSearch.click()
+	await markSearchNode(jobsSearch)
+	await jobsSearch.pressSequentially('no-such-job', { delay: 20 })
+	await expect(jobsSearch).toBeFocused()
+	await expect(jobsSearch).toHaveAttribute('data-kody-search-mount', '1')
+	await expect(jobsSearch).toHaveValue('no-such-job')
+})
+
+test('admin section switches keep the current page on screen (no loading flash, no refetch)', async ({
+	page,
+	seedE2eUser,
+	assignRole,
+	login,
+}) => {
+	test.setTimeout(process.env.CI ? 90_000 : 60_000)
+	const runId = Date.now()
+	const adminUser = await seedE2eUser({
+		email: `admin-nav-${runId}@example.com`,
+		username: `admin-nav-${runId}`,
+		password: 'admin-nav-password',
+	})
+	await assignRole(adminUser.email, 'admin')
+	await login({
+		email: adminUser.email,
+		password: adminUser.password,
+		mode: 'login',
+	})
+	await page.goto('/admin/roles')
+	await waitForClientHydration(page)
+	await expect(
+		page.getByRole('heading', { level: 1, name: 'Admin roles' }),
+	).toBeVisible()
+
+	await clickThroughSections(
+		page,
+		'Admin sections',
+		[
+			{ link: 'Reserved usernames', heading: 'Reserved usernames' },
+			{ link: 'Feature flags', heading: 'Admin feature flags' },
+			{ link: 'Roles', heading: 'Admin roles' },
+		],
+		'Admin roles',
+	)
+})

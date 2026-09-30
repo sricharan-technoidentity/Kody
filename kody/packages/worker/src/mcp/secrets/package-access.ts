@@ -1,0 +1,553 @@
+import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
+import { McpCallerError } from '#mcp/caller-error.ts'
+import {
+	buildSecretPackageApprovalUrl,
+	buildSecretPackageBulkApprovalUrlIfNeeded,
+} from './package-approval-url.ts'
+import {
+	createPackageSecretAccessDeniedBatchMessage,
+	createPackageSecretAccessDeniedMessage,
+} from './errors.ts'
+import { buildSecretPlaceholder } from './placeholders.ts'
+import { createUnresolvedSecretMessage } from './unresolved-secret.ts'
+import { resolveSecret, type ResolvedSecret } from './service.ts'
+import { type SecretScope } from './types.ts'
+import { type StorageContext } from '#mcp/storage.ts'
+import { resolveCallerSecretAuthority } from './secret-authority.ts'
+import { getCommunityForkByForkedPackageId } from '#worker/community/repo.ts'
+import { getSavedPackageById } from '#worker/package-registry/repo.ts'
+import {
+	findAcceptedPackageShareGrant,
+	isShareGrantedForeignPackage,
+} from '#worker/package-registry/share-grants.ts'
+import {
+	loadPackageManifestBySourceId,
+	type LoadedPackageManifest,
+} from '#worker/package-registry/source.ts'
+import { type SavedPackageRecord } from '#worker/package-registry/types.ts'
+
+type SecretMountDefinition = {
+	name: string
+	scope?: SecretScope
+}
+
+/**
+ * Package secret mount/approval failures the caller can clear (approve the
+ * package, declare a mount, create the secret). Subclass McpCallerError so
+ * MCP observability keeps them off Sentry — they are policy denials, not
+ * platform defects.
+ */
+export class PackageSecretMountError extends McpCallerError {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options)
+		this.name = 'PackageSecretMountError'
+	}
+}
+export class PackageSecretMissingError extends McpCallerError {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options)
+		this.name = 'PackageSecretMissingError'
+	}
+}
+export class PackageSecretAccessDeniedError extends McpCallerError {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options)
+		this.name = 'PackageSecretAccessDeniedError'
+	}
+}
+
+export function isPackageSecretAccessUnavailableError(error: unknown) {
+	return (
+		error instanceof PackageSecretMountError ||
+		error instanceof PackageSecretMissingError ||
+		error instanceof PackageSecretAccessDeniedError
+	)
+}
+
+/**
+ * Resolve the package whose runtime is asking for a secret.
+ *
+ * Caller-owned packages stay on the caller's stamp. Share-granted packages
+ * load as the owner so mounts and package-scoped secrets stay on the
+ * owner's stamp. Shared code never receives the guest's other user secrets.
+ */
+async function resolvePackageRecordForSecretAccess(input: {
+	db: D1Database
+	userId: string
+	packageId: string
+}): Promise<SavedPackageRecord | null> {
+	const own = await getSavedPackageById(input.db, {
+		userId: input.userId,
+		packageId: input.packageId,
+	})
+	if (own) return own
+	const grant = await findAcceptedPackageShareGrant({
+		db: input.db,
+		packageId: input.packageId,
+		granteeUserId: input.userId,
+	})
+	if (!grant) return null
+	return await getSavedPackageById(input.db, {
+		userId: grant.ownerUserId,
+		packageId: grant.packageId,
+	})
+}
+
+async function resolveSecretStampUserId(input: {
+	db: D1Database
+	callerUserId: string
+	packageId: string
+}) {
+	const own = await getSavedPackageById(input.db, {
+		userId: input.callerUserId,
+		packageId: input.packageId,
+	})
+	if (own) return input.callerUserId
+	const grant = await findAcceptedPackageShareGrant({
+		db: input.db,
+		packageId: input.packageId,
+		granteeUserId: input.callerUserId,
+	})
+	return grant?.ownerUserId ?? input.callerUserId
+}
+
+/**
+ * Self-authored packages (no `community_forks` row) and adopted community
+ * forks may read/use user secrets without an explicit `allowed_packages`
+ * grant. Missing packages and unadopted forks do not. Host allowlists are
+ * a separate gate and are never implied by this check.
+ */
+export async function packageHasImplicitUserSecretReadAccess(input: {
+	env: Pick<Env, 'APP_DB'>
+	userId: string
+	packageId: string
+}): Promise<boolean> {
+	const savedPackage = await getSavedPackageById(input.env.APP_DB, {
+		userId: input.userId,
+		packageId: input.packageId,
+	})
+	if (!savedPackage) return false
+	return await savedPackageHasImplicitUserSecretReadAccess({
+		db: input.env.APP_DB,
+		userId: input.userId,
+		savedPackage,
+	})
+}
+
+async function savedPackageHasImplicitUserSecretReadAccess(input: {
+	db: D1Database
+	userId: string
+	savedPackage: SavedPackageRecord
+}): Promise<boolean> {
+	const communityFork = await getCommunityForkByForkedPackageId(input.db, {
+		forkerUserId: input.userId,
+		forkedPackageId: input.savedPackage.id,
+	})
+	return !communityFork || Boolean(communityFork.adoptedAt)
+}
+
+export async function assertPackageCanAccessResolvedSecret(input: {
+	env: Pick<Env, 'APP_DB'>
+	baseUrl: string
+	userId: string
+	storageContext:
+		| {
+				sessionId?: string | null
+				appId?: string | null
+				packageId?: string | null
+				storageId?: string | null
+		  }
+		| null
+		| undefined
+	secretName: string
+	resolved: ResolvedSecret
+	/** Default `'use'` (read/resolve). `'mutate'` always requires allowed_packages. */
+	intent?: 'use' | 'mutate'
+	/**
+	 * Stamp / call-site package id. When omitted, the bundled-run ALS or
+	 * `storageContext.packageId` (the run) is used.
+	 */
+	authorityPackageId?: string | null
+	/**
+	 * When false, skip implicit self-authored package access. Share-grant
+	 * owner remaps at fetch/JWT use sites must pass false so a guest cannot
+	 * open the owner's full user keychain — only `allowed_packages` grants.
+	 * Defaults to true.
+	 */
+	allowImplicitUserSecretAccess?: boolean
+}) {
+	const { authorityPackageId: packageId } = resolveCallerSecretAuthority({
+		storageContext: input.storageContext,
+		authorityPackageId: input.authorityPackageId,
+	})
+	if (!packageId || input.resolved.scope !== 'user') return
+	if (
+		await isShareGrantedForeignPackage({
+			db: input.env.APP_DB,
+			callerUserId: input.userId,
+			packageId,
+		})
+	) {
+		throw new PackageSecretAccessDeniedError(
+			`Shared package code cannot use the guest's user secrets, including "${input.secretName}". Pass explicit inputs or use package-scoped mounts on the shared package.`,
+		)
+	}
+	if (input.resolved.allowedPackages.includes(packageId)) return
+
+	const savedPackage = await resolvePackageRecordForSecretAccess({
+		db: input.env.APP_DB,
+		userId: input.userId,
+		packageId,
+	})
+	if (!savedPackage) {
+		throw new PackageSecretAccessDeniedError(
+			`Package "${packageId}" was not found for secret access.`,
+		)
+	}
+	const intent = input.intent ?? 'use'
+	const allowImplicit = input.allowImplicitUserSecretAccess ?? true
+	if (
+		allowImplicit &&
+		intent === 'use' &&
+		(await savedPackageHasImplicitUserSecretReadAccess({
+			db: input.env.APP_DB,
+			userId: input.userId,
+			savedPackage,
+		}))
+	) {
+		return
+	}
+
+	const approvalUrl = buildSecretPackageApprovalUrl({
+		baseUrl: input.baseUrl,
+		name: input.secretName,
+		scope: 'user',
+		packageId: savedPackage.id,
+		kodyId: savedPackage.kodyId,
+		storageContext: {
+			sessionId: input.storageContext?.sessionId ?? null,
+			appId: input.storageContext?.appId ?? null,
+			packageId,
+			storageId: input.storageContext?.storageId ?? null,
+		},
+	})
+	throw new PackageSecretAccessDeniedError(
+		createPackageSecretAccessDeniedMessage({
+			secretName: input.secretName,
+			packageName: savedPackage.kodyId,
+			approvalUrl,
+		}),
+	)
+}
+
+/**
+ * Fail-closed authorization check for secret writes. Call this before any
+ * provider token request that may rotate refresh tokens so a later permission
+ * denial cannot strand the integration. Writes from package code always
+ * require an `allowed_packages` grant.
+ */
+export async function assertCanSetSecrets(input: {
+	env: Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'>
+	userId: string
+	baseUrl: string
+	secrets: Array<{
+		name: string
+		scope: SecretScope
+	}>
+	storageContext?: StorageContext | null
+}) {
+	if (input.secrets.length === 0) {
+		throw new Error('At least one secret is required.')
+	}
+	const storageContext: StorageContext | null = input.storageContext
+		? {
+				sessionId: input.storageContext.sessionId ?? null,
+				appId: input.storageContext.appId ?? null,
+				packageId: input.storageContext.packageId ?? null,
+				storageId: input.storageContext.storageId ?? null,
+			}
+		: null
+	const { authorityPackageId, storageContext: authorityStorageContext } =
+		resolveCallerSecretAuthority({ storageContext })
+	for (const secret of input.secrets) {
+		const name = secret.name.trim()
+		if (!name) throw new Error('Secret name is required.')
+		if (secret.scope === 'user' && authorityPackageId) {
+			const resolved = await resolveSecret({
+				env: input.env,
+				userId: input.userId,
+				name,
+				scope: 'user',
+				storageContext: authorityStorageContext,
+			})
+			if (!resolved.found) {
+				throw new McpCallerError(
+					'Package runtimes cannot create user-scoped secrets. Create the secret from the account page and approve the package first.',
+				)
+			}
+			await assertPackageCanAccessResolvedSecret({
+				env: input.env,
+				baseUrl: input.baseUrl,
+				userId: input.userId,
+				storageContext: authorityStorageContext,
+				authorityPackageId,
+				secretName: name,
+				resolved,
+				intent: 'mutate',
+			})
+		}
+	}
+}
+
+export async function loadPackageSecretMounts(input: {
+	env: Env
+	baseUrl: string
+	userId: string
+	packageId: string
+}): Promise<{
+	savedPackage: {
+		id: string
+		kodyId: string
+		name: string
+		sourceId: string
+	}
+	manifest: LoadedPackageManifest['manifest']
+	mounts: Record<string, SecretMountDefinition>
+}> {
+	const savedPackage = await resolvePackageRecordForSecretAccess({
+		db: input.env.APP_DB,
+		userId: input.userId,
+		packageId: input.packageId,
+	})
+	if (!savedPackage) {
+		throw new Error(`Saved package "${input.packageId}" was not found.`)
+	}
+	const stampUserId = await resolveSecretStampUserId({
+		db: input.env.APP_DB,
+		callerUserId: input.userId,
+		packageId: input.packageId,
+	})
+	const loaded = await loadPackageManifestBySourceId({
+		env: input.env,
+		baseUrl: input.baseUrl,
+		userId: stampUserId,
+		sourceId: savedPackage.sourceId,
+	})
+	return {
+		savedPackage: {
+			id: savedPackage.id,
+			kodyId: savedPackage.kodyId,
+			name: savedPackage.name,
+			sourceId: savedPackage.sourceId,
+		},
+		manifest: loaded.manifest,
+		mounts: loaded.manifest.kody.secretMounts ?? {},
+	}
+}
+
+export async function resolvePackageMountedSecret(input: {
+	env: Env
+	callerContext: McpCallerContext
+	packageId: string
+	alias: string
+}) {
+	const packageId = input.packageId.trim()
+	if (!packageId) {
+		throw new Error(
+			'Package secret access requires a matching server-side package runtime context.',
+		)
+	}
+	const userId = input.callerContext.user?.userId
+	if (!userId) {
+		throw new Error(
+			'Package secret access requires an authenticated package caller context.',
+		)
+	}
+	const packageInfo = await loadPackageSecretMounts({
+		env: input.env,
+		baseUrl: input.callerContext.baseUrl,
+		userId,
+		packageId,
+	})
+	const mount = packageInfo.mounts[input.alias]
+	if (!mount) {
+		throw new PackageSecretMountError(
+			`Package "${packageInfo.savedPackage.kodyId}" does not declare secret mount "${input.alias}".`,
+		)
+	}
+	const stampUserId = await resolveSecretStampUserId({
+		db: input.env.APP_DB,
+		callerUserId: userId,
+		packageId,
+	})
+	const storageContext = {
+		sessionId: input.callerContext.storageContext?.sessionId ?? null,
+		appId: input.callerContext.storageContext?.appId ?? null,
+		packageId,
+		storageId: input.callerContext.storageContext?.storageId ?? null,
+	}
+	const resolved = await resolveSecret({
+		env: input.env,
+		userId: stampUserId,
+		name: mount.name,
+		scope: mount.scope,
+		storageContext,
+	})
+	if (!resolved.found || typeof resolved.value !== 'string') {
+		throw new PackageSecretMissingError(
+			await createUnresolvedSecretMessage({
+				env: input.env,
+				userId: stampUserId,
+				name: mount.name,
+				scope: mount.scope,
+				storageContext,
+				baseUrl: input.callerContext.baseUrl,
+			}),
+		)
+	}
+	await assertPackageCanAccessResolvedSecret({
+		env: input.env,
+		baseUrl: input.callerContext.baseUrl,
+		userId: stampUserId,
+		storageContext,
+		authorityPackageId: packageId,
+		secretName: mount.name,
+		resolved,
+	})
+	// Opaque ref only — decrypted plaintext stays on the host. Package /
+	// execute JS must never observe `resolved.value`. The placeholder carries
+	// name+scope only (never owner id — that would be caller-forgeable).
+	// Share-grant resolution remaps to the package owner at platform use
+	// sites via the trusted package authority stamp (fetch gateway,
+	// secretHeaders → fetch, secretJwtSign).
+	const scope = resolved.scope ?? mount.scope ?? 'user'
+	return {
+		alias: input.alias,
+		name: mount.name,
+		ref: buildSecretPlaceholder({
+			name: mount.name,
+			scope,
+		}),
+		scope,
+		packageId: packageInfo.savedPackage.id,
+		kodyId: packageInfo.savedPackage.kodyId,
+	}
+}
+
+export async function findMissingPackageApprovals(input: {
+	env: Env
+	baseUrl: string
+	userId: string
+	packageId: string
+	mounts: Record<string, SecretMountDefinition>
+	storageContext: McpCallerContext['storageContext']
+}) {
+	const savedPackage = await getSavedPackageById(input.env.APP_DB, {
+		userId: input.userId,
+		packageId: input.packageId,
+	})
+	if (!savedPackage) {
+		throw new Error(`Saved package "${input.packageId}" was not found.`)
+	}
+	if (
+		await savedPackageHasImplicitUserSecretReadAccess({
+			db: input.env.APP_DB,
+			userId: input.userId,
+			savedPackage,
+		})
+	) {
+		return []
+	}
+
+	const storageContext = {
+		sessionId: input.storageContext?.sessionId ?? null,
+		appId: input.storageContext?.appId ?? null,
+		packageId: input.storageContext?.packageId ?? null,
+		storageId: input.storageContext?.storageId ?? null,
+	}
+	const entries = await Promise.all(
+		Object.values(input.mounts).map(async (mount) => {
+			const resolved = await resolveSecret({
+				env: input.env,
+				userId: input.userId,
+				name: mount.name,
+				scope: mount.scope,
+				storageContext,
+			})
+			if (!resolved.found) return null
+			if (resolved.scope !== 'user') return null
+			if (resolved.allowedPackages.includes(savedPackage.id)) {
+				return null
+			}
+			return {
+				secretName: mount.name,
+				packageId: savedPackage.id,
+				kodyId: savedPackage.kodyId,
+				approvalUrl: buildSecretPackageApprovalUrl({
+					baseUrl: input.baseUrl,
+					name: mount.name,
+					scope: resolved.scope ?? mount.scope ?? 'user',
+					packageId: savedPackage.id,
+					kodyId: savedPackage.kodyId,
+					storageContext,
+				}),
+			}
+		}),
+	)
+	return entries.filter((entry) => entry != null)
+}
+
+export function buildPackageApprovalErrorForMounts(input: {
+	entries: Array<{
+		secretName: string
+		packageId: string
+		kodyId: string
+		approvalUrl: string
+	}>
+	baseUrl?: string
+}) {
+	if (input.entries.length === 0) {
+		return null
+	}
+	if (input.entries.length === 1) {
+		const only = input.entries[0]
+		if (!only) return null
+		return createPackageSecretAccessDeniedMessage({
+			secretName: only.secretName,
+			packageName: only.kodyId,
+			approvalUrl: only.approvalUrl,
+		})
+	}
+	const packageIds = new Set(input.entries.map((entry) => entry.packageId))
+	const first = input.entries[0]
+	const baseUrl =
+		input.baseUrl ??
+		(first
+			? (() => {
+					try {
+						return new URL(first.approvalUrl).origin
+					} catch {
+						return null
+					}
+				})()
+			: null)
+	const bulkApprovalUrl =
+		packageIds.size === 1 && first && baseUrl
+			? buildSecretPackageBulkApprovalUrlIfNeeded({
+					baseUrl,
+					packageId: first.packageId,
+					kodyId: first.kodyId,
+					names: input.entries.map((entry) => entry.secretName),
+				})
+			: null
+	return createPackageSecretAccessDeniedBatchMessage(
+		input.entries.map((entry) => ({
+			secretName: entry.secretName,
+			packageId: entry.packageId,
+			kodyId: entry.kodyId,
+			packageName: entry.kodyId,
+			approvalUrl: entry.approvalUrl,
+		})),
+		{ bulkApprovalUrl },
+	)
+}

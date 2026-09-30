@@ -1,0 +1,195 @@
+import { getSavedPackageByName } from '#worker/package-registry/repo.ts'
+import { resolveShareGrantedPackageImport } from '#worker/package-registry/share-grants.ts'
+import { getPlatformAccountByUsername } from '#worker/package-registry/scope-grants.ts'
+import { type SavedPackageRecord } from '#worker/package-registry/types.ts'
+
+export const packageSpecifierPrefix = 'kody:@'
+
+/**
+ * Caller referenced a `kody:@scope/pkg` import that is not installed for this
+ * user. Observability treats it like `PackageNameInputError` and keeps it off
+ * Sentry (KODY-86).
+ */
+export class SavedPackageNotFoundError extends Error {
+	constructor(packageName: string) {
+		super(`Saved package "${packageName}" was not found for this user.`)
+		this.name = 'SavedPackageNotFoundError'
+	}
+}
+
+export type KodyPackageSpecifier = {
+	packageName: string
+	exportName: string
+}
+
+/**
+ * Resolution result for a `kody:@scope/name` import.
+ *
+ * `sourceOwnerUserId` is the user id the package *source* must be loaded
+ * under. It equals the caller for the caller's own packages. For platform
+ * (built-in) scopes — npm scopes whose username belongs to a platform
+ * account (`users.account_type = 'platform'`, e.g. `@kody`) — imports
+ * resolve live from the platform account's current published version, so
+ * `sourceOwnerUserId` is the platform account's stable user id and
+ * `platformScope` carries the scope username.
+ *
+ * Isolation invariant: platform resolution only widens *which published
+ * source the bundler may read*, and only when the caller is a platform
+ * account composing with another platform scope (decision 0036). Person
+ * accounts — ad hoc execute and saved packages — must `communityFork`
+ * into the caller's scope. The caller's own copy always wins.
+ *
+ * Person-to-person share grants are a separate lane: an accepted grant
+ * lets the guest resolve the owner's published package for invoke and
+ * source read. `shareOwned` marks that the storage/secret stamp stays
+ * on the owner, not the guest.
+ */
+export type ResolvedPackageImport = {
+	row: SavedPackageRecord
+	sourceOwnerUserId: string
+	platformScope: string | null
+	shareOwned?: boolean
+	storageOwnerUserId?: string
+}
+
+function unsupportedSpecifierError(specifier: string) {
+	return new Error(`Unsupported Kody package specifier "${specifier}".`)
+}
+
+export function parseKodyPackageSpecifier(
+	specifier: string,
+): KodyPackageSpecifier {
+	if (!specifier.startsWith(packageSpecifierPrefix)) {
+		throw unsupportedSpecifierError(specifier)
+	}
+
+	const trimmed = specifier.slice(packageSpecifierPrefix.length).trim()
+	if (!trimmed) {
+		throw unsupportedSpecifierError(specifier)
+	}
+
+	const segments = trimmed.split('/').map((segment) => segment.trim())
+	if (segments.length < 2 || segments[0] === '' || segments[1] === '') {
+		throw unsupportedSpecifierError(specifier)
+	}
+
+	const scope = segments[0]
+	const packageLeaf = segments[1]
+	if (!scope || !packageLeaf) {
+		throw unsupportedSpecifierError(specifier)
+	}
+
+	const packageName = `@${scope}/${packageLeaf}`
+	const exportName = segments.slice(2).join('/').trim() || '.'
+
+	return {
+		packageName,
+		exportName,
+	}
+}
+
+export function packageScopeUsername(packageName: string): string | null {
+	const match = /^@([^/]+)\//.exec(packageName)
+	return match?.[1] ?? null
+}
+
+export async function resolveSavedPackageImport(input: {
+	db: D1Database
+	userId: string
+	specifier: string | KodyPackageSpecifier
+	/**
+	 * The dynamic-import hydration lane loads source and published artifacts
+	 * under `sourceOwnerUserId` (own package or share grant). Rebuild+persist
+	 * is owner-only; share guests fail closed when the artifact is missing.
+	 * Platform-owned sources must never rebuild here; the lane opts out and
+	 * reports a teaching error instead.
+	 */
+	allowPlatformScopes?: boolean
+	/**
+	 * When rewriting imports inside a share-granted package, resolve the
+	 * owner's other published packages as that owner — the guest never
+	 * independently imports those helpers unless the owner's published
+	 * graph does.
+	 */
+	nestedShareOwnerUserId?: string
+}): Promise<ResolvedPackageImport | null> {
+	const parsed =
+		typeof input.specifier === 'string'
+			? parseKodyPackageSpecifier(input.specifier)
+			: input.specifier
+
+	if (
+		input.nestedShareOwnerUserId &&
+		input.nestedShareOwnerUserId !== input.userId
+	) {
+		const ownerOwned = await getSavedPackageByName(input.db, {
+			userId: input.nestedShareOwnerUserId,
+			name: parsed.packageName,
+		})
+		if (ownerOwned) {
+			return {
+				row: ownerOwned,
+				sourceOwnerUserId: input.nestedShareOwnerUserId,
+				platformScope: null,
+				shareOwned: true,
+				storageOwnerUserId: input.nestedShareOwnerUserId,
+			}
+		}
+	}
+	const own = await getSavedPackageByName(input.db, {
+		userId: input.userId,
+		name: parsed.packageName,
+	})
+	if (own) {
+		return {
+			row: own,
+			sourceOwnerUserId: input.userId,
+			platformScope: null,
+		}
+	}
+	const shared = await resolveShareGrantedPackageImport({
+		db: input.db,
+		granteeUserId: input.userId,
+		packageName: parsed.packageName,
+	})
+	if (shared) {
+		return {
+			row: shared.row,
+			sourceOwnerUserId: shared.sourceOwnerUserId,
+			platformScope: null,
+			shareOwned: true,
+			storageOwnerUserId: shared.sourceOwnerUserId,
+		}
+	}
+	if (input.allowPlatformScopes !== true) return null
+	return await resolvePlatformScopedPackageImport({
+		db: input.db,
+		packageName: parsed.packageName,
+	})
+}
+
+export async function resolvePlatformScopedPackageImport(input: {
+	db: D1Database
+	packageName: string
+}): Promise<ResolvedPackageImport | null> {
+	const scopeUsername = packageScopeUsername(input.packageName)
+	if (!scopeUsername) return null
+	const platformAccount = await getPlatformAccountByUsername(
+		input.db,
+		scopeUsername,
+	)
+	if (!platformAccount) return null
+	const row = await getSavedPackageByName(input.db, {
+		userId: platformAccount.stableUserId,
+		name: input.packageName,
+	})
+	// Hidden and private platform packages are the operator's "not ready" /
+	// "not for everyone" switches; they stay resolvable only to the owner
+	// (who resolves via the own-copy lane).
+	if (!row || row.hidden || row.isPrivate) return null
+	return {
+		row,
+		sourceOwnerUserId: platformAccount.stableUserId,
+		platformScope: scopeUsername,
+	}
+}

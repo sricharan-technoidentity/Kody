@@ -1,0 +1,297 @@
+import { DatabaseSync } from 'node:sqlite'
+import { expect, test } from 'vitest'
+import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import { buildOnboardingSearchNotice } from '#mcp/tools/search-onboarding-notice.ts'
+import {
+	deriveOnboardingChecklist,
+	dismissOnboardingChecklist,
+	loadOnboardingAccessWin,
+	loadOnboardingAccessWinMemorySubject,
+	readOnboardingChecklistDismissed,
+} from './onboarding-checklist.ts'
+
+const migrationsDirectory = new URL('../../migrations/', import.meta.url)
+
+function createEnv() {
+	const sqlite = new DatabaseSync(':memory:')
+	applyRepositoryMigrations(sqlite, migrationsDirectory)
+	const { env: meterEnv } = createInMemoryUserMeterEnv()
+	return {
+		env: { APP_DB: createD1FromSqlite(sqlite), ...meterEnv } as Env,
+	}
+}
+
+const userId = 'a'.repeat(64)
+
+async function seedUser(db: D1Database, stableUserId = userId) {
+	await db
+		.prepare(
+			`INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id)
+			 VALUES (?, ?, ?, ?, ?)`,
+		)
+		.bind(
+			`user-${stableUserId.slice(0, 8)}`,
+			`${stableUserId.slice(0, 8)}@example.test`,
+			'test-password-hash',
+			new Date().toISOString(),
+			stableUserId,
+		)
+		.run()
+}
+
+async function readDismissedAt(db: D1Database, stableUserId = userId) {
+	const row = await db
+		.prepare(
+			`SELECT onboarding_checklist_dismissed_at
+			 FROM users
+			 WHERE stable_user_id = ?`,
+		)
+		.bind(stableUserId)
+		.first<{ onboarding_checklist_dismissed_at: string | null }>()
+	return row?.onboarding_checklist_dismissed_at ?? null
+}
+
+test('checklist derives wizard steps from grants and an access win, not integrations', async () => {
+	const { env } = createEnv()
+	await seedUser(env.APP_DB)
+
+	const fresh = await deriveOnboardingChecklist({
+		env,
+		userId,
+		emailVerified: true,
+		hasMcpClient: true,
+	})
+	expect(fresh.complete).toBe(false)
+	expect(Object.fromEntries(fresh.items.map((i) => [i.id, i.done]))).toEqual({
+		'verify-email': true,
+		'connect-agent': true,
+		'give-access': false,
+		'connect-second-agent': false,
+		'install-starter': false,
+	})
+
+	const progressed = await deriveOnboardingChecklist({
+		env,
+		userId,
+		emailVerified: true,
+		hasMcpClient: true,
+		hasAccessWin: true,
+		hasSecondMcpClient: true,
+	})
+	const doneById = Object.fromEntries(
+		progressed.items.map((i) => [i.id, i.done]),
+	)
+	expect(doneById['give-access']).toBe(true)
+	expect(doneById['connect-second-agent']).toBe(true)
+	expect(progressed.complete).toBe(false)
+
+	await env.APP_DB.prepare(
+		`UPDATE users SET first_search_at = ? WHERE stable_user_id = ?`,
+	)
+		.bind(new Date().toISOString(), userId)
+		.run()
+	expect(await loadOnboardingAccessWin(env, userId)).toBe(true)
+
+	const afterSearch = await buildOnboardingSearchNotice({
+		env: {
+			...env,
+			OAUTH_PROVIDER: {
+				listUserGrants: async () => ({
+					items: [{ id: 'grant-1', clientId: 'client-a' }],
+				}),
+			},
+		},
+		userId,
+		baseUrl: 'https://kody.example',
+	})
+	expect(afterSearch).not.toContain('Make something useful')
+	expect(afterSearch).toContain('Connect a second agent')
+
+	const twoGrantsSameClient = await buildOnboardingSearchNotice({
+		env: {
+			...env,
+			OAUTH_PROVIDER: {
+				listUserGrants: async () => ({
+					items: [
+						{ id: 'grant-1', clientId: 'client-a' },
+						{ id: 'grant-2', clientId: 'client-a' },
+					],
+				}),
+			},
+		},
+		userId,
+		baseUrl: 'https://kody.example',
+	})
+	expect(twoGrantsSameClient).toContain('Connect a second agent')
+
+	const twoUniqueUnlabeledClients = await buildOnboardingSearchNotice({
+		env: {
+			...env,
+			OAUTH_PROVIDER: {
+				listUserGrants: async () => ({
+					items: [
+						{ id: 'grant-1', clientId: 'client-a' },
+						{ id: 'grant-2', clientId: 'client-b' },
+					],
+				}),
+			},
+		},
+		userId,
+		baseUrl: 'https://kody.example',
+	})
+	expect(twoUniqueUnlabeledClients).toContain('Connect a second agent')
+
+	const dualCursorContexts = await buildOnboardingSearchNotice({
+		env: {
+			...env,
+			OAUTH_PROVIDER: {
+				listUserGrants: async () => ({
+					items: [
+						{
+							id: 'grant-local',
+							clientId: 'cursor-local-client',
+							redirectUri: 'cursor://anysphere.cursor-mcp/oauth/callback',
+						},
+						{
+							id: 'grant-cloud',
+							clientId: 'cursor-cloud-client',
+							redirectUri: 'https://www.cursor.com/agents/mcp/oauth/callback',
+						},
+					],
+				}),
+				lookupClient: async (clientId: string) => ({
+					clientId,
+					clientName: 'Cursor',
+				}),
+			},
+		},
+		userId,
+		baseUrl: 'https://kody.example',
+	})
+	expect(dualCursorContexts).toContain('Connect a second agent')
+
+	const twoEcosystems = await buildOnboardingSearchNotice({
+		env: {
+			...env,
+			OAUTH_PROVIDER: {
+				listUserGrants: async () => ({
+					items: [
+						{
+							id: 'grant-cursor',
+							clientId: 'cursor-client',
+							redirectUri: 'http://localhost:8787/callback',
+						},
+						{
+							id: 'grant-claude',
+							clientId: 'claude-client',
+						},
+					],
+				}),
+				lookupClient: async (clientId: string) => ({
+					clientId,
+					clientName: clientId === 'claude-client' ? 'Claude Code' : 'Cursor',
+				}),
+			},
+		},
+		userId,
+		baseUrl: 'https://kody.example',
+	})
+	expect(twoEcosystems).toBeNull()
+
+	expect(await readOnboardingChecklistDismissed({ env, userId })).toBe(false)
+	await dismissOnboardingChecklist({ env, userId })
+	expect(await readOnboardingChecklistDismissed({ env, userId })).toBe(true)
+	expect(await readDismissedAt(env.APP_DB)).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+})
+
+test('search onboarding notice lists remaining wizard steps without writing dismissal', async () => {
+	const { env } = createEnv()
+	await seedUser(env.APP_DB)
+	const envWithGrants = {
+		...env,
+		OAUTH_PROVIDER: {
+			listUserGrants: async () => ({ items: [] }),
+		},
+	}
+
+	const notice = await buildOnboardingSearchNotice({
+		env: envWithGrants,
+		userId,
+		baseUrl: 'https://kody.example',
+	})
+	expect(notice).toContain('3 steps left')
+	expect(notice).toContain('/onboarding')
+	expect(await readOnboardingChecklistDismissed({ env, userId })).toBe(false)
+	expect(await readDismissedAt(env.APP_DB)).toBe(null)
+
+	await dismissOnboardingChecklist({ env, userId })
+	expect(
+		await buildOnboardingSearchNotice({
+			env: envWithGrants,
+			userId,
+			baseUrl: 'https://kody.example',
+		}),
+	).toBe(null)
+})
+
+test('search onboarding notice stays quiet when grants cannot be listed', async () => {
+	const { env } = createEnv()
+	await seedUser(env.APP_DB)
+	expect(
+		await buildOnboardingSearchNotice({
+			env: {
+				...env,
+				OAUTH_PROVIDER: {
+					listUserGrants: async () => {
+						throw new Error('provider unavailable')
+					},
+				},
+			},
+			userId,
+			baseUrl: 'https://kody.example',
+		}),
+	).toBe(null)
+	expect(
+		await buildOnboardingSearchNotice({
+			env,
+			userId,
+			baseUrl: 'https://kody.example',
+		}),
+	).toBe(null)
+})
+
+test('access-win memory subject is the newest active subject and fails open', async () => {
+	const { env } = createEnv()
+	await seedUser(env.APP_DB)
+	expect(await loadOnboardingAccessWinMemorySubject(env, userId)).toBeNull()
+
+	await env.APP_DB.prepare(
+		`INSERT INTO mcp_memories (id, user_id, subject, summary)
+		 VALUES (?, ?, ?, ?)`,
+	)
+		.bind('mem-1', userId, 'Preferred commute', 'Takes the train')
+		.run()
+	expect(await loadOnboardingAccessWinMemorySubject(env, userId)).toBe(
+		'Preferred commute',
+	)
+
+	await env.APP_DB.prepare(
+		`UPDATE mcp_memories SET status = 'deleted' WHERE id = ?`,
+	)
+		.bind('mem-1')
+		.run()
+	expect(await loadOnboardingAccessWinMemorySubject(env, userId)).toBeNull()
+
+	const missingDb = {
+		APP_DB: {
+			prepare() {
+				throw new Error('d1 blip')
+			},
+		},
+	} as unknown as Env
+	expect(
+		await loadOnboardingAccessWinMemorySubject(missingDb, userId),
+	).toBeNull()
+})

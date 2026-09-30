@@ -1,0 +1,441 @@
+import { z } from 'zod'
+import { waitUntil } from 'cloudflare:workers'
+import { jsonResponse } from '#worker/json-response.ts'
+import { type Action } from 'remix/router'
+import {
+	hasStoredConnectClientSecret,
+	loadAccountIntegrationByName,
+	readConnectOauthLookupOptions,
+	loadAccountIntegrationsData,
+	loadExistingConnectionSummary,
+	loadAccountOauthAppBySlug,
+} from '#app/account-integrations-data.ts'
+import { loadConnectOauthChooser } from '#app/connect-oauth-chooser.ts'
+import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
+import { requireAuthenticatedPageUser } from '#app/page-auth.ts'
+import { renderAppPage } from '#app/ssr-render.tsx'
+import { toOauthAppPublic } from '#mcp/capabilities/integrations/oauth-app-shared.ts'
+import {
+	deleteIntegration,
+	deleteOauthAppWithConnections,
+	getOauthApp,
+	listJoinedIntegrations,
+	grantIntegrationPackage,
+	rotateOauthAppClientCredentials,
+	setIntegrationUsage,
+} from '#worker/integrations/service.ts'
+import { persistUserOauthAppClientSecret } from '#worker/integrations/credentials.ts'
+import { listSavedPackagesByUserId } from '#worker/package-registry/repo.ts'
+import { type routes } from '#universal/routes.ts'
+
+const rotateOauthAppCredentialsSchema = z
+	.object({
+		action: z.literal('rotate_oauth_app_credentials'),
+		appSlug: z.string().min(1),
+		clientId: z.string().min(1).optional(),
+		clientSecret: z.string().min(1).optional(),
+		confirm: z.literal(true),
+	})
+	.strict()
+	.refine((value) => Boolean(value.clientId || value.clientSecret), {
+		message: 'Provide a new client id and/or client secret.',
+	})
+
+const disconnectConnectionSchema = z
+	.object({
+		action: z.literal('disconnect_connection'),
+		name: z.string().min(1),
+	})
+	.strict()
+
+const deleteOauthAppSchema = z
+	.object({
+		action: z.literal('delete_oauth_app'),
+		appSlug: z.string().min(1),
+	})
+	.strict()
+
+const setUsageSchema = z
+	.object({
+		action: z.literal('set_usage'),
+		name: z.string().min(1),
+		usageMode: z.enum(['any', 'packages']),
+		allowedPackageIds: z.array(z.string()).optional(),
+	})
+	.strict()
+
+const approvePackageSchema = z
+	.object({
+		action: z.literal('approve_package'),
+		name: z.string().min(1),
+		packageId: z.string().min(1),
+	})
+	.strict()
+
+const accountIntegrationsActionSchema = z
+	.object({
+		action: z.enum([
+			'rotate_oauth_app_credentials',
+			'disconnect_connection',
+			'delete_oauth_app',
+			'set_usage',
+			'approve_package',
+		]),
+	})
+	.passthrough()
+
+export function createAccountIntegrationsHandler(env: Env) {
+	return {
+		middleware: [],
+		async handler({ request }) {
+			const user = await requireAuthenticatedPageUser(request, env)
+			if (user instanceof Response) {
+				return user
+			}
+
+			const accountIntegrations = await loadAccountIntegrationsData(env, user, {
+				waitUntil,
+				searchParams: new URL(request.url).searchParams,
+			})
+			return renderAppPage({
+				request,
+				env,
+				title: 'Integrations',
+				loaderData: { accountIntegrations },
+			})
+		},
+	} satisfies Action<
+		| typeof routes.accountIntegrations
+		| typeof routes.accountOauthAppDetail
+		| typeof routes.accountIntegrationsApprove
+		| typeof routes.accountIntegrationDetail
+	>
+}
+
+export function createAccountIntegrationsApiHandler(env: Env) {
+	return {
+		middleware: [],
+		async handler({ request }) {
+			const user = await readAuthenticatedAppUser(request, env)
+			if (!user) {
+				return jsonResponse({ ok: false, error: 'Unauthorized.' }, 401)
+			}
+
+			if (request.method === 'GET') {
+				const searchParams = new URL(request.url).searchParams
+				if (searchParams.get('connectChooser') === '1') {
+					return jsonResponse({
+						ok: true,
+						chooser: await loadConnectOauthChooser({
+							env,
+							userId: user.mcpUser.userId,
+						}),
+					})
+				}
+				const name = searchParams.get('name')?.trim()
+				const approvalPackageId = searchParams.get('package_id')?.trim()
+				if (name && !approvalPackageId) {
+					// `app=<slug>` reuses a saved bring-your-own app under `name`.
+					// `platform=` is ignored: built-in connect is retired.
+					const integration = await loadAccountIntegrationByName(
+						env,
+						user,
+						name,
+						readConnectOauthLookupOptions(searchParams),
+					)
+					const [existingConnection, hasStoredClientSecret] = await Promise.all(
+						[
+							loadExistingConnectionSummary(env, user, name),
+							hasStoredConnectClientSecret(env, user, name, integration),
+						],
+					)
+					return jsonResponse({
+						ok: true,
+						integration,
+						builtInAvailable: false,
+						existingConnection,
+						hasStoredClientSecret,
+					})
+				}
+				const appSlug = searchParams.get('appSlug')?.trim()
+				if (appSlug) {
+					const app = await loadAccountOauthAppBySlug(env, user, appSlug)
+					if (!app) {
+						return jsonResponse(
+							{ ok: false, error: 'OAuth app not found.' },
+							404,
+						)
+					}
+					return jsonResponse({ ok: true, app })
+				}
+				return jsonResponse(
+					await loadAccountIntegrationsData(env, user, {
+						waitUntil,
+						searchParams: new URL(request.url).searchParams,
+					}),
+				)
+			}
+
+			if (request.method !== 'POST') {
+				return jsonResponse({ ok: false, error: 'Method not allowed.' }, 405)
+			}
+
+			const body = await request.json().catch(() => null)
+			const actionParsed = accountIntegrationsActionSchema.safeParse(body)
+			if (!actionParsed.success) {
+				return jsonResponse({ ok: false, error: 'Invalid request body.' }, 400)
+			}
+
+			switch (actionParsed.data.action) {
+				case 'rotate_oauth_app_credentials': {
+					const parsed = rotateOauthAppCredentialsSchema.safeParse(body)
+					if (!parsed.success) {
+						return jsonResponse(
+							{ ok: false, error: 'Invalid request body.' },
+							400,
+						)
+					}
+					return handleRotateOauthAppCredentials({
+						env,
+						user,
+						body: parsed.data,
+					})
+				}
+				case 'disconnect_connection': {
+					const parsed = disconnectConnectionSchema.safeParse(body)
+					if (!parsed.success) {
+						return jsonResponse(
+							{ ok: false, error: 'Invalid request body.' },
+							400,
+						)
+					}
+					return handleDisconnectConnection({
+						env,
+						user,
+						name: parsed.data.name,
+					})
+				}
+				case 'delete_oauth_app': {
+					const parsed = deleteOauthAppSchema.safeParse(body)
+					if (!parsed.success) {
+						return jsonResponse(
+							{ ok: false, error: 'Invalid request body.' },
+							400,
+						)
+					}
+					return handleDeleteOauthApp({
+						env,
+						user,
+						appSlug: parsed.data.appSlug,
+					})
+				}
+				case 'set_usage': {
+					const parsed = setUsageSchema.safeParse(body)
+					if (!parsed.success) {
+						return jsonResponse(
+							{ ok: false, error: 'Invalid request body.' },
+							400,
+						)
+					}
+					return handleSetUsage({
+						env,
+						user,
+						body: parsed.data,
+					})
+				}
+				case 'approve_package': {
+					const parsed = approvePackageSchema.safeParse(body)
+					if (!parsed.success) {
+						return jsonResponse(
+							{ ok: false, error: 'Invalid request body.' },
+							400,
+						)
+					}
+					return handleApprovePackage({
+						env,
+						user,
+						body: parsed.data,
+					})
+				}
+				default: {
+					const _exhaustive: never = actionParsed.data.action
+					return _exhaustive
+				}
+			}
+		},
+	} satisfies Action<
+		| typeof routes.accountIntegrationsApi
+		| typeof routes.accountIntegrationsApiPost
+	>
+}
+
+async function handleSetUsage(input: {
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	body: z.infer<typeof setUsageSchema>
+}) {
+	const allowedPackageIds =
+		input.body.usageMode === 'packages'
+			? (input.body.allowedPackageIds ?? [])
+			: []
+	const updated = await setIntegrationUsage({
+		env: input.env,
+		userId: input.user.mcpUser.userId,
+		name: input.body.name,
+		usageMode: input.body.usageMode,
+		allowedPackageIds,
+	})
+	if (!updated) {
+		return jsonResponse({ ok: false, error: 'Connection not found.' }, 404)
+	}
+	return jsonResponse({
+		ok: true,
+		usageMode: updated.usageMode,
+		allowedPackageIds: updated.allowedPackageIds,
+	})
+}
+
+async function handleApprovePackage(input: {
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	body: z.infer<typeof approvePackageSchema>
+}) {
+	const userId = input.user.mcpUser.userId
+	const savedPackage = (
+		await listSavedPackagesByUserId(input.env.APP_DB, {
+			userId,
+		})
+	).find((entry) => entry.id === input.body.packageId)
+	if (!savedPackage) {
+		return jsonResponse(
+			{ ok: false, error: 'That package is not on this account.' },
+			400,
+		)
+	}
+	const updated = await grantIntegrationPackage({
+		env: input.env,
+		userId,
+		name: input.body.name,
+		packageId: input.body.packageId,
+	})
+	if (!updated) {
+		return jsonResponse({ ok: false, error: 'Connection not found.' }, 404)
+	}
+	return jsonResponse({
+		ok: true,
+		alreadyGranted:
+			updated.usageMode === 'any' ||
+			updated.allowedPackageIds.includes(input.body.packageId),
+		usageMode: updated.usageMode,
+		allowedPackageIds: updated.allowedPackageIds,
+	})
+}
+
+async function handleDisconnectConnection(input: {
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	name: string
+}) {
+	const deleted = await deleteIntegration({
+		env: input.env,
+		userId: input.user.mcpUser.userId,
+		name: input.name,
+	})
+	if (!deleted) {
+		return jsonResponse({ ok: false, error: 'Connection not found.' }, 404)
+	}
+	return jsonResponse({ ok: true, deleted: true })
+}
+
+async function handleDeleteOauthApp(input: {
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	appSlug: string
+}) {
+	const userId = input.user.mcpUser.userId
+	const existing = await getOauthApp({
+		env: input.env,
+		userId,
+		slug: input.appSlug,
+	})
+	if (!existing) {
+		return jsonResponse({ ok: false, error: 'OAuth app not found.' }, 404)
+	}
+	const result = await deleteOauthAppWithConnections({
+		env: input.env,
+		userId,
+		slug: existing.slug,
+	})
+	if (!result.deleted) {
+		return jsonResponse({ ok: false, error: 'OAuth app not found.' }, 404)
+	}
+	return jsonResponse({
+		ok: true,
+		deleted: true,
+		connectionNames: result.connectionNames,
+	})
+}
+
+async function handleRotateOauthAppCredentials(input: {
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	body: z.infer<typeof rotateOauthAppCredentialsSchema>
+}) {
+	const userId = input.user.mcpUser.userId
+	const existing = await getOauthApp({
+		env: input.env,
+		userId,
+		slug: input.body.appSlug,
+	})
+	if (!existing) {
+		return jsonResponse({ ok: false, error: 'OAuth app not found.' }, 404)
+	}
+
+	const nextClientId = input.body.clientId?.trim() || existing.clientId
+
+	try {
+		if (input.body.clientSecret) {
+			await persistUserOauthAppClientSecret({
+				env: input.env,
+				userId,
+				slug: existing.slug,
+				value: input.body.clientSecret,
+			})
+		}
+
+		const rotated = await rotateOauthAppClientCredentials({
+			env: input.env,
+			userId,
+			slug: existing.slug,
+			clientId: nextClientId,
+		})
+		const joined = await listJoinedIntegrations({
+			env: input.env,
+			userId,
+		})
+		const connections = joined
+			.filter((entry) => entry.app.slug === rotated.slug)
+			.map(({ connection }) => ({
+				name: connection.name,
+				accountLabel: connection.accountLabel,
+			}))
+		return jsonResponse({
+			ok: true,
+			app: toOauthAppPublic(
+				{ ...rotated, connectionCount: connections.length },
+				connections,
+			),
+		})
+	} catch (error) {
+		return jsonResponse(
+			{
+				ok: false,
+				error:
+					error instanceof Error
+						? error.message
+						: 'Unable to rotate OAuth app credentials.',
+			},
+			400,
+		)
+	}
+}

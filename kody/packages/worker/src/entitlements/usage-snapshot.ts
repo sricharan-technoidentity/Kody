@@ -1,0 +1,194 @@
+import { utcDayKey, utcWeekStart } from '@kody-internal/shared/date-keys.ts'
+import {
+	entitlementResourceLabels,
+	isWeeklyComputeWindowResource,
+	resolvePlanLimit,
+	resolveWeeklyPlanLimit,
+	type CreditWalletState,
+	type EntitlementLadder,
+	type EntitlementResource,
+	type PlanName,
+} from '#universal/plans.ts'
+import {
+	accountUsageEntitlementResources,
+	buildEntitlementHowToReduce,
+	entitlementResourceVisibility,
+	type EntitlementResourceGroup,
+	type EntitlementResourceVisibilityKind,
+} from './resource-visibility.ts'
+import {
+	readCurrentEntitlementResourceUsage,
+	readWeeklyEntitlementResourceUsage,
+} from './service.ts'
+import { listUserStorageBucketEstimates } from '#worker/storage-buckets/service.ts'
+
+export const entitlementUsageWarningThreshold = 0.8
+
+export type EntitlementUsageWeekWindow = {
+	current: number
+	limit: number
+	percentOfLimit: number | null
+	overEightyPercent: boolean
+}
+
+export type EntitlementUsageSnapshotRow = {
+	resource: EntitlementResource
+	label: string
+	group: EntitlementResourceGroup
+	kind: EntitlementResourceVisibilityKind
+	whatCounts: string
+	howToReduce: string
+	current: number
+	limit: number
+	percentOfLimit: number | null
+	overEightyPercent: boolean
+	week?: EntitlementUsageWeekWindow
+}
+
+export type EntitlementUsageSnapshot = {
+	plan: PlanName
+	today: string
+	weekStart: string
+	resources: Array<EntitlementUsageSnapshotRow>
+	warnings: Array<EntitlementUsageSnapshotRow>
+}
+
+async function readVisibleEntitlementUsage(input: {
+	db: D1Database
+	env: Env
+	userId: string
+	resource: EntitlementResource
+	now: Date
+}) {
+	const [authoritativeUsage, bucketEstimates] = await Promise.all([
+		readCurrentEntitlementResourceUsage({
+			db: input.db,
+			env: input.env,
+			userId: input.userId,
+			resource: input.resource,
+			now: input.now,
+		}),
+		input.resource === 'storage_bytes'
+			? listUserStorageBucketEstimates({
+					env: input.env,
+					userId: input.userId,
+				})
+			: [],
+	])
+	return bucketEstimates.reduce(
+		(total, bucket) => total + (bucket.estimatedBytes ?? 0),
+		authoritativeUsage,
+	)
+}
+
+export async function readEntitlementUsageSnapshot(input: {
+	db: D1Database
+	env: Env
+	usageUserId: string
+	plan: PlanName
+	ladder: EntitlementLadder
+	creditWallet: CreditWalletState
+	now?: Date
+}): Promise<EntitlementUsageSnapshot> {
+	const now = input.now ?? new Date()
+	const resources = await Promise.all(
+		accountUsageEntitlementResources.map(async (resource) => {
+			const visibility = entitlementResourceVisibility[resource]
+			const [current, week] = await Promise.all([
+				visibility.kind === 'per_unit_max'
+					? 0
+					: readVisibleEntitlementUsage({
+							db: input.db,
+							env: input.env,
+							userId: input.usageUserId,
+							resource,
+							now,
+						}),
+				readWeeklyUsageWindow({
+					env: input.env,
+					userId: input.usageUserId,
+					plan: input.plan,
+					ladder: input.ladder,
+					creditWallet: input.creditWallet,
+					resource,
+					now,
+				}),
+			])
+			const limit = resolvePlanLimit(
+				input.plan,
+				resource,
+				input.ladder,
+				input.creditWallet,
+			)
+			// per_unit_max compares one candidate value (no accumulating
+			// usage) and a zero limit means the plan has no allowance, so a
+			// current/limit ratio is meaningless for both.
+			const percentOfLimit =
+				visibility.kind === 'per_unit_max' || limit === 0
+					? null
+					: current / limit
+			const overEightyPercent =
+				(percentOfLimit !== null &&
+					percentOfLimit > entitlementUsageWarningThreshold) ||
+				(week?.overEightyPercent ?? false)
+			return {
+				resource,
+				label: entitlementResourceLabels[resource],
+				group: visibility.group,
+				kind: visibility.kind,
+				whatCounts: visibility.whatCounts,
+				howToReduce: buildEntitlementHowToReduce(
+					resource,
+					input.plan,
+					input.creditWallet,
+				),
+				current,
+				limit,
+				percentOfLimit,
+				overEightyPercent,
+				...(week ? { week } : {}),
+			}
+		}),
+	)
+	return {
+		plan: input.plan,
+		today: utcDayKey(now),
+		weekStart: utcWeekStart(now),
+		resources,
+		warnings: resources.filter((row) => row.overEightyPercent),
+	}
+}
+
+async function readWeeklyUsageWindow(input: {
+	env: Env
+	userId: string
+	plan: PlanName
+	ladder: EntitlementLadder
+	creditWallet: CreditWalletState
+	resource: EntitlementResource
+	now: Date
+}): Promise<EntitlementUsageWeekWindow | undefined> {
+	if (!isWeeklyComputeWindowResource(input.resource)) return undefined
+	const limit = resolveWeeklyPlanLimit(
+		input.plan,
+		input.resource,
+		input.ladder,
+		input.creditWallet,
+	)
+	if (limit === null) return undefined
+	const current = await readWeeklyEntitlementResourceUsage({
+		env: input.env,
+		userId: input.userId,
+		resource: input.resource,
+		now: input.now,
+	})
+	const percentOfLimit = limit === 0 ? null : current / limit
+	return {
+		current,
+		limit,
+		percentOfLimit,
+		overEightyPercent:
+			percentOfLimit !== null &&
+			percentOfLimit > entitlementUsageWarningThreshold,
+	}
+}

@@ -1,0 +1,441 @@
+# Execute and workflows
+
+**execute** runs one ephemeral **ES module** inside Kody's runtime. That module
+uses normal **imports** and **exports** and must **default export** the entry
+function Kody should invoke.
+
+## Shape of the code
+
+Author code as one module string. Export a default function. On **execute**,
+name that argument **`params`** so it mirrors `execute({ code, params })`:
+
+```ts
+export default async function main(params) {
+	// Use params directly, or pass them to shared helpers.
+}
+```
+
+Import runtime APIs from **`kody:runtime`** when you need Kody helpers. These
+helpers are runtime exports:
+
+- use **`import { kody } from 'kody:runtime'`** to call builtin capabilities
+  discovered by **search** as **`await kody.capabilityId(params)`**
+- use
+  **`import { createAuthenticatedFetch, oauthClientCredentials } from 'kody:runtime'`**
+  for OAuth helpers
+- use **`import { secretHeaders } from 'kody:runtime'`** when an approved
+  `fetch` request needs host-derived auth headers from saved secrets, such as
+  Basic Auth from a saved client id and client secret
+- use **`import { packageStorage } from 'kody:runtime'`** inside saved-package
+  code for the package's own bucket — always, in every package surface; see
+  [Package storage](./packages.md#package-storage)
+- use **`import { workflows } from 'kody:runtime'`** to queue Cloudflare
+  Workflows from execute calls, package jobs, package subscriptions, package
+  apps, and package exports. Prefer workflows for durable batch sweeps,
+  migrations, polling loops, retryable steps, deferred one-shot work, or work
+  that may run longer than execute's timeout. See [Workflows](./workflows.md)
+- use **`import { packageContext } from 'kody:runtime'`** inside saved package
+  code when you need package metadata; it is **`null`** for ad hoc execute calls
+- when a package name is data, use `import(specifier)` for a caller-owned or
+  forked module. Exactly-once work uses [workflows](./workflows.md). When the
+  target package's name is known when the code is written, use a static
+  `kody:@...` import (see below)
+- use **`import thing from 'kody:@scope/my-package/export-name'`** or
+  **`import { helper } from 'kody:@scope/my-package/export-name'`** to reuse a
+  saved package export by npm-scoped package name. This is **the default for
+  package reuse** whenever the target package's name is known when the code is
+  written: static imports are publish-verified (repo checks prove the export
+  exists), dependency-graph-visible (`kody.dependencies`, dependents tracking),
+  and have zero per-call platform cost. Ad hoc execute bundles per call, so
+  static imports from execute always see the current published version; snapshot
+  staleness only affects package-to-package static dependencies, which keep the
+  bundled snapshot until the dependent republishes.
+
+`kody:runtime` is always supplied by the Kody host at execution time. Published
+package artifacts do not bundle the host runtime; execution always hydrates the
+deployed `kody:runtime` module.
+
+Prefer a static `kody:@...` import when the target package's name is known when
+the code is written. Use `import(specifier)` when the name is data.
+
+**execute** also accepts optional **`params`**. Kody passes that JSON object to
+the module's **default export** as the first function argument. Shared helpers
+should receive that object through normal function arguments.
+
+When the `execute-invoke` experiment is on for the caller (operators enable that
+flag for the `experiments_opt_in` audience at `/account/experiments`),
+**execute** also accepts **`invoke`**: a package export specifier such as
+`kody:@scope/package/export` or `@scope/package#export`. `invoke` is mutually
+exclusive with `code`. Kody writes the same canonical thin passthrough a careful
+agent would write (`import action from "kody:@scope/package/export"` plus a
+default export that calls it with `params`) and then runs the ordinary execute
+path. The Dynamic Worker identity matches that hand-written module. Arbitrary
+URLs are rejected. Vary args via **`params`**.
+
+Ad hoc worker identity follows the acting user plus that **`code`** module
+graph. Put varying capability args in **`params`**, not string literals inside
+`code`, so the same graph is reused for the UTC day.
+
+Bad (new isolate per distinct literal):
+
+```ts
+import { kody } from 'kody:runtime'
+export default async function main() {
+	return await kody.emailSend({
+		subject: 'Hello from Kody',
+		text: 'Notify-self mail from an execute module.',
+	})
+}
+```
+
+Good (same graph reused; vary via params):
+
+```ts
+import { kody } from 'kody:runtime'
+export default async function main(params) {
+	return await kody.emailSend(params)
+}
+// execute({ code, params: { subject: 'Hello from Kody', text: 'Notify-self mail from an execute module.' } })
+```
+
+Top-level `await` is acceptable when needed.
+
+### Server-Timing phases
+
+Execute responses include Server-Timing-style phase entries under
+**`timing.serverTiming`** (public tool) or top-level **`serverTiming`**
+(`meta.execute`): each entry is `{ name, durationMs }`.
+
+- `bundle` — module-graph preparation and bundling.
+- `hydrate` — refreshing nested runtime modules, including compatibility
+  placeholders retained in already-published bundle snapshots.
+- `provider-assembly` — capability registry, runtime helper, and provider wiring
+  ahead of sandbox startup.
+- `sandbox` — the dynamic worker evaluation of the module itself.
+- `run` — the enclosing span for the three phases above (plus run-record and
+  usage bookkeeping). Phase durations are measured with `Date.now()`, which the
+  Workers runtime only advances across I/O boundaries — synchronous CPU inside
+  one phase can be attributed to the next timer read. Treat phases as
+  attribution for slow spans, not precise CPU accounting.
+
+## npm packages on Workers
+
+**execute** and saved packages may import npm packages directly when they are
+compatible with the Cloudflare Workers runtime. Prefer existing packages over
+rewriting helpers; useful starting points include `p-retry`, `mailparser`,
+`remark` / `mdast-util-to-markdown`, and `googleapis`.
+
+For ad hoc execute, Kody scans literal bare import specifiers, synthesizes an
+ephemeral dependency manifest, and resolves each package at its current registry
+version during bundling. Relative and absolute imports and `kody:`,
+`cloudflare:`, and `node:` specifiers are not npm dependencies. Registry
+resolution failures and packages that cannot bundle for the Workers runtime are
+reported as bundle errors. Saved packages continue to declare dependency
+versions in their checked-in `package.json`. Ad hoc execute skips publish
+checks, so a large import can succeed here and still fail package bundle
+validation; see
+[Offload work that does not fit a Worker isolate](../guides/heavy-work-offload.md).
+
+For runtime details, see Cloudflare's
+[Node.js compatibility](https://developers.cloudflare.com/workers/runtime-apis/nodejs/).
+
+## Chaining
+
+Prefer **one execute** when the plan is clear: import what you need, call
+several capabilities or package exports, branch on results, and return the final
+structured result. Split into multiple **execute** calls only when you need new
+user input, confirmation, or a result that changes the plan.
+
+Plain **execute** has a hard timeout (~90s by default). Sandbox outbound `fetch`
+is capped at 60s (30s under that budget) unless the caller passes a tighter
+`AbortSignal`. For multi-step or long-running work (>~60s, batch sweeps,
+migrations, polling loops), use one **execute** call to submit
+`workflows.create({ code, params })`, then inspect progress with
+`workflowRunList` instead of chaining many MCP tool calls. Sandbox timeout
+errors state the enforced budget (for example
+`Execution timed out after 90s: …`) and carry a structured next step pointing at
+workflows.
+
+### Recovering from MCP client timeouts
+
+A timeout means the MCP client stopped waiting. Kody aborts that inbound
+request's sandbox, including a keyed package invocation nested under it, and
+finishes the run as `errorName=client_disconnected` with a log line. The attempt
+does not stay `running` until platform reconciliation. Already-started remote
+side effects may still complete. Do not blindly retry a timed-out side-effecting
+call. Check **Recent runs** or `runList` before starting another sandbox.
+
+Pass an optional **`idempotencyKey`** (string, max 256 characters) when the call
+must be recoverable:
+
+- Kody persists that execute run **eagerly** (a `running` row at start, terminal
+  row at finish) and stores a **bounded result snapshot** on the run record.
+- The tool response includes **`runId`** whenever a record exists — poll
+  **`runGet`** with it if the client timed out.
+- Retrying with the **same** `idempotencyKey` after completion returns the
+  retained result with **`replayed: true`** and the same **`runId`** (no second
+  sandbox).
+- Retrying while the first attempt is still running returns
+  **`inProgress: true`** with the **`runId`** (no duplicate start).
+- A caller disconnect finishes the run as **`errorName=client_disconnected`**.
+  Retrying the same key replays that error. Use a new idempotency key to run the
+  work again.
+- If a keyed run is stranded as `running` (for example the Worker isolate reset
+  before the terminal write), Kody reconciles it to an error with
+  **`errorName=platform_interrupted`** after a few minutes (platform weather;
+  outcome unknown — not a user-authored package failure). Keyed package
+  invocations write `package invocation started: …` onto the running row before
+  sandbox work, so that reconciled row is not an empty log. Polling **`runGet`**
+  or retrying the same key then returns that terminal outcome instead of
+  `inProgress` forever.
+
+Omit the key for ordinary short calls. Those runs are still listed in Activity
+when they finish. Pass a key when a retry must return the retained result
+instead of running again.
+
+To read field shapes while coding, use **search** with
+**`entity: "capability:{name}"`** for builtin capability type definitions, or
+inspect the relevant saved package with **`entity: "package:{package-name}"`**.
+Capability detail includes a complete **execute** module snippet; the runtime
+call itself is always through the imported `kody` object.
+
+## Saved packages
+
+Saved packages, package jobs, and one-off **execute** code share the same
+module-oriented runtime model:
+
+- saved packages persist repo-backed source rooted at `package.json`
+- package identity is the scoped `package.json.name` (`@scope/leaf`) or the UUID
+  `package_id` when the name is not known; the leaf is the URL slug
+- package exports are defined by standard `package.json.exports`
+- package-specific metadata lives under `package.json#kody`
+- package jobs are schedules declared under `package.json#kody.jobs`
+- package apps are optional UI surfaces declared under `package.json#kody.app`
+- deferred one-shot work uses **`workflows.create({ runAt, ... })`** from
+  `execute` or package runtime — see [Workflows](./workflows.md)
+- **`kody.jobUpdate(...)`** updates metadata on an existing job (schedule,
+  timezone, enabled, kill switch, preserved, `expires_at`). Package job name and
+  source stay in the package repo.
+- Optional **`expires_at`** on `jobUpdate` stops the platform from scheduling
+  the job after that UTC time. When expiry is reached, Kody auto-disables the
+  job (`enabled=false`) so it shows as disabled in `jobList` / `jobGet` (with
+  `expired: true`) and can age out via normal retention. This is separate from
+  **`preserved`**, which only skips auto-deletion.
+- **`kody.jobGet({ id, includeCode: true })`** returns the scheduled job
+  inspection details plus the stored entrypoint path and source code
+- Package-owned jobs are removed by editing the package and publishing, not by
+  `jobDelete`.
+- **`kody.jobRunNow(...)`** runs an existing scheduled job immediately and
+  returns both the updated job state and the execution result for debugging.
+  Expired jobs are rejected.
+
+Static saved-package imports from ad hoc **execute** run under the ad hoc
+execute runtime. That means imported package modules can share exported helpers,
+but `packageContext` remains **`null`** because the imported module has not been
+entered as its own package runtime. Imported modules keep stamped
+`packageStorage()` and stamp-aligned secret authority: A's export may use
+secrets locked to A (or A's `kody.secretMounts`) without granting those secrets
+to the execute entry. The execute entry cannot select A's id on
+`kody.packageSecretGet` / `Has`; only A's stamped `packageSecrets` binding
+carries that authority. Unstamped execute entry code can still use **your** user
+secrets through `{{secret:...}}` placeholders; it cannot use A's mounts.
+`packageContext` stays `null` on ad hoc execute.
+
+When you need to edit saved source, prefer the repo-backed workflow in
+[Repo-backed editing sessions](./repo-sessions.md). Open by package identity
+instead of internal source ids whenever possible.
+
+For common edit-and-check workflows, use the file-level repo session API
+documented in [Repo-backed editing sessions](./repo-sessions.md): open a session
+with `repoOpenSession`, edit with `repoEditFiles` or `repoApplyPatch`, inspect
+with `repoDiff`, commit with `repoCommit`, validate with `repoRunChecks`, and
+publish with `repoPublishSession`. There is no git-command channel inside
+sessions; use `packageGetGitRemote` for full git.
+
+## Agent turns
+
+Generic tool-using agent turns are package-owned behavior rather than a built-in
+runtime primitive. Search for an agent-turn package, then import that package
+from execute or another saved package.
+
+## Storage
+
+Ad hoc execute has no scratch SQLite helper. Persist durable state from a saved
+package with **`packageStorage()`**. Another package's data goes through a
+static import of that package's export so its stamp does the reading and
+writing. See [Package storage](./packages.md#package-storage).
+
+`packageStorage()` exposes `get` / `set` / `list` / `sql` / `delete` / `clear` /
+`id`. `sql(...)` returns a result object, not the row array directly:
+
+```ts
+import { packageStorage } from 'kody:runtime'
+
+const result = await packageStorage().sql('select value from counters')
+
+return {
+	columns: result.columns,
+	rows: result.rows,
+	rowCount: result.rowCount,
+	rowsRead: result.rowsRead,
+	rowsWritten: result.rowsWritten,
+	truncated: result.truncated,
+}
+```
+
+Read query rows from **`result.rows`**. The other fields are useful for
+inspection and debugging, especially when validating whether a query read or
+wrote storage. `sql(...)` returns at most 1000 rows and sets `truncated: true`
+when more matched — page with `LIMIT`/`OFFSET` (or a keyset) for larger results.
+Mutating statements that yield rows (`INSERT`/`UPDATE`/`DELETE … RETURNING`)
+still finish the write when truncated; only the returned row list is capped.
+
+For dedicated inspection, use:
+
+- **`storageExport`** — export one storage bucket as JSON (`page_size` max 1000)
+- **`storageQuery`** — run SQL against one storage bucket (read-only by default,
+  opt into writes explicitly). Returns at most 1000 rows and sets
+  `truncated: true` when more matched — same cap as `sql(...)`.
+
+Both are scoped to the caller. Code running as a saved package (invocations,
+jobs, package apps, retrievers) may name only buckets that package owns — its
+own bucket, its app facet buckets, and its package job buckets. Another
+package's bucket is reachable only through `packageStorage()`, which is gated by
+bundler-recorded provenance grants.
+
+## Long-term memory
+
+Kody can surface a small number of relevant long-term memories when you pass a
+short **`memoryContext`** on normal MCP tool calls. `search` also retrieves from
+the query string. Surfaced memories appear in the tool text as subject and
+summary only (id in structured content). Later retrievals can repeat that
+compact block. Full contract (including `dedupe_key` collapse and the verify
+workflow): [Memory and conversation context](./memory.md).
+
+Handled **execute** responses also include top-level **`timing`** metadata with
+`startedAt`, `endedAt`, and `durationMs` alongside `conversationId`. Use it for
+basic latency instrumentation around tool runs.
+
+When a call is denied by a plan limit or a daily quota, the existing error
+message and `isError: true` stay the same. Structured content also includes a
+focused **`entitlement`** object with known fields only (resource, current plan,
+limit, current usage, upgrade hint). Daily quota denials add compact `used` and
+`remaining`. Ordinary successful execute results omit `entitlement`.
+
+Dynamic Worker identity for an execute run follows the acting user and that
+module graph. The same user and graph reuse one isolate for the UTC day when
+only `params` or `packageContext` change. The cost model is documented once in
+[Platform efficiency](../guides/platform-efficiency.md).
+
+For memory mutations, the workflow is explicit and strict:
+
+- **Always run `metaMemoryVerify` before writing or deleting memory**
+- then decide whether to call **`metaMemoryUpsert`**, **`metaMemoryDelete`**,
+  both, or neither
+- **`metaMemoryUpsert`** creates a new memory when **`memory_id`** is omitted
+  and updates an existing memory when **`memory_id`** is provided
+
+Kody retrieves related memories, but the **consuming agent** is responsible for
+deciding what action to take.
+
+## MCP server instructions
+
+Users can read or replace their own MCP server instruction overlay with
+**`metaGetMcpServerInstructions`** and **`metaSetMcpServerInstructions`**.
+
+This overlay is appended after Kody's built-in server instructions for that
+user. Prefer **memories** for durable facts and preferences; use the overlay
+only for rare always-on session policy — not for maintaining a package
+inventory. When agents have used saved packages via MCP `execute`, Kody may
+include a short “often used packages” hint automatically; discover others with
+**`search`**. Pass an empty string to clear the overlay. Changes apply to new
+MCP sessions, so reconnect the MCP client if the host caches server
+instructions.
+
+Some MCP clients keep only the first 2048 characters of server instructions.
+**`metaGetMcpServerInstructions`** and **`metaSetMcpServerInstructions`** report
+`assembled_chars` and a `warning` when the assembled text meets that cut, so the
+overlay may never reach the model.
+
+## Network and OAuth helpers
+
+The sandbox exposes global **`fetch`** plus secret placeholders in approved
+contexts. OAuth and secret-header helpers are imported from **`kody:runtime`**:
+
+**`import { createAuthenticatedFetch, oauthClientCredentials, secretHeaders } from 'kody:runtime'`**
+
+`createAuthenticatedFetch(providerName)` is async. Await it before calling the
+returned fetch wrapper:
+
+```ts
+const googleFetch = await createAuthenticatedFetch('google-business')
+const response = await googleFetch('/calendar/v3/users/me/calendarList')
+```
+
+Integration names should usually follow `<provider>-<purpose>` when multiple
+accounts may exist, such as `google`, `google-business`, or
+`google-youtube-brand`. Call **`integrationList`** up front when a provider may
+have multiple accounts connected.
+
+OAuth integrations may include `authorization` metadata with the saved
+`authorizeUrl`, requested `scopes`, any non-default `scopeSeparator`, and
+provider-specific `extraAuthorizeParams`. Use that metadata when a refresh token
+is stale and the user needs to reconnect; open
+`/connect/oauth?provider=<integration-name>` instead of guessing the scope set.
+
+For OAuth 2 `client_credentials` token exchanges that require
+`Authorization: Basic base64(client_id:client_secret)`, save the client id and
+client secret separately. Do **not** ask the user to precompute or save the
+derived Basic header. Use `secretHeaders.basic(...)` directly in a fetch header,
+or use `oauthClientCredentials(...)` for the token request. These examples use a
+placeholder API host and generic client credential secret names:
+
+```ts
+import { oauthClientCredentials } from 'kody:runtime'
+
+export default async function main() {
+	const token = await oauthClientCredentials({
+		tokenUrl: 'https://api.example.com/oauth/token',
+		clientIdSecret: 'exampleClientId',
+		clientSecretSecret: 'exampleClientSecret',
+		scope: 'user',
+	})
+
+	return { tokenType: token.token_type, hasAccessToken: !!token.access_token }
+}
+```
+
+For the lower-level token request built directly with `secretHeaders.basic`, see
+the worked example in [Secrets and host approval](./secrets-and-values.md).
+
+Kody resolves both saved secrets server-side, requires the token endpoint host
+to be approved for both secrets, and only sends the derived Basic header in the
+outbound request.
+
+See [Secrets and host approval](./secrets-and-values.md) for placeholders, host
+approval, **`kody.secretList`** / **`secretSet`**, and the rules for mentioning
+placeholder syntax without resolving it (the inert `{{secret:<name>}}` form and
+the `x-kody-secret-resolution: off` header). Treat placeholder syntax as
+operational wiring, not prose — never place a resolvable **`{{secret:...}}`**
+token into content shown to users or sent to third parties.
+
+## Named state
+
+Durable facts and preferences belong in memories. Package runtime state and
+knobs belong in **`packageStorage()`**. Versioned config belongs in a repo. API
+keys, PATs, and HMAC secrets belong in the secret store. OAuth access and
+refresh tokens, and a user-registered app's client secret, live on the
+integration.
+
+## Returning content blocks
+
+By default, **`execute`** returns text output. To return non-text MCP content
+blocks such as images, return an object with a **`__mcpContent`** array instead;
+see [Raw MCP content blocks](./raw-content-blocks.md).
+
+The same passthrough applies when execute returns a result from a user-added MCP
+server that already includes protocol image (or other non-text) content blocks.
+
+**`responseLimit`** caps ordinary JSON/text output (~100 KB by default).
+Protocol `__mcpContent` blocks use a separate ~512 KB content cap so valid
+images larger than 100 KB are not collapsed into truncated JSON.

@@ -1,0 +1,660 @@
+import { expect, test, vi } from 'vitest'
+
+const mockModule = vi.hoisted(() => ({
+	getSavedPackageWithCommunityProvenanceById: vi.fn(),
+	loadPackageSourceBySourceId: vi.fn(),
+	resolvePackageOwnerContext: vi.fn(),
+	listPackageSecretsByPackageIds: vi.fn(async () => new Map()),
+}))
+
+vi.mock('#worker/community/fork-listing-relation.ts', () => ({
+	applySavedPackageForkListingAncestry: async ({
+		records,
+	}: {
+		records: Array<unknown>
+	}) => records,
+}))
+
+vi.mock('#worker/package-registry/repo.ts', () => ({
+	getSavedPackageWithCommunityProvenanceById: (...args: Array<unknown>) =>
+		mockModule.getSavedPackageWithCommunityProvenanceById(...args),
+}))
+
+vi.mock('#worker/package-registry/source.ts', () => ({
+	loadPackageSourceBySourceId: (...args: Array<unknown>) =>
+		mockModule.loadPackageSourceBySourceId(...args),
+}))
+
+vi.mock('#worker/package-registry/package-owner.ts', () => ({
+	packageScopeInputDescription: 'package scope',
+	resolvePackageOwnerContext: (...args: Array<unknown>) =>
+		mockModule.resolvePackageOwnerContext(...args),
+}))
+
+vi.mock('#mcp/secrets/service.ts', () => ({
+	listPackageSecretsByPackageIds: (...args: Array<unknown>) =>
+		mockModule.listPackageSecretsByPackageIds(...args),
+}))
+
+const { getPackageCapability } = await import('./get-package.ts')
+const { packageSummaryWithCommunityProvenanceSchema } =
+	await import('./shared.ts')
+
+function createCallerContext(input?: {
+	username?: string | null
+	ownerUserId?: string
+	ownerScope?: string
+	ownerEmail?: string
+	delegated?: boolean
+}) {
+	const userId = 'user-1'
+	const ownerUserId = input?.ownerUserId ?? userId
+	const ownerScope = input?.ownerScope ?? input?.username ?? 'kody'
+	mockModule.resolvePackageOwnerContext.mockResolvedValue({
+		ownerUserId,
+		ownerScope,
+		ownerEmail: input?.ownerEmail ?? 'kody@example.com',
+		actorUserId: userId,
+		delegated: input?.delegated ?? false,
+	})
+
+	const user: {
+		userId: string
+		email: string
+		displayName: string
+		username?: string
+	} = {
+		userId,
+		email: 'kody@example.com',
+		displayName: 'Kody',
+	}
+	if (input?.username !== null) {
+		user.username = input?.username ?? 'kody'
+	}
+
+	return {
+		env: { APP_DB: {} } as Env,
+		callerContext: {
+			baseUrl: 'https://heykody.dev',
+			user,
+			storageContext: null,
+			repoContext: null,
+		},
+	}
+}
+
+function stubSavedPackage(input?: {
+	userId?: string
+	name?: string
+	hasApp?: boolean
+	sourceListingId?: string | null
+	listingCurrent?: boolean | null
+	listingKodyId?: string | null
+	originCommit?: string | null
+	listingPinnedCommit?: string | null
+	listingAhead?: boolean | null
+	forkListingRelation?: 'synced' | 'outdated' | 'ahead' | null
+}) {
+	const selfAuthored = input?.sourceListingId === null
+	const listingCurrent = selfAuthored ? null : (input?.listingCurrent ?? true)
+	const listingGone = listingCurrent === false
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockResolvedValue({
+		id: 'package-1',
+		userId: input?.userId ?? 'user-1',
+		name: input?.name ?? '@kentcdodds/discord-gateway',
+		kodyId: 'discord-gateway',
+		description: 'Discord helpers',
+		tags: ['discord'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: input?.hasApp ?? true,
+		hidden: false,
+		isPrivate: false,
+		lockedAt: null,
+		sourceListingId: selfAuthored
+			? null
+			: (input?.sourceListingId ?? 'listing-1'),
+		listingCurrent,
+		listingKodyId: selfAuthored
+			? null
+			: (input?.listingKodyId ?? 'upstream-discord-gateway'),
+		listingName:
+			selfAuthored || listingGone ? null : '@kentcdodds/discord-gateway',
+		originCommit: selfAuthored
+			? null
+			: (input?.originCommit ?? 'commit-origin'),
+		listingPinnedCommit:
+			selfAuthored || listingGone
+				? null
+				: (input?.listingPinnedCommit ?? 'commit-origin'),
+		listingPublishedAt:
+			selfAuthored || listingGone ? null : '2026-04-20T00:00:00.000Z',
+		listingAhead: selfAuthored ? null : (input?.listingAhead ?? false),
+		forkListingRelation: selfAuthored
+			? null
+			: (input?.forkListingRelation ?? 'synced'),
+		createdAt: '2026-04-25T00:00:00.000Z',
+		updatedAt: '2026-04-26T00:00:00.000Z',
+	})
+}
+
+test('getPackageCapability returns export metadata for owner and delegated package scopes', async () => {
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockReset()
+	mockModule.loadPackageSourceBySourceId.mockReset()
+	stubSavedPackage()
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		source: { id: 'source-1' },
+		manifest: {
+			name: '@kentcdodds/discord-gateway',
+			exports: {
+				'.': './src/index.ts',
+				'./post-message': {
+					import: './src/post-message.ts',
+					types: './src/post-message.ts',
+				},
+			},
+			kody: {
+				id: 'discord-gateway',
+				description: 'Discord helpers',
+				tags: ['discord'],
+				app: {
+					entry: './src/operator-app.ts',
+				},
+			},
+		},
+		files: {},
+	})
+
+	const withUsername = await getPackageCapability.handler(
+		{ package_id: 'package-1' },
+		createCallerContext(),
+	)
+
+	expect(withUsername).toMatchObject({
+		package_id: 'package-1',
+		kody_id: 'discord-gateway',
+		name: '@kentcdodds/discord-gateway',
+		description: 'Discord helpers',
+		tags: ['discord'],
+		has_app: true,
+		visibility: 'public',
+		source_id: 'source-1',
+		source_listing_id: 'listing-1',
+		listing_current: true,
+		listing_kody_id: 'upstream-discord-gateway',
+		listing_ahead: false,
+		created_at: '2026-04-25T00:00:00.000Z',
+		updated_at: '2026-04-26T00:00:00.000Z',
+		exports: [
+			{
+				subpath: '.',
+				import_specifier: 'kody:@kentcdodds/discord-gateway',
+				runtime_target: 'src/index.ts',
+			},
+			{
+				subpath: './post-message',
+				import_specifier: 'kody:@kentcdodds/discord-gateway/post-message',
+				runtime_target: 'src/post-message.ts',
+				types_path: 'src/post-message.ts',
+			},
+		],
+	})
+	expect(
+		mockModule.getSavedPackageWithCommunityProvenanceById,
+	).toHaveBeenCalledWith(
+		expect.anything(),
+		expect.objectContaining({ userId: 'user-1', packageId: 'package-1' }),
+	)
+	expect(mockModule.loadPackageSourceBySourceId).toHaveBeenCalledWith({
+		env: expect.objectContaining({ APP_DB: expect.anything() }),
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		sourceId: 'source-1',
+	})
+
+	// Delegated package_scope loads the owner's package metadata.
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockReset()
+	mockModule.loadPackageSourceBySourceId.mockReset()
+	mockModule.resolvePackageOwnerContext.mockClear()
+	stubSavedPackage({
+		userId: 'platform-owner',
+		name: '@kody/discord-gateway',
+		hasApp: false,
+		sourceListingId: null,
+		listingCurrent: null,
+		listingKodyId: null,
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		source: { id: 'source-1' },
+		manifest: {
+			name: '@kody/discord-gateway',
+			exports: {
+				'./post-message': './src/post-message.ts',
+			},
+			kody: {
+				id: 'discord-gateway',
+				description: 'Discord helpers',
+			},
+		},
+		files: {},
+	})
+
+	const delegated = await getPackageCapability.handler(
+		{ package_id: 'package-1', package_scope: 'kody' },
+		createCallerContext({
+			ownerUserId: 'platform-owner',
+			ownerScope: 'kody',
+			ownerEmail: 'platform@example.com',
+			delegated: true,
+		}),
+	)
+
+	expect(mockModule.resolvePackageOwnerContext).toHaveBeenCalledWith(
+		expect.anything(),
+		expect.objectContaining({ userId: 'user-1' }),
+		'kody',
+	)
+	expect(
+		mockModule.getSavedPackageWithCommunityProvenanceById,
+	).toHaveBeenCalledWith(
+		expect.anything(),
+		expect.objectContaining({
+			userId: 'platform-owner',
+			packageId: 'package-1',
+		}),
+	)
+	expect(mockModule.loadPackageSourceBySourceId).toHaveBeenCalledWith(
+		expect.objectContaining({ userId: 'platform-owner' }),
+	)
+	expect(delegated.exports[0]).toMatchObject({
+		subpath: './post-message',
+		import_specifier: 'kody:@kody/discord-gateway/post-message',
+	})
+	expect(withUsername.package_secrets).toEqual([])
+	expect(delegated.package_secrets).toEqual([])
+})
+
+test('getPackageCapability includes package-scoped secret metadata as FYI', async () => {
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockReset()
+	mockModule.loadPackageSourceBySourceId.mockReset()
+	stubSavedPackage()
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		source: { id: 'source-1' },
+		manifest: {
+			name: '@kentcdodds/discord-gateway',
+			exports: { '.': './src/index.ts' },
+			kody: {
+				id: 'discord-gateway',
+				description: 'Discord helpers',
+			},
+		},
+		files: {},
+	})
+	mockModule.listPackageSecretsByPackageIds.mockResolvedValueOnce(
+		new Map([
+			[
+				'package-1',
+				[
+					{
+						name: 'discordBotToken',
+						scope: 'package',
+						description: 'Bot token for this package',
+						packageId: 'package-1',
+						allowedHosts: ['discord.com'],
+						allowedPackages: [],
+						createdAt: '2026-04-25T00:00:00.000Z',
+						updatedAt: '2026-04-26T00:00:00.000Z',
+						expiresAt: null,
+						ttlMs: null,
+					},
+				],
+			],
+		]),
+	)
+
+	const result = await getPackageCapability.handler(
+		{ package_id: 'package-1' },
+		createCallerContext(),
+	)
+
+	expect(result.package_secrets).toEqual([
+		{
+			name: 'discordBotToken',
+			scope: 'package',
+			description: 'Bot token for this package',
+			package_id: 'package-1',
+			allowed_hosts: ['discord.com'],
+			allowed_packages: [],
+			created_at: '2026-04-25T00:00:00.000Z',
+			updated_at: '2026-04-26T00:00:00.000Z',
+			expires_at: null,
+			ttl_ms: null,
+		},
+	])
+	expect(result.package_secrets[0]).not.toHaveProperty('value')
+	expect(mockModule.listPackageSecretsByPackageIds).toHaveBeenCalledWith({
+		env: expect.objectContaining({ APP_DB: expect.anything() }),
+		userId: 'user-1',
+		packageIds: ['package-1'],
+	})
+})
+
+test('getPackageCapability omits fork-ahead from the agent payload', async () => {
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockReset()
+	mockModule.loadPackageSourceBySourceId.mockReset()
+	stubSavedPackage({
+		originCommit: 'fork-tip',
+		listingPinnedCommit: 'listing-pin',
+		listingAhead: false,
+		forkListingRelation: 'ahead',
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		source: { id: 'source-1' },
+		manifest: {
+			name: '@kentcdodds/discord-gateway',
+			exports: { '.': './src/index.ts' },
+			kody: {
+				id: 'discord-gateway',
+				description: 'Discord helpers',
+			},
+		},
+		files: {},
+	})
+
+	const result = await getPackageCapability.handler(
+		{ package_id: 'package-1' },
+		createCallerContext(),
+	)
+
+	expect(result.listing_ahead).toBe(false)
+	expect(result).not.toHaveProperty('forkAhead')
+	expect(result).not.toHaveProperty('fork_ahead')
+	expect(result).not.toHaveProperty('forkListingRelation')
+	expect(result).not.toHaveProperty('fork_listing_relation')
+	expect(JSON.stringify(result)).not.toMatch(/fork.?ahead/i)
+	const listingAheadDescribe =
+		packageSummaryWithCommunityProvenanceSchema.shape.listing_ahead
+			.description ?? ''
+	expect(listingAheadDescribe).not.toMatch(/\bahead\b/i)
+})
+
+test('getPackageCapability projects export contracts from source and leaves them empty without projectable text', async () => {
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockReset()
+	mockModule.loadPackageSourceBySourceId.mockReset()
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/calendar',
+		kodyId: 'calendar',
+		description: 'Calendar helpers',
+		tags: ['calendar'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		lockedAt: null,
+		sourceListingId: null,
+		listingCurrent: null,
+		listingKodyId: null,
+		listingName: null,
+		originCommit: null,
+		listingPinnedCommit: null,
+		listingPublishedAt: null,
+		listingAhead: null,
+		forkListingRelation: null,
+		createdAt: '2026-04-25T00:00:00.000Z',
+		updatedAt: '2026-04-26T00:00:00.000Z',
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		source: { id: 'source-1' },
+		manifest: {
+			name: '@kentcdodds/calendar',
+			exports: {
+				'./list-events': {
+					import: './src/list-events.ts',
+					types: './src/list-events.d.ts',
+				},
+			},
+			kody: {
+				id: 'calendar',
+				description: 'Calendar helpers',
+				tags: ['calendar'],
+			},
+		},
+		files: {
+			'src/list-events.ts':
+				'export const ignored = "types file should be preferred"',
+			'src/list-events.d.ts': `/**
+ * List upcoming calendar events.
+ */
+export declare function listEvents(calendarId: string): Promise<string[]>
+`,
+		},
+	})
+
+	const typed = await getPackageCapability.handler(
+		{ package_id: 'package-1' },
+		createCallerContext(),
+	)
+	expect(typed.exports).toEqual([
+		expect.objectContaining({
+			subpath: './list-events',
+			import_specifier: 'kody:@kentcdodds/calendar/list-events',
+			runtime_target: 'src/list-events.ts',
+			types_path: 'src/list-events.d.ts',
+			description: 'List upcoming calendar events.',
+			type_definition:
+				'export declare function listEvents(calendarId: string): Promise<string[]>',
+			functions: [
+				{
+					name: 'listEvents',
+					description: 'List upcoming calendar events.',
+					type_definition:
+						'export declare function listEvents(calendarId: string): Promise<string[]>',
+				},
+			],
+			referenced_types: [],
+		}),
+	])
+
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/google',
+		kodyId: 'google',
+		description: 'Google helpers',
+		tags: ['google', 'calendar'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		lockedAt: null,
+		sourceListingId: null,
+		listingCurrent: null,
+		listingKodyId: null,
+		listingName: null,
+		originCommit: null,
+		listingPinnedCommit: null,
+		listingPublishedAt: null,
+		listingAhead: null,
+		forkListingRelation: null,
+		createdAt: '2026-04-25T00:00:00.000Z',
+		updatedAt: '2026-04-26T00:00:00.000Z',
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		source: { id: 'source-1' },
+		manifest: {
+			name: '@kentcdodds/google',
+			exports: {
+				'./calendar': './src/calendar.ts',
+			},
+			kody: {
+				id: 'google',
+				description: 'Google helpers',
+				tags: ['google', 'calendar'],
+			},
+		},
+		files: {
+			'src/calendar.ts': `export type CalendarEventsParams = { account: string; calendarId?: string }
+export type CalendarEventsAcrossCalendarsParams = CalendarEventsParams & { calendarMaxResults?: number }
+
+export async function listEvents(params: CalendarEventsParams): Promise<{ items: Array<unknown> }> {
+	return { items: [] }
+}
+
+export async function listEventsAcrossCalendars(
+	params: CalendarEventsAcrossCalendarsParams,
+): Promise<{ items: Array<unknown>; calendars: Array<unknown>; failures: Array<string> }> {
+	return { items: [], calendars: [], failures: [] }
+}
+
+/**
+ * Return the Google Calendar helper namespace.
+ */
+export default function calendar() {
+	return { listEvents, listEventsAcrossCalendars }
+}
+`,
+		},
+	})
+
+	const [calendarExport] = (
+		await getPackageCapability.handler(
+			{ package_id: 'package-1' },
+			createCallerContext(),
+		)
+	).exports
+	expect(calendarExport?.functions.map((fn) => fn.name)).toEqual([
+		'listEvents',
+		'listEventsAcrossCalendars',
+		'default',
+	])
+	expect(calendarExport?.referenced_types.map((type) => type.name)).toEqual([
+		'CalendarEventsParams',
+		'CalendarEventsAcrossCalendarsParams',
+	])
+	expect(calendarExport?.referenced_types[0]?.definition).toContain(
+		'account: string',
+	)
+
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/calendar',
+		kodyId: 'calendar',
+		description: 'Calendar helpers',
+		tags: ['calendar'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		lockedAt: null,
+		sourceListingId: null,
+		listingCurrent: null,
+		listingKodyId: null,
+		listingName: null,
+		originCommit: null,
+		listingPinnedCommit: null,
+		listingPublishedAt: null,
+		listingAhead: null,
+		forkListingRelation: null,
+		createdAt: '2026-04-25T00:00:00.000Z',
+		updatedAt: '2026-04-26T00:00:00.000Z',
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		source: { id: 'source-1' },
+		manifest: {
+			name: '@kentcdodds/calendar',
+			exports: {
+				'./list-events': {
+					import: './src/list-events.ts',
+					types: './src/list-events.d.ts',
+				},
+			},
+			kody: {
+				id: 'calendar',
+				description: 'Calendar helpers',
+			},
+		},
+		// Same path search hydration avoids: projection without file text
+		// cannot derive callable contracts even when the manifest lists types.
+		files: undefined,
+	})
+
+	const missingFiles = await getPackageCapability.handler(
+		{ package_id: 'package-1' },
+		createCallerContext(),
+	)
+	expect(missingFiles.exports).toEqual([
+		expect.objectContaining({
+			subpath: './list-events',
+			runtime_target: 'src/list-events.ts',
+			types_path: 'src/list-events.d.ts',
+			description: null,
+			type_definition: null,
+			functions: [],
+			referenced_types: [],
+		}),
+	])
+
+	mockModule.getSavedPackageWithCommunityProvenanceById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/untyped-helpers',
+		kodyId: 'untyped-helpers',
+		description: 'Untyped helpers',
+		tags: [],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		lockedAt: null,
+		sourceListingId: null,
+		listingCurrent: null,
+		listingKodyId: null,
+		listingName: null,
+		originCommit: null,
+		listingPinnedCommit: null,
+		listingPublishedAt: null,
+		listingAhead: null,
+		forkListingRelation: null,
+		createdAt: '2026-04-25T00:00:00.000Z',
+		updatedAt: '2026-04-26T00:00:00.000Z',
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		source: { id: 'source-1' },
+		manifest: {
+			name: '@kentcdodds/untyped-helpers',
+			exports: {
+				'.': './src/index.ts',
+			},
+			kody: {
+				id: 'untyped-helpers',
+				description: 'Untyped helpers',
+			},
+		},
+		files: {
+			// Non-function exports are intentionally ignored by the projector.
+			'src/index.ts': "export const VERSION = '1.0.0'\n",
+		},
+	})
+
+	const untyped = await getPackageCapability.handler(
+		{ package_id: 'package-1' },
+		createCallerContext(),
+	)
+	expect(untyped.exports).toEqual([
+		expect.objectContaining({
+			subpath: '.',
+			runtime_target: 'src/index.ts',
+			description: null,
+			type_definition: null,
+			functions: [],
+			referenced_types: [],
+		}),
+	])
+})

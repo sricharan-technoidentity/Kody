@@ -1,0 +1,117 @@
+import {
+	createProjectGraphAsync,
+	hashArray,
+	type FileData,
+	type NxJsonConfiguration,
+	type ProjectGraphProjectNode,
+	readJsonFile,
+} from 'nx/src/devkit-exports.js'
+import {
+	filterUsingGlobPatterns,
+	getTargetInputs,
+} from 'nx/src/hasher/task-hasher.js'
+import { expect, test } from 'vitest'
+
+async function getWorkerProjectNode() {
+	const projectGraph = await createProjectGraphAsync()
+	return projectGraph.nodes['worker'] as ProjectGraphProjectNode
+}
+
+async function getWorkerTargetPatterns(target: string): Promise<Array<string>> {
+	// Nx 23 merges `nx.json` targetDefaults onto project targets during graph
+	// construction. `getTargetInputs` no longer re-reads targetDefaults itself,
+	// so the contract must use the graph-merged target config.
+	const [nxJson, projectNode] = await Promise.all([
+		readJsonFile<NxJsonConfiguration>('nx.json'),
+		getWorkerProjectNode(),
+	])
+	return getTargetInputs(nxJson, projectNode, target).selfInputs.filter(
+		(input): input is string => typeof input === 'string',
+	)
+}
+
+async function getWorkerDeclaredInputs(target: string) {
+	const projectNode = await getWorkerProjectNode()
+	return projectNode.data.targets?.[target]?.inputs ?? []
+}
+
+function includesCiEnv(inputs: ReadonlyArray<unknown>) {
+	return inputs.some((input) => {
+		if (input === '{env:CI}') return true
+		return (
+			typeof input === 'object' &&
+			input !== null &&
+			'env' in input &&
+			(input as { env?: unknown }).env === 'CI'
+		)
+	})
+}
+
+function hashMatchedInputs(
+	patterns: ReadonlyArray<string>,
+	files: ReadonlyArray<FileData>,
+): string {
+	const workspacePatterns = patterns.map((pattern) =>
+		pattern.replace('{workspaceRoot}/', ''),
+	)
+	const matchedFiles = filterUsingGlobPatterns(
+		'packages/worker',
+		[...files],
+		workspacePatterns,
+	)
+	return hashArray(
+		matchedFiles
+			.sort((left, right) => left.file.localeCompare(right.file))
+			.map(({ file, hash }) => `${file}:${hash}`),
+	)
+}
+
+test.each([
+	{
+		target: 'test',
+		requiredInput: '{workspaceRoot}/packages/mock-servers/cloudflare/**/*',
+		dependencyFile: 'packages/mock-servers/cloudflare/src/index.ts',
+	},
+	{
+		target: 'test-node',
+		requiredInput: '{workspaceRoot}/packages/mock-servers/cloudflare/**/*',
+		dependencyFile: 'packages/mock-servers/cloudflare/src/index.ts',
+	},
+	{
+		target: 'test-workers',
+		requiredInput: '{workspaceRoot}/packages/mock-servers/cloudflare/**/*',
+		dependencyFile: 'packages/mock-servers/cloudflare/src/index.ts',
+	},
+	{
+		target: 'test-e2e',
+		requiredInput: '{workspaceRoot}/packages/mock-servers/cloudflare/**/*',
+		dependencyFile: 'packages/mock-servers/cloudflare/src/index.ts',
+	},
+	{
+		target: 'test-mcp',
+		requiredInput: '{workspaceRoot}/wrangler-env.ts',
+		dependencyFile: 'wrangler-env.ts',
+	},
+])(
+	'$target cache hash includes $dependencyFile',
+	async ({ target, requiredInput, dependencyFile }) => {
+		const patterns = await getWorkerTargetPatterns(target)
+		expect(patterns).toContain(requiredInput)
+
+		const before = hashMatchedInputs(patterns, [
+			{ file: dependencyFile, hash: 'before' },
+		])
+		const after = hashMatchedInputs(patterns, [
+			{ file: dependencyFile, hash: 'after' },
+		])
+		expect(after).not.toBe(before)
+	},
+)
+
+test.each(['test', 'test-node', 'test-workers', 'test-mcp', 'test-e2e'])(
+	'%s cache hash includes CI so local validate matches GitHub Actions',
+	async (target) => {
+		const inputs = await getWorkerDeclaredInputs(target)
+		expect(includesCiEnv(inputs)).toBe(true)
+	},
+)

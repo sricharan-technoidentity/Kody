@@ -1,0 +1,763 @@
+# Kody system primitives map (taxonomy)
+#
+# Stable vocabulary for the visual-recap skill
+# (.agents/skills/visual-recap/SKILL.md). This is NOT a living feature
+# changelog and NOT derived source-of-truth for behavior — architecture
+# docs under `docs:` are. Code is the truth for implementation.
+#
+# Risk labels used in PR recaps:
+#   composes - wires existing primitives without changing them
+#   extends  - changes a primitive's behavior, shape, or contract
+#   adds     - introduces a new primitive (update this file in the same PR)
+#
+# Update this file only when adding, removing, or materially reshaping a
+# primitive (id, name, group, code roots, or meaning). Do NOT edit `summary`
+# for ordinary feature work — put that in the linked architecture docs.
+#
+# `code` entries are coarse ownership roots for
+# `classify-primitives.mjs` (longest-prefix match). Prefer directories over
+# file lists. Keep the map small.
+
+version: 1
+
+groups:
+  - id: surfaces
+    name: Entry points
+  - id: auth
+    name: Identity & auth
+  - id: assistant
+    name: User-facing assistant primitives
+  - id: runtime
+    name: Execution runtimes
+  - id: storage
+    name: Storage & infrastructure
+
+primitives:
+  # --- Entry points -------------------------------------------------------
+  - id: app-ui
+    group: surfaces
+    name: Browser app (Remix 3)
+    summary: Server-first Remix UI and Worker-served app routes.
+    code:
+      - packages/worker/client/
+      - packages/worker/src/app/
+      - packages/worker/universal/
+    docs:
+      - docs/contributing/architecture/request-lifecycle.md
+
+  - id: mcp-server
+    group: surfaces
+    name: MCP endpoint (/mcp)
+    summary: OAuth-protected MCP server with a compact search/execute surface.
+    code:
+      - packages/worker/src/mcp/
+    docs:
+      - docs/contributing/project-intent.md
+      - docs/contributing/adding-capabilities.md
+
+  - id: status-page
+    group: surfaces
+    name: Public status page
+    summary:
+      Independently deployed status worker (status.kody.codes) probing public
+      endpoints every minute, storing history in its own Durable Object, and
+      emailing operator alerts under a capped policy.
+    code:
+      - packages/status/
+    docs:
+      - docs/contributing/setup-manifest.md
+      - docs/contributing/decisions/0004-status-page-separate-worker.md
+
+  - id: platform-worker
+    group: surfaces
+    name: Platform worker
+    summary:
+      Independently deployed platform worker owning the remaining platform
+      Durable Objects (MCP, McpClientHub, OAuthPurgeCoordinator, UserMeter,
+      Mailbox, RepoSession, RepoSessionIndex, StripePlanRefresh) so origin
+      content deploys do not reset those objects.
+    code:
+      - packages/platform-worker/
+      - packages/worker/src/platform-worker.ts
+      - packages/shared/src/platform-worker.ts
+      - tools/ci/platform-worker-config.ts
+      - tools/local-platform-dev-config.ts
+    docs:
+      - docs/contributing/decisions/0034-origin-owns-no-durable-objects.md
+      - docs/contributing/architecture/platform-worker-migration-runbook.md
+
+  - id: jobs-worker
+    group: surfaces
+    name: Jobs worker
+    summary:
+      Independently deployed jobs worker owning the JobManager Durable Object,
+      the cron/scheduled dispatch lane and queue, and the dedicated kody-jobs D1
+      database (jobs + archived_job_artifacts), calling back into the main
+      worker for job execution.
+    code:
+      - packages/jobs-worker/
+    docs:
+      - docs/contributing/decisions/0016-mono-worker-extraction.md
+      - docs/contributing/architecture/jobs-worker-migration-runbook.md
+
+  - id: highlight-worker
+    group: surfaces
+    name: Highlight worker
+    summary:
+      Service-binding-only Shiki tokenizer. Origin sends snippets over HIGHLIGHT
+      and receives serializable token trees; there is no public hostname.
+    code:
+      - packages/highlight-worker/
+    docs:
+      - docs/contributing/architecture/request-lifecycle.md
+
+  - id: scheduled-cron
+    group: surfaces
+    name: Scheduled handler
+    summary:
+      Worker cron dispatcher with queue-isolated maintenance lane invocations.
+    code:
+      - packages/jobs-worker/src/index.ts
+      - packages/jobs-worker/src/scheduled.ts
+      - packages/worker/src/index.ts
+      - packages/worker/src/scheduled/
+      - packages/worker/src/jobs/reconcile-artifacts-pushes.ts
+      - packages/worker/src/jobs/job-retention-cleanup.ts
+      - packages/worker/src/repo/repo-session-cleanup.ts
+      - packages/worker/src/app/retention.ts
+      - packages/worker/src/account/unverified-account-purge.ts
+      - packages/worker/src/app/auth-denial-alerts.ts
+      - packages/worker/src/usage/aggregate-rollups.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  # --- Identity & auth ----------------------------------------------------
+  - id: app-sessions
+    group: auth
+    name: Browser sessions
+    summary: Cookie sessions, signup/login, verification, and 2FA.
+    code:
+      - packages/worker/src/app/auth-session.ts
+      - packages/worker/src/app/handlers/auth.ts
+      - packages/worker/src/app/handlers/auth-provider.ts
+      - packages/worker/src/app/kit-signup.ts
+      - packages/worker/src/kit/subscriber-sync.ts
+      - packages/worker/src/app/handlers/account-connections.ts
+      - packages/worker/src/discord/guild-role.ts
+      - packages/worker/src/discord/guild-membership.ts
+      - packages/worker/src/app/oauth-
+      - packages/worker/src/app/handlers/verify
+      - packages/worker/src/app/handlers/pending-verification.ts
+      - packages/worker/src/app/handlers/webauthn.ts
+      - packages/worker/src/app/handlers/account-two-factor.ts
+      - packages/worker/src/app/handlers/account-passkeys.ts
+      - packages/worker/src/app/email-verification.ts
+      - packages/worker/src/app/onboarding-data.ts
+      - packages/worker/src/app/two-factor.ts
+      - packages/worker/src/app/verify-session.ts
+      - packages/worker/src/app/passkeys.ts
+      - packages/worker/src/app/webauthn.ts
+      - packages/worker/src/oauth-handlers.ts
+    docs:
+      - docs/contributing/architecture/authentication.md
+      - docs/contributing/social-login.md
+
+  - id: mcp-oauth
+    group: auth
+    name: MCP OAuth
+    summary: Bearer tokens for /mcp via workers-oauth-provider.
+    code:
+      - packages/worker/src/oauth-handlers.ts
+      - packages/worker/src/oauth-refresh-family.ts
+      - packages/worker/src/mcp-auth.ts
+      - packages/worker/src/oidc/
+    docs:
+      - docs/contributing/architecture/authentication.md
+
+  - id: rbac
+    group: auth
+    name: Role-based access control
+    summary: Permissions, roles, admin route guards, and admin MCP metadata.
+    code:
+      - packages/worker/src/identity/permissions
+      - packages/worker/universal/permissions
+      - packages/worker/src/app/handlers/admin-
+      - packages/worker/src/mcp/capabilities/admin/
+      - packages/worker/src/mcp/capabilities/meta/require-permission.ts
+    docs:
+      - docs/contributing/architecture/authorization.md
+
+  - id: entitlements
+    group: auth
+    name: Plans & entitlements
+    summary: Per-user plans and assertWithinEntitlement enforcement.
+    code:
+      - packages/worker/src/entitlements/
+      - packages/worker/universal/plans.ts
+    docs:
+      - docs/contributing/architecture/entitlements.md
+
+  - id: billing
+    group: auth
+    name: Stripe billing
+    summary:
+      Authenticated Checkout Session creation, Stripe webhooks, customer
+      linking, and subscription→plan sync with per-user activity-driven alarms.
+    code:
+      - packages/worker/src/billing/
+      - packages/worker/src/app/handlers/stripe-webhook.ts
+    docs:
+      - docs/contributing/architecture/entitlements.md
+
+  - id: feature-flags
+    group: auth
+    name: Feature flags
+    summary: Code-registry flags with D1 state, rollouts, and user overrides.
+    code:
+      - packages/worker/src/feature-flags/
+      - packages/worker/universal/feature-flags/
+    docs:
+      - docs/contributing/architecture/feature-flags.md
+
+  # --- User-facing assistant primitives -----------------------------------
+  - id: capability-registry
+    group: assistant
+    name: Capability registry
+    summary: Builtin and synthesized capability domains behind search/execute.
+    code:
+      - packages/worker/src/mcp/capabilities/
+    docs:
+      - docs/contributing/adding-capabilities.md
+
+  - id: repos
+    group: assistant
+    name: Repos
+    summary:
+      User-owned plain Artifacts repos; the base primitive packages extend.
+    code:
+      - packages/worker/src/repo/user-repos.ts
+      - packages/worker/src/mcp/capabilities/repo/repo-create.ts
+      - packages/worker/src/mcp/capabilities/repo/repo-list.ts
+      - packages/worker/src/mcp/capabilities/repo/repo-get.ts
+      - packages/worker/src/mcp/capabilities/repo/repo-delete.ts
+      - packages/worker/src/mcp/capabilities/repo/repo-get-git-remote.ts
+      - packages/worker/src/mcp/capabilities/repo/repo-promote-to-package.ts
+      - packages/worker/src/mcp/capabilities/repo/repo-update.ts
+    docs:
+      - docs/use/repos.md
+
+  - id: saved-packages
+    group: assistant
+    name: Saved packages
+    summary: Explicitly activated package extension over repo-backed source.
+    code:
+      - packages/worker/src/mcp/capabilities/packages/
+      - packages/worker/src/package-registry/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: package-share-grants
+    group: assistant
+    name: Package share grants
+    summary:
+      Person-to-person invitations to use a saved package (read source + invoke)
+      without write, publish, or the guest's other secrets.
+    code:
+      - packages/worker/src/package-registry/share-grants.ts
+      - packages/worker/src/package-registry/share-rbac.ts
+      - packages/worker/src/mcp/capabilities/packages/package-share.ts
+    docs:
+      - docs/guides/package-sharing.md
+      - docs/contributing/decisions/0050-package-share-grants-are-not-scope-grants.md
+      - docs/contributing/architecture/data-storage.md
+
+  - id: package-codemods
+    group: assistant
+    name: Package codemods
+    summary:
+      Versioned pure transforms migrating published user package source, with
+      dry-run gates, a run ledger, and revert snapshots.
+    code:
+      - packages/worker/src/package-codemods/
+    docs:
+      - docs/contributing/package-codemods.md
+
+  - id: community-listings
+    group: assistant
+    name: Public package listings
+    summary: Public pinned package listings, forks, ratings, and moderation.
+    code:
+      - packages/worker/src/community/
+      - packages/worker/src/mcp/capabilities/community/
+      - packages/worker/src/app/handlers/community
+      - packages/worker/src/app/handlers/admin-community-reports
+      - packages/worker/client/routes/community
+    docs:
+      - docs/use/community-packages.md
+      - docs/contributing/community-packages.md
+
+  - id: package-apps
+    group: assistant
+    name: Package apps
+    summary:
+      Optional package-declared hosted Worker apps (fetch handler, optional
+      client bundle, optional assets) with kody:runtime and packageContext; the
+      host strips the app mount before every entry.
+    code:
+      - packages/worker/src/package-runtime/package-app.ts
+      - packages/worker/src/package-runtime/package-app-assets.ts
+      - packages/worker/src/package-runtime/package-app-remix.ts
+      - packages/worker/src/package-runtime/package-app-remix-subpaths.ts
+      - packages/worker/src/package-runtime/package-app-tsconfig.ts
+      - packages/worker/src/package-runtime/module-graph-client-bundle.ts
+    docs:
+      - docs/use/packages.md
+      - docs/guides/package-apps.md
+
+  - id: jobs
+    group: assistant
+    name: Scheduled jobs
+    summary: Package-owned interval and cron jobs.
+    code:
+      - packages/worker/src/jobs/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: workflows
+    group: assistant
+    name: Workflows
+    summary: Durable DynamicCallableWorkflow hub for long-running work.
+    code:
+      - packages/worker/src/package-runtime/package-workflows.ts
+    docs:
+      - docs/contributing/architecture/request-lifecycle.md
+
+  - id: secrets
+    group: assistant
+    name: Secret references
+    summary: Server-side secret references; raw values never enter prompts.
+    code:
+      - packages/worker/src/mcp/capabilities/secrets/
+      - packages/worker/src/security/
+
+  - id: integrations
+    group: assistant
+    name: OAuth integrations
+    summary:
+      Per-user connections over user-owned or platform (built-in) OAuth apps;
+      access/refresh tokens and user-lane client secrets live encrypted on the
+      connection/app, with a user-gated any/packages grant.
+    code:
+      - packages/worker/src/integrations/
+      - packages/worker/src/mcp/capabilities/integrations/
+    docs:
+      - docs/contributing/architecture/integrations.md
+
+  - id: memories
+    group: assistant
+    name: Memories
+    summary: Long-term per-user memories with verify-first writes.
+    code:
+      - packages/worker/src/mcp/capabilities/meta/
+
+  - id: platform-feedback
+    group: assistant
+    name: Platform feedback
+    summary: Consent-gated attributed submissions and role-gated admin triage.
+    code:
+      - packages/worker/src/platform-feedback
+      - packages/worker/src/mcp/capabilities/meta/meta-platform-feedback
+      - packages/worker/src/mcp/capabilities/admin/admin-platform-feedback
+      - packages/worker/src/mcp/capabilities/admin/platform-feedback-shared.ts
+    docs:
+      - docs/contributing/architecture/authorization.md
+      - docs/contributing/architecture/data-storage.md
+
+  - id: account-export
+    group: assistant
+    name: Account data export
+    summary: User-facing export inventory without secret values.
+    code:
+      - packages/worker/src/account/export.ts
+      - packages/worker/src/app/handlers/account-export.ts
+      - packages/worker/src/mcp/capabilities/account/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: email
+    group: assistant
+    name: Email
+    summary: Per-user and operator system inboxes on the platform domain.
+    code:
+      - packages/worker/src/email/
+      - packages/worker/src/mcp/capabilities/email/
+
+  - id: webhooks
+    group: assistant
+    name: Inbound webhooks
+    summary: Package-declared webhooks with minted URLs dispatching to exports.
+    code:
+      - packages/worker/src/webhooks/
+      - packages/worker/src/mcp/capabilities/webhooks/
+      - packages/worker/src/app/handlers/webhook-ingress.ts
+      - packages/worker/src/app/handlers/package-webhooks.ts
+      - packages/worker/src/app/handlers/account-webhooks.ts
+      - packages/worker/src/app/package-webhooks-data.ts
+      - packages/worker/client/routes/package-webhook-settings.tsx
+      - packages/worker/client/routes/package-webhook-card.tsx
+      - packages/worker/client/routes/account-webhooks.tsx
+      - packages/worker/client/routes/webhooks-shared.ts
+      - packages/worker/src/package-registry/
+    docs:
+      - docs/use/webhooks.md
+      - docs/contributing/architecture/webhooks.md
+
+  - id: mcp-client-servers
+    group: assistant
+    name: MCP client servers
+    summary: User-added remote MCP servers Kody connects to as a client.
+    code:
+      - packages/worker/src/mcp-client/
+      - packages/worker/src/mcp/capabilities/mcp-server/
+      - packages/worker/src/mcp/capabilities/mcp-servers/
+      - packages/worker/src/app/handlers/account-mcp-servers.ts
+    docs:
+      - docs/contributing/architecture/mcp-client-servers.md
+
+  - id: realtime-sessions
+    group: assistant
+    name: Realtime sessions
+    summary: Package-app websocket sessions in PackageRealtimeSession.
+    code:
+      - packages/worker/src/package-runtime/realtime-session.ts
+
+  - id: durable-storage
+    group: assistant
+    name: Durable storage buckets
+    summary: Isolated per-storage-id SQLite in StorageRunner.
+    code:
+      - packages/worker/src/storage-runner.ts
+      - packages/worker/src/mcp/capabilities/storage/
+
+  # --- Execution runtimes --------------------------------------------------
+  - id: capabilities-execute
+    group: runtime
+    name: Capabilities execute runtime
+    summary: Sandboxed ESM execution with kody:runtime.
+    code:
+      - packages/worker/src/mcp/execute-modules/
+      - packages/worker/src/mcp/run-kody-registry.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: package-runtime
+    group: runtime
+    name: Package runtime
+    summary: Module graph and loaders for saved-package surfaces.
+    code:
+      - packages/worker/src/package-runtime/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: repo-sessions
+    group: runtime
+    name: Repo sessions
+    summary: RepoSession DO editing forks and publish transaction.
+    code:
+      - packages/worker/src/repo/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  # --- Storage & infrastructure --------------------------------------------
+  - id: d1-app-db
+    group: storage
+    name: D1 app database
+    summary: APP_DB relational metadata and projections.
+    code:
+      - packages/worker/migrations/
+      - packages/worker/src/db.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: audit-d1
+    group: storage
+    name: Audit database
+    summary:
+      AUDIT_DB global hashed security audit trail with independent retention.
+    code:
+      - packages/worker/audit-migrations/
+      - packages/worker/src/audit-log.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: email-reporting
+    group: storage
+    name: Email reporting stream
+    summary:
+      EMAIL_EVENTS Analytics Engine stream for role-gated platform aggregates.
+    code:
+      - packages/worker/src/email/reporting-events.ts
+      - packages/worker/src/app/admin-insights-data.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: backup-control-plane
+    group: storage
+    name: Production backup control plane
+    summary:
+      Dedicated scheduled D1 export, production-side multi-store exporter,
+      immutable R2 retention, Access-gated operator UI, isolated restore drills,
+      and cross-store recovery contracts.
+    code:
+      - packages/backup-control-plane/
+      - packages/worker/src/dr/
+      - packages/shared/src/backup-
+      - tools/ci/backup-
+      - tools/disaster-recovery/
+    docs:
+      - docs/contributing/disaster-recovery.md
+      - docs/contributing/setup-manifest.md
+
+  - id: artifacts-repos
+    group: storage
+    name: Artifacts repos
+    summary: Canonical published git source for packages and jobs.
+    code:
+      - packages/worker/src/repo/artifacts.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: bundle-artifacts-kv
+    group: storage
+    name: Bundle artifacts KV
+    summary: Published snapshots and package/community caches in KV.
+    code:
+      - packages/worker/src/package-runtime/published-bundle-artifacts.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: vectorize-search
+    group: storage
+    name: Vectorize search
+    summary: Capability and package vector search filtered by userId.
+    code:
+      - packages/worker/src/vectorize
+      - packages/worker/src/mcp/capabilities/capability-search.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: usage-metering
+    group: storage
+    name: Usage metering
+    summary: recordUsage() events and derived D1 usage_rollups.
+    code:
+      - packages/worker/src/usage/
+      - packages/worker/universal/usage-event-types.ts
+    docs:
+      - docs/contributing/architecture/usage-metering.md
+
+  - id: run-records
+    group: storage
+    name: Run records
+    summary: Per-user execution history and logs across every runtime surface.
+    code:
+      - packages/worker/src/run-records/
+      - packages/worker/src/mcp/capabilities/runs/
+    docs:
+      - docs/contributing/architecture/run-records.md
+
+  - id: user-meter
+    group: storage
+    name: User meter
+    summary:
+      Per-user UserMeter DO SQLite — authoritative for daily entitlement
+      counters, storage bytes, inbound delivery idempotency, and
+      account-deletion write leases; D1 keeps the deleting point gate and
+      lease-repair audit log.
+    code:
+      - packages/worker/src/entitlements/user-meter-do.ts
+      - packages/worker/src/entitlements/user-meter-client.ts
+      - packages/worker/src/account/deletion-state.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+      - docs/contributing/architecture/entitlements.md
+
+  - id: mailbox
+    group: storage
+    name: Mailbox
+    summary: Per-user Mailbox DO SQLite for email metadata; R2 keeps raw MIME.
+    code:
+      - packages/worker/src/email/mailbox-
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: email-blobs-r2
+    group: storage
+    name: Email blob storage (R2)
+    summary: EMAIL_BLOBS R2 for raw MIME and outbound attachments.
+    code:
+      - packages/worker/src/email/blob-keys.ts
+      - packages/worker/src/email/repo.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: email-delivery-queue
+    group: storage
+    name: Email delivery event queue
+    summary:
+      Cloudflare Queue ingestion for outbound Email Sending lifecycle events.
+    code:
+      - packages/worker/src/email/delivery-
+      - tools/ci/production-resources.ts
+    docs:
+      - docs/use/email-primitives.md
+      - docs/contributing/setup-manifest.md
+
+  - id: platform-feedback-dispatch-queue
+    group: storage
+    name: Platform feedback dispatch queue
+    summary:
+      Durable opaque event delivery from persisted feedback to admin packages.
+    code:
+      - packages/worker/src/platform-feedback/dispatch-queue
+      - packages/worker/src/queue-handler
+      - tools/ci/production-queue-resources
+    docs:
+      - docs/contributing/setup-manifest.md
+      - docs/contributing/architecture/authorization.md
+      - docs/guides/package-subscriptions.md
+
+  - id: community-activity-dispatch-queue
+    group: storage
+    name: Community activity dispatch queue
+    summary:
+      Durable opaque event delivery from persisted community activity to admin
+      packages.
+    code:
+      - packages/worker/src/community/activity-dispatch-queue
+      - packages/worker/src/community/activity-package-subscriptions
+      - packages/worker/src/community/activity-subscription-event
+    docs:
+      - docs/contributing/setup-manifest.md
+      - docs/contributing/architecture/authorization.md
+      - docs/guides/package-subscriptions.md
+
+  - id: community-listing-published-dispatch-queue
+    group: storage
+    name: Community listing published dispatch queue
+    summary:
+      Durable opaque event delivery from first community listing publish to
+      admin packages.
+    code:
+      - packages/worker/src/community/listing-published-dispatch-queue
+      - packages/worker/src/community/listing-published-package-subscriptions
+      - packages/worker/src/community/listing-published-subscription-event
+    docs:
+      - docs/contributing/setup-manifest.md
+      - docs/contributing/architecture/authorization.md
+      - docs/guides/package-subscriptions.md
+
+  - id: package-events-dispatch-queue
+    group: storage
+    name: Package events dispatch queue
+    summary:
+      Durable same-user delivery of package-emitted events (kody.emits /
+      events.dispatch) to subscribing packages.
+    code:
+      - packages/worker/src/package-events/
+      - packages/worker/src/package-invocations/subscription-dispatch.ts
+    docs:
+      - docs/contributing/setup-manifest.md
+      - docs/guides/package-subscriptions.md
+
+  - id: community-assets-r2
+    group: storage
+    name: Community asset storage (R2)
+    summary: COMMUNITY_ASSETS R2 for derived listing icons.
+    code:
+      - packages/worker/src/community/community-icon.ts
+      - packages/worker/src/app/handlers/community-icon.ts
+      - packages/worker/src/repo/identity-icon.ts
+      - packages/worker/src/repo/identity-icon-paths.ts
+      - packages/worker/src/app/handlers/identity-icon-response.ts
+      - packages/worker/src/app/handlers/community-package-icon.ts
+      - packages/worker/src/app/handlers/account-repo-icon.ts
+    docs:
+      - docs/contributing/community-packages.md
+      - docs/contributing/architecture/data-storage.md
+
+invariants:
+  - id: per-user-isolation
+    summary: userId scopes every read/write, DO id, and vector path.
+    docs:
+      - docs/contributing/project-intent.md
+      - docs/contributing/architecture/data-storage.md
+      - docs/contributing/architecture/authorization.md
+
+  - id: integration-host-allowlist
+    summary: Enforce integration host allowlists before attaching OAuth tokens.
+    docs:
+      - docs/contributing/architecture/index.md
+      - docs/contributing/architecture/integrations.md
+
+  - id: canonical-repo-source
+    summary: Artifacts repos are canonical package/job source; D1 is metadata.
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: compact-mcp-surface
+    summary: Keep public MCP tools small; add capabilities via search/execute.
+    docs:
+      - docs/contributing/project-intent.md
+
+  - id: discovery-progressive-disclosure
+    summary: Default discovery is a bounded index; expensive detail is explicit.
+    docs:
+      - docs/use/search.md
+      - docs/contributing/decisions/0023-progressive-search-disclosure.md
+
+  - id: package-over-synthesized-provider
+    summary:
+      Rank wrapping packages before matching synthesized MCP provider ops.
+    docs:
+      - docs/use/search.md
+      - docs/contributing/decisions/0024-packages-outrank-synthesized-providers.md
+
+  - id: bounded-always-on-mcp-text
+    summary: Keep always-on MCP instructions bounded to durable essentials.
+    docs:
+      - docs/contributing/project-intent.md
+
+  - id: community-listing-isolation
+    summary:
+      Public community reads are deliberate; forks stay inert until publish.
+    docs:
+      - docs/use/community-packages.md
+      - docs/contributing/community-packages.md
+
+  - id: community-social-privacy
+    summary:
+      Private profiles and private packages stay off public catalog surfaces.
+    docs:
+      - docs/contributing/community-packages.md
+
+  - id: no-secrets-in-chat
+    summary: Raw secrets never appear in prompts, chat, results, or app source.
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: state-vs-history
+    summary:
+      Entity rows hold current state; run records hold history. Never derive
+      state from history.
+    docs:
+      - docs/contributing/architecture/run-records.md
+
+  - id: no-per-event-shared-writes
+    summary:
+      Per-event writes go to Analytics Engine or per-user DO SQLite, never the
+      shared D1 writer.
+    docs:
+      - docs/contributing/architecture/usage-metering.md
+      - docs/contributing/architecture/run-records.md
+      - docs/contributing/architecture/entitlements.md

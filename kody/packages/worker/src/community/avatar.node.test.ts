@@ -1,0 +1,278 @@
+import { expect, test } from 'vitest'
+import { buildUserAvatarUrl } from './public-urls.ts'
+import {
+	buildUserAvatarR2Key,
+	getUserAvatarObject,
+	parseUserAvatarCacheKey,
+	processUserAvatar,
+	saveUserAvatar,
+	splitUserAvatarCacheKey,
+} from './avatar.ts'
+import { AccountDeletionInProgressError } from '#worker/account/deletion-state.ts'
+import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+
+function createAvatarTestEnv(input: {
+	db: D1Database
+	communityAssets: R2Bucket
+	meter?: ReturnType<typeof createInMemoryUserMeterEnv>
+}) {
+	const meter = input.meter ?? createInMemoryUserMeterEnv()
+	return {
+		APP_DB: input.db,
+		COMMUNITY_ASSETS: input.communityAssets,
+		USER_METER: meter.env.USER_METER,
+	} as Pick<Env, 'APP_DB' | 'COMMUNITY_ASSETS' | 'USER_METER'>
+}
+
+function createAvatarDeletionRaceDbMock() {
+	let deleting = false
+	const db = {
+		prepare(query: string) {
+			return {
+				bind() {
+					return {
+						async first<T>() {
+							if (query.includes('SELECT deleting_at')) {
+								return {
+									deleting_at: deleting ? '2026-07-22 22:00:00' : null,
+								} as T
+							}
+							if (query.includes('SELECT avatar_key')) {
+								return { avatar_key: null } as T
+							}
+							return null
+						},
+						async run() {
+							if (
+								query.includes('UPDATE users') &&
+								query.includes('avatar_key')
+							) {
+								return { meta: { changes: deleting ? 0 : 1 } }
+							}
+							return { meta: { changes: 1 } }
+						},
+					}
+				},
+			}
+		},
+		async batch() {
+			return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }]
+		},
+	} as unknown as D1Database
+	return {
+		db,
+		setDeleting(value: boolean) {
+			deleting = value
+		},
+	}
+}
+
+function createPngHeader(width: number, height: number) {
+	const bytes = new Uint8Array(24)
+	bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+	bytes.set([0x49, 0x48, 0x44, 0x52], 12)
+	new DataView(bytes.buffer).setUint32(16, width)
+	new DataView(bytes.buffer).setUint32(20, height)
+	return bytes
+}
+
+function createWebpHeader(width: number, height: number) {
+	const bytes = new Uint8Array(30)
+	bytes.set(new TextEncoder().encode('RIFF'), 0)
+	bytes.set(new TextEncoder().encode('WEBP'), 8)
+	bytes.set(new TextEncoder().encode('VP8X'), 12)
+	const view = new DataView(bytes.buffer)
+	view.setUint8(24, (width - 1) & 0xff)
+	view.setUint8(25, ((width - 1) >> 8) & 0xff)
+	view.setUint8(26, ((width - 1) >> 16) & 0xff)
+	view.setUint8(27, (height - 1) & 0xff)
+	view.setUint8(28, ((height - 1) >> 8) & 0xff)
+	view.setUint8(29, ((height - 1) >> 16) & 0xff)
+	return bytes
+}
+
+function createJpegHeader(width: number, height: number) {
+	return Uint8Array.from([
+		0xff,
+		0xd8,
+		0xff,
+		0xc0,
+		0x00,
+		0x11,
+		0x08,
+		(height >> 8) & 0xff,
+		height & 0xff,
+		(width >> 8) & 0xff,
+		width & 0xff,
+		0x03,
+		0x01,
+		0x11,
+		0x00,
+		0x02,
+		0x11,
+		0x00,
+		0x03,
+		0x11,
+		0x00,
+		0xff,
+		0xd9,
+	])
+}
+
+test('processUserAvatar accepts valid png/jpeg/webp and rejects unsafe inputs', () => {
+	const png = createPngHeader(128, 128)
+	const webp = createWebpHeader(320, 180)
+	const jpeg = createJpegHeader(256, 256)
+
+	expect(
+		processUserAvatar({ contentType: 'image/png', sourceBytes: png }),
+	).toEqual({ bytes: png, contentType: 'image/png' })
+	expect(
+		processUserAvatar({ contentType: 'image/webp', sourceBytes: webp }),
+	).toEqual({ bytes: webp, contentType: 'image/webp' })
+	expect(
+		processUserAvatar({ contentType: 'image/jpeg', sourceBytes: jpeg }),
+	).toEqual({ bytes: jpeg, contentType: 'image/jpeg' })
+	expect(
+		processUserAvatar({ contentType: 'image/jpg', sourceBytes: jpeg }),
+	).toEqual({ bytes: jpeg, contentType: 'image/jpeg' })
+
+	expect(() =>
+		processUserAvatar({
+			contentType: 'image/svg+xml',
+			sourceBytes: new TextEncoder().encode('<svg></svg>'),
+		}),
+	).toThrow('PNG, JPEG, or WebP')
+
+	expect(() =>
+		processUserAvatar({
+			contentType: 'image/png',
+			sourceBytes: new Uint8Array(1_000_001),
+		}),
+	).toThrow('1000000 bytes')
+
+	expect(() =>
+		processUserAvatar({
+			contentType: 'image/png',
+			sourceBytes: createPngHeader(32, 32),
+		}),
+	).toThrow('between 64px and 4096px')
+
+	expect(() =>
+		processUserAvatar({
+			contentType: 'image/png',
+			sourceBytes: createPngHeader(5000, 128),
+		}),
+	).toThrow('between 64px and 4096px')
+
+	expect(() =>
+		processUserAvatar({
+			contentType: 'image/png',
+			sourceBytes: createPngHeader(640, 128),
+		}),
+	).toThrow('aspect ratio')
+})
+
+test('buildUserAvatarR2Key and parseUserAvatarCacheKey round-trip content hash segment', () => {
+	expect(
+		buildUserAvatarR2Key({
+			stableUserId: 'stable-1',
+			contentHash: 'abcdef',
+			contentType: 'image/png',
+		}),
+	).toBe('user-avatars/stable-1/abcdef.png')
+	expect(
+		buildUserAvatarR2Key({
+			stableUserId: 'stable-1',
+			contentHash: 'abcdef',
+			contentType: 'image/jpeg',
+		}),
+	).toBe('user-avatars/stable-1/abcdef.jpg')
+	expect(parseUserAvatarCacheKey('user-avatars/stable-1/abcdef.webp')).toBe(
+		'abcdef.webp',
+	)
+	expect(parseUserAvatarCacheKey('community-icon:v1/listing/asset')).toBeNull()
+	expect(splitUserAvatarCacheKey('abcdef.webp')).toEqual({
+		hash: 'abcdef',
+		ext: 'webp',
+	})
+	expect(splitUserAvatarCacheKey('abcdef')).toBeNull()
+	expect(
+		buildUserAvatarUrl({
+			username: 'alice',
+			avatarKey: 'user-avatars/stable-1/abcdef.jpg',
+		}),
+	).toBe('/profiles/alice/avatar/abcdef.jpg')
+	expect(
+		buildUserAvatarUrl({
+			username: 'alice',
+			avatarKey: null,
+		}),
+	).toBeNull()
+})
+
+test('getUserAvatarObject refuses keys outside the user-avatars prefix', async () => {
+	const gets: Array<string> = []
+	const env = {
+		COMMUNITY_ASSETS: {
+			async get(key: string) {
+				gets.push(key)
+				return { key } as unknown as R2ObjectBody
+			},
+		},
+	} as Pick<Env, 'COMMUNITY_ASSETS'>
+
+	await expect(
+		getUserAvatarObject({
+			env,
+			avatarKey: 'community-icon:v1/listing/asset',
+		}),
+	).resolves.toBeNull()
+	expect(gets).toEqual([])
+
+	await expect(
+		getUserAvatarObject({
+			env,
+			avatarKey: 'user-avatars/stable-1/abcdef.png',
+		}),
+	).resolves.toEqual({ key: 'user-avatars/stable-1/abcdef.png' })
+	expect(gets).toEqual(['user-avatars/stable-1/abcdef.png'])
+})
+
+test('saveUserAvatar removes an in-flight upload when deletion starts', async () => {
+	let releasePut: () => void = () => undefined
+	let markPutStarted: () => void = () => undefined
+	const putStarted = new Promise<void>((resolve) => {
+		markPutStarted = resolve
+	})
+	const putReleased = new Promise<void>((resolve) => {
+		releasePut = resolve
+	})
+	const deleted: Array<string> = []
+	const { db, setDeleting } = createAvatarDeletionRaceDbMock()
+	const save = saveUserAvatar({
+		env: createAvatarTestEnv({
+			db,
+			communityAssets: {
+				async put() {
+					markPutStarted()
+					await putReleased
+					return {} as R2Object
+				},
+				async delete(key: string) {
+					deleted.push(key)
+				},
+			} as R2Bucket,
+		}),
+		numericUserId: 1,
+		stableUserId: 'stable-1',
+		bytes: createPngHeader(128, 128),
+		contentType: 'image/png',
+	})
+	await putStarted
+	setDeleting(true)
+	releasePut()
+	await expect(save).rejects.toBeInstanceOf(AccountDeletionInProgressError)
+	expect(deleted).toHaveLength(1)
+	expect(deleted[0]).toMatch(/^user-avatars\/stable-1\//)
+})

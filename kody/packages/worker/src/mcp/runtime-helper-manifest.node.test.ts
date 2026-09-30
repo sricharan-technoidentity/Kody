@@ -1,0 +1,106 @@
+import { expect, test, vi } from 'vitest'
+import { createRuntimeHelperPreludes } from './runtime-helper-manifest.ts'
+
+test('packages helper forwards string-first invoke and rejects the removed object form locally', async () => {
+	const invoke = vi.fn(async (input: unknown) => input)
+	const [prelude] = createRuntimeHelperPreludes({
+		env: {} as Env,
+		callerContext: {} as never,
+		capabilityMap: {},
+		packageInvokeTools: { invoke },
+	})
+	expect(prelude).toBeDefined()
+	const createPackages = new Function(
+		'__kodyPackageInvokeRuntimeBridge',
+		`${prelude}; return packages;`,
+	) as (bridge: { invoke(input: unknown): Promise<unknown> }) => {
+		invoke(
+			specifier: string,
+			options?: Record<string, unknown>,
+		): Promise<unknown>
+	}
+	const packages = createPackages({ invoke })
+
+	await expect(
+		packages.invoke('kody:@kody/google/profile', { params: {} }),
+	).resolves.toEqual({
+		specifier: 'kody:@kody/google/profile',
+		options: { params: {} },
+	})
+	await expect(
+		packages.invoke('@kentcdodds/github/request', {
+			params: { path: '/user' },
+		}),
+	).resolves.toEqual({
+		specifier: '@kentcdodds/github/request',
+		options: { params: { path: '/user' } },
+	})
+	await expect(
+		(packages.invoke as (input: unknown) => Promise<unknown>)({
+			kodyId: 'google',
+			exportName: 'profile',
+		}),
+	).rejects.toThrow('Object-only packages.invoke was removed')
+	expect(invoke).toHaveBeenCalledTimes(2)
+})
+
+test('packageSecrets prelude reads the run package id from evaluate invocation', () => {
+	const first = createRuntimeHelperPreludes({
+		env: {} as Env,
+		callerContext: { user: { userId: 'user-1' } } as never,
+		capabilityMap: {},
+		packageSecretTools: {
+			get: async () => '',
+			has: async () => false,
+			runPackageId: 'pkg-a',
+		},
+	}).join('\n')
+	const second = createRuntimeHelperPreludes({
+		env: {} as Env,
+		callerContext: { user: { userId: 'user-1' } } as never,
+		capabilityMap: {},
+		packageSecretTools: {
+			get: async () => '',
+			has: async () => false,
+			runPackageId: 'pkg-b',
+		},
+	}).join('\n')
+	expect(first).toBe(second)
+	expect(first).toContain('__kodyTrustedPackageId')
+	expect(first).toContain('__kodyPackageSecrets(__kodyTrustedPackageId)')
+	expect(first).not.toContain('__invocation.packageContext')
+})
+
+test('computed package import helper prelude forwards callDefault to the host bridge', async () => {
+	const callDefault = vi.fn(async (input: unknown) => input)
+	const preludes = createRuntimeHelperPreludes({
+		env: {} as Env,
+		callerContext: { user: { userId: 'user-1' } } as never,
+		capabilityMap: {},
+		computedPackageImportTools: { callDefault },
+	})
+	const prelude = preludes.find((entry) =>
+		entry.includes('__kodyComputedPackageImport'),
+	)
+	expect(prelude).toBeDefined()
+	const createHelper = new Function(
+		'__kodyComputedPackageImportRuntimeBridge',
+		`${prelude}; return __kodyComputedPackageImport;`,
+	) as (bridge: { callDefault(input: unknown): Promise<unknown> }) => {
+		callDefault(input: {
+			specifier: string
+			params?: Record<string, unknown>
+		}): Promise<unknown>
+	}
+	const helper = createHelper({ callDefault })
+	await expect(
+		helper.callDefault({
+			specifier: 'kody:@kentcdodds/example/probe',
+			params: { marker: 'ok' },
+		}),
+	).resolves.toEqual({
+		specifier: 'kody:@kentcdodds/example/probe',
+		params: { marker: 'ok' },
+	})
+	expect(callDefault).toHaveBeenCalledTimes(1)
+})

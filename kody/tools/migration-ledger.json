@@ -1,0 +1,292 @@
+{
+	"version": 1,
+	"baselineCount": 1,
+	"baselineMaximumPrefix": 1,
+	"baselineSha256": "aee006f0719e4d967b7485fb3199f8e2eb0660258b7720661b7fc48ce67fc199",
+	"migrations": [
+		{
+			"filename": "0001-squashed-init.sql",
+			"sha256": "5e1c8b352b5cd61f9cdc80f0512891b3bee92ee316929b5417471c0319d2d423"
+		},
+		{
+			"filename": "0002-restructure-plan-tiers.sql",
+			"sha256": "f39eba4f5e3be38bb5122251961a0cf18a53e7bf1a74f4a8cc210ea0c9d2ff5a"
+		},
+		{
+			"filename": "0003-repo-session-storage-buckets.sql",
+			"sha256": "063e3f053785e41a7edbd4272311e8f2198cb1905b93089fd0dfa3054f97b925"
+		},
+		{
+			"filename": "0004-platform-oauth-apps.sql",
+			"sha256": "6da79068c7d2d3f30eaa8fd7ba0e549c1bb59141ad0866d0914e84ee17caa0f0"
+		},
+		{
+			"filename": "0005-platform-oauth-app-logos.sql",
+			"sha256": "9157434ded9a281e43da71d64a6490bbfe1abd4e952dc6f25835cee99bf23fc9"
+		},
+		{
+			"filename": "0006-platform-oauth-app-description.sql",
+			"sha256": "546c2d705915aa098dd3642d65d0e6fed48e8f201b71afb4725b8e10fbdf3728"
+		},
+		{
+			"filename": "0007-saved-package-search-index-debt.sql",
+			"sha256": "62922faee72e96170009bd0410649a9404fc1678f571438d78f62aaaba89ac07"
+		},
+		{
+			"filename": "0008-refresh-google-platform-hosts.sql",
+			"sha256": "0fcb55e9e026bd33be47aceb728e31fbb79cb5b3a9a7c9f007a5209a48f0ac12"
+		},
+		{
+			"filename": "0009-community-listing-friendly-urls.sql",
+			"sha256": "d73dcc93d60eb4100f1e788cdcfd62f3e034904f73e8d4e100ff59d8ea48a181"
+		},
+		{
+			"filename": "0010-drop-jobs-tables.sql",
+			"sha256": "11215c35ea70784dd4d85c627eb5990b5a51941d3b51929c390e8c3bf36c0481"
+		},
+		{
+			"filename": "0011-repo-session-due-owners.sql",
+			"sha256": "bc39444a5f97e424947c80258d28abde6088533baab26c3a6b50d010ff049df9"
+		},
+		{
+			"filename": "0012-repo-session-storage-bucket-cursor.sql",
+			"sha256": "e010fa54c7a236b258a606db7a091fb4e0e4412ae1c23abd85798742372f4a70"
+		},
+		{
+			"filename": "0013-drop-repo-sessions.sql",
+			"sha256": "848ab0ea3e0c1dbf6644e9e2f89088896eed2e388418d723265a36143c202ed5"
+		},
+		{
+			"filename": "0014-drop-remote-connector-settings.sql",
+			"sha256": "5a170f05dffc793f94b01bffdbfb62eb11359ed54db768f5a121715317fa5536"
+		},
+		{
+			"filename": "0015-users-onboarding-checklist-dismissed-at.sql",
+			"sha256": "b3e5b3c168bdebe0f900d30e3d781f874b4850b975bf5ea0d2278114cd6d58ca"
+		},
+		{
+			"filename": "0016-drop-package-service-states.sql",
+			"sha256": "9b05cc28701cdbf10a89464958c6709e9c8011a43dd154dc6653a23a6b2e86ed"
+		},
+		{
+			"filename": "0017-package-owned-invocation-tokens.sql",
+			"sha256": "772f7ef88f28778f4055ef04e431da1b9ff450cce7c48d94603271fed6d50885"
+		},
+		{
+			"filename": "0018-drop-retired-service-storage-kind.sql",
+			"sha256": "a7036229d5821900c3a45da2e4841d3439ea7d219f874a208462a10a29de26c5"
+		},
+		{
+			"filename": "0019-drop-invocation-token-sources.sql",
+			"sha256": "de2e5badf20b92e69237cd60ef7a9736adefb45e6d6895c0fcf40859ca86552f"
+		},
+		{
+			"filename": "0020-user-mcp-oauth-clients.sql",
+			"sha256": "6b60b6a0387fac63ac58f584adfab068cf2541d925ebd2734d04dabbe2672112"
+		},
+		{
+			"filename": "0021-vector-embed-fingerprints.sql",
+			"sha256": "5b082b0055c753ecd6e75373ed1aa848ad61862d281f7a1214aa2466f5dafd25"
+		},
+		{
+			"filename": "0022-community-listing-category.sql",
+			"sha256": "2740b7fb83d996e84e0c3cc5dfe07a9ccf7de6b76e5e0f6ca01d371cfb7aa046"
+		},
+		{
+			"filename": "0023-secret-entry-expires-at.sql",
+			"sha256": "a8fff9cfb73ea4b6a741e0a2e61f95417d11927a46b6055a362a27b8a1b0abca"
+		},
+		{
+			"filename": "0024-fleet-execute-days.sql",
+			"sha256": "05a0061079a3988b424a0b63646510857ceec11197128e63735ff6b30b46ef8b"
+		},
+		{
+			"filename": "0025-user-oauth-app-logos.sql",
+			"sha256": "f3eac0872fcf55ebf9e1821591a0cc4d8ceb3f06033646925899f3f2ea8233c8"
+		},
+		{
+			"filename": "0026-integration-owned-credentials.sql",
+			"sha256": "cedea1c9d99566ef07cc1f942037c3a7f9045ae594ff3165eafd3adb208a08fb"
+		},
+		{
+			"filename": "0027-mcp-server-logos.sql",
+			"sha256": "c48d9b5814af7a15900e5eb1cbabe4998b817ba988748f8b54d3ac1863c969fb"
+		},
+		{
+			"filename": "0028-email-verification-delivery.sql",
+			"sha256": "21eacbf3f12130e3f2ef4cccf8eee4cd723c8224e434e103f77bcf3de64ca25a"
+		},
+		{
+			"filename": "0029-users-attribution-activation.sql",
+			"sha256": "b1d5d4de974ffd38005433223811ca9b20f560811d42024f2da6bc4fae965384"
+		},
+		{
+			"filename": "0030-saved-package-locked-at.sql",
+			"sha256": "a31bfca5dcd0ddd5da1a5f3efa12aa9499a3e5aaa9082cba16f803e214dc9092"
+		},
+		{
+			"filename": "0031-mcp-server-package-usage.sql",
+			"sha256": "a7c53385105facd65612e9fb674fe59e8e4bd3c64a5fd5a5014958b367e590e8"
+		},
+		{
+			"filename": "0032-drop-secret-allowed-capabilities.sql",
+			"sha256": "9f854123842e94b4b979c941765acbd155bf43c0be2b138877bf062fd552b31c"
+		},
+		{
+			"filename": "0033-repo-visibility-public-catalog.sql",
+			"sha256": "95693b6c8925f88ace5ee84ffedd567eb82d01632fbf5c7587ad7b2e4002e82b"
+		},
+		{
+			"filename": "0034-platform-feedback-cancellation-category.sql",
+			"sha256": "a082c7c2674791cbb4b6fca52f7e4faebaecbb6ec16bc0f5572bd21d63a12e5a"
+		},
+		{
+			"filename": "0035-platform-provider-marks.sql",
+			"sha256": "49c97eb2871fe00bc823ff09438ed4ce4115ea840c09abf571def8740451e448"
+		},
+		{
+			"filename": "0036-drop-community-social.sql",
+			"sha256": "e8933bf1fc751ae81334569ceb378bf581ca39f7c9153d5f08554739806952c6"
+		},
+		{
+			"filename": "0037-drop-openapi-bindings.sql",
+			"sha256": "ef8fdf2c2b94f0d281afaa43977787827ef5792ff0d33adaa273eedf6c41ba56"
+		},
+		{
+			"filename": "0038-integration-auth-failure.sql",
+			"sha256": "147acc4287512ae6666f4be4a0dbcc7f61edfd412f7ed932c5688a1634000339"
+		},
+		{
+			"filename": "0039-agent-package-conversation-uses-last-used-index.sql",
+			"sha256": "24df954f08b0aa7fbbb76b880ee8cbb9b276cf120ed2c8633c37e464c39b4a68"
+		},
+		{
+			"filename": "0040-community-listing-package-version.sql",
+			"sha256": "5c81de9e1ed697b2bdf86ba930962ffbf1f4ef0d582d741796df9ab3d91a46b0"
+		},
+		{
+			"filename": "0041-drop-community-listing-trusted.sql",
+			"sha256": "49a3ada82d467e11fd9806532192a9af6b968ef711e1ae30d60554d77968cbbd"
+		},
+		{
+			"filename": "0042-users-first-search-at.sql",
+			"sha256": "b2bec57147d5938f5cc710634b8fa388fb0ceb5f2c7550087db272554187e8aa"
+		},
+		{
+			"filename": "0043-users-entitlement-ladder.sql",
+			"sha256": "3717a78d621552cb086b32cb64b6cad4c6d5cd9e69c94f917e54e1dbbdd748fe"
+		},
+		{
+			"filename": "0044-users-stripe-price-id.sql",
+			"sha256": "2626ab6b7bba5c6f30181de4e22f5833a988444756b1b3e7d223e927fd1228b4"
+		},
+		{
+			"filename": "0045-user-email-claims.sql",
+			"sha256": "9f7f3b177513e2e2ff4bf48d54c9cdbcbf8ddfa7c9772ace61c6cbabae04e1b8"
+		},
+		{
+			"filename": "0046-compute-overage-invoices.sql",
+			"sha256": "074a025beee02d73c9ef190895c0d9b3a042cd65c72af2b2cbb7330868f1ae33"
+		},
+		{
+			"filename": "0047-users-second-agent-standard-gift.sql",
+			"sha256": "c36bf33ecda407df550a712148c3c24f9938169ecb4d9a4ede9ae00d980933a0"
+		},
+		{
+			"filename": "0048-referral-program.sql",
+			"sha256": "27996f6591596eca494e762e060c32cc8408652dcca0c70a65d27f0c189ab8fd"
+		},
+		{
+			"filename": "0049-drop-integration-secret-names.sql",
+			"sha256": "606a6740863b1834367cc6f61ab6785e3eb07de8fe7e8db61b658257f7ba219e"
+		},
+		{
+			"filename": "0050-user-usage-campaigns.sql",
+			"sha256": "a62b39d357c5c8b714e21fc28ec1f5162accbe649833ccd99be5fcb3ef1dff71"
+		},
+		{
+			"filename": "0051-user-usage-campaigns-ever-activated.sql",
+			"sha256": "857a5107a1df9e43c990d3e06b51dd7403afbda1e57d163557e3c0717ec5dbb8"
+		},
+		{
+			"filename": "0052-user-usage-campaigns-advocate.sql",
+			"sha256": "97bbc37ad00f8bbbe28ce5fb8b7e86b53d9c06f3a8eed6d748e4c573dfdedd05"
+		},
+		{
+			"filename": "0053-user-tips-email-opt-outs.sql",
+			"sha256": "47c028697bc21976963cd1a0bf5825d3d48b7ba2640f93c7192e31d192aa2ea2"
+		},
+		{
+			"filename": "0054-mcp-server-last-error.sql",
+			"sha256": "6d160921b0689856a618233616ebc0fbc9955966cb1149ff1c611568c6dad5de"
+		},
+		{
+			"filename": "0055-site-banners.sql",
+			"sha256": "23db1c221bf740d3c4778aaebacbb7bbfcfe57da922721055a70d73fb8764d95"
+		},
+		{
+			"filename": "0056-drop-fleet-execute-days.sql",
+			"sha256": "6706cd3841ea5efc255cd09cd7688cf042e9f9850488d0c0d5492f9ca355978f"
+		},
+		{
+			"filename": "0057-webhook-url-secret-encrypted.sql",
+			"sha256": "9894e2f5fc7be2cca807562ee7d8b705d724f1004d032f4f6f923759340260e5"
+		},
+		{
+			"filename": "0058-drop-invites.sql",
+			"sha256": "0ae9a24f67abb537a08403fe01f0c3ac745bd973c4cfc2e049df9af708120d6b"
+		},
+		{
+			"filename": "0059-admin-insights-launch-indexes.sql",
+			"sha256": "be5d99a7d97f0d7a304ac3154f619294dc08a3b2edbda1fbafc000ff414b2bb6"
+		},
+		{
+			"filename": "0060-package-share-grants.sql",
+			"sha256": "4a58a86dc879782b745bf58cb6ad4d812f5b54507e042c24c6e258d3bfd03c0f"
+		},
+		{
+			"filename": "0061-community-forks-package-delete-cascade.sql",
+			"sha256": "d3701812617f097a85c49f45899b1290c0d5bdc697d6db66408333981ff321ae"
+		},
+		{
+			"filename": "0062-webhook-url-rotation-grace.sql",
+			"sha256": "7b399500a63898a5af7985b1131e6a8e760af77d5f7abdc709ded16402bacbf0"
+		},
+		{
+			"filename": "0063-email-notification-destinations.sql",
+			"sha256": "7f70bb1ff274e15c778da111a026c404291bc93845cb3e4b120a4b5067b02be2"
+		},
+		{
+			"filename": "0064-secret-provider-bindings.sql",
+			"sha256": "b109520a85d864c2e644628a52fd92fbe1c41bb4161bd80e794a7ddd0f55dc74"
+		},
+		{
+			"filename": "0065-experiments-opt-in.sql",
+			"sha256": "61ea4cca61e7ccca4be89e74f53cdab4dfd21800cff2da9af7082014c9a3d44d"
+		},
+		{
+			"filename": "0066-users-first-activation-stamps.sql",
+			"sha256": "21d202ce5e1bd4f2db70f9e148710df1dd7d5ad5eedf2b427948e5bc6fe552d5"
+		},
+		{
+			"filename": "0067-webhook-apply-destination-approvals.sql",
+			"sha256": "a95ff1e06ac1b6439927be2c15ebd4b4b4967ce492671fa4107dc7d21c05efeb"
+		},
+		{
+			"filename": "0068-durable-object-duration-daily.sql",
+			"sha256": "38d50bbc96f0f2815aa3b83123ae11118209488213de6091ba9c10c0f7a4c94a"
+		},
+		{
+			"filename": "0069-prepaid-credits.sql",
+			"sha256": "e4df1f18023e93f165a2a5ba40f0ec64a369736f6126d3f4da09d1aad657ba69"
+		},
+		{
+			"filename": "0070-admin-credits-eligible.sql",
+			"sha256": "e154002b1f91c160031b1818a66137f2864322858367361b8cedbb56cd35edda"
+		},
+		{
+			"filename": "0071-drop-compute-overage-invoices.sql",
+			"sha256": "0ded331875afe2d1adc89a9fd2b6100019707c9f2939f156b0f4d12c3a2c177b"
+		}
+	]
+}

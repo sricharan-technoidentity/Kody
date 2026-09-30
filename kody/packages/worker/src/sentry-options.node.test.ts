@@ -1,0 +1,881 @@
+import { expect, test } from 'vitest'
+import { isCloudflareKvTransientHttpErrorMessage } from './cloudflare-kv-platform-error.ts'
+import {
+	ComputeOverageLimitError,
+	EntitlementLimitError,
+} from './entitlements/errors.ts'
+import { isUserCodeError, UserCodeError } from './user-code-error.ts'
+import {
+	cloudflareArtifactsOpaqueInternalErrorMessage,
+	cloudflareOpaqueInternalErrorMessage,
+	durableObjectBlockConcurrencyWhileTimeoutResetMessage,
+	durableObjectCodeUpdatedResetMessage,
+	durableObjectInstanceInactiveCloseMessage,
+	durableObjectIsolateMemoryResetMessage,
+	durableObjectOverloadedRequestsQueuedTooLongMessage,
+	durableObjectOverloadedTooManyRequestsQueuedMessage,
+	durableObjectSqliteOutOfMemoryMessage,
+	durableObjectStorageOperationTimeoutResetMessage,
+	executorSandboxTimeoutMessage,
+	executorSandboxTimeoutMessageExplanation,
+	executorSandboxTimeoutMessagePrefix,
+	filterSentryEvent,
+	isCloudflareOpaqueInternalErrorMessage,
+	isDurableObjectIsolateResourceLimitResetMessage,
+	isMcpAgentSessionDestroyedAbortMessage,
+	mcpAgentSessionDestroyedAbortMessage,
+} from './sentry-options.ts'
+
+test('filterSentryEvent drops expected platform and caller noise and keeps real errors', () => {
+	// Isolate resource-limit resets are the only DO resets that isolated
+	// artifact rebuild / check phases treat as retryable.
+	expect(
+		isDurableObjectIsolateResourceLimitResetMessage(
+			durableObjectSqliteOutOfMemoryMessage.replace(/\.$/, ''),
+		),
+	).toBe(true)
+	expect(
+		isDurableObjectIsolateResourceLimitResetMessage(
+			durableObjectCodeUpdatedResetMessage,
+		),
+	).toBe(false)
+	expect(
+		isDurableObjectIsolateResourceLimitResetMessage(
+			durableObjectBlockConcurrencyWhileTimeoutResetMessage,
+		),
+	).toBe(false)
+	expect(
+		isDurableObjectIsolateResourceLimitResetMessage(
+			durableObjectInstanceInactiveCloseMessage,
+		),
+	).toBe(false)
+
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value: 'D1_ERROR: NOSENTRY database is locked: SQLITE_BUSY',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{ value: 'Currently processing a long-running export.' },
+					{ value: 'D1_ERROR: Currently processing a long-running export.' },
+				],
+			},
+		}),
+	).toBeNull()
+
+	// One representative form per D1 blip family (with and without D1_ERROR: prefix).
+	expect(
+		filterSentryEvent({
+			exception: { values: [{ value: 'Network connection lost.' }] },
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'D1_ERROR: D1 DB is overloaded. Requests queued for too long.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value: 'D1_ERROR: D1 DB is overloaded. Too many requests queued.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'D1_ERROR: internal error; reference = 0u3odos5iotccpol68ppc0eg',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Error: D1_ERROR: internal error; reference = e_Gz3hrU_5c47162d21d24e238a5c25e98b89ee39',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'D1_ERROR: internal error; reference = e-Gz3hrU-5c47162d21d24e238a5c25e98b89ee39',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Internal error in D1 DB storage caused object to be reset; reference = 8t4dqqpoq1ctvjr8kca8fl4c',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+
+	const unrelatedNetworkLoss = {
+		exception: {
+			values: [{ value: 'Network connection lost while uploading...' }],
+		},
+	}
+	expect(filterSentryEvent(unrelatedNetworkLoss)).toBe(unrelatedNetworkLoss)
+
+	const unrelatedOverload = {
+		exception: {
+			values: [{ value: 'queue is overloaded while uploading...' }],
+		},
+	}
+	expect(filterSentryEvent(unrelatedOverload)).toBe(unrelatedOverload)
+
+	const bareInternalError = {
+		exception: { values: [{ value: 'internal error' }] },
+	}
+	expect(filterSentryEvent(bareInternalError)).toBe(bareInternalError)
+
+	// Exact opaque Cloudflare / Artifacts internal-error sentences are platform
+	// blips (KODY-CLOUDFLARE-4H). Bare `internal error` above stays visible;
+	// wrapped recovery text must also stay visible.
+	expect(
+		isCloudflareOpaqueInternalErrorMessage(
+			cloudflareArtifactsOpaqueInternalErrorMessage.replace(/\.$/, ''),
+		),
+	).toBe(true)
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [{ value: cloudflareOpaqueInternalErrorMessage }],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [{ value: `Error: ${cloudflareOpaqueInternalErrorMessage}` }],
+			},
+		}),
+	).toBeNull()
+	const wrappedOpaqueInternal = {
+		exception: {
+			values: [
+				{
+					value: `repoOpenSession could not recover: ${cloudflareOpaqueInternalErrorMessage}`,
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(wrappedOpaqueInternal)).toBe(wrappedOpaqueInternal)
+
+	// Artifacts git protocol HTTP 5xx wrappers (KODY-CLOUDFLARE-4Y / 4Z / 50)
+	// and packfile corruption (KODY-CLOUDFLARE-55 / 56). Classifier edge cases
+	// live in artifacts-git-retry; here we only pin the Sentry drop vs keep
+	// contract for wrapper vs bare messages.
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Artifacts listServerRefs failed for https://acct.artifacts.cloudflare.net/git/production/repo-1.git: HTTP Error: 500 Internal Server Error',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	const bareArtifactsGitHttpError = {
+		exception: {
+			values: [{ value: 'HTTP Error: 500 Internal Server Error' }],
+		},
+	}
+	expect(filterSentryEvent(bareArtifactsGitHttpError)).toBe(
+		bareArtifactsGitHttpError,
+	)
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Artifacts git clone failed for https://acct.artifacts.cloudflare.net/git/production/repo-1.git: Packfile payload corrupted: calculated abc but expected def.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	const bareInternalWithoutPackfile = {
+		exception: {
+			values: [
+				{
+					value:
+						'An internal error caused this command to fail.\n\nUnrelated isomorphic-git InternalError.',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(bareInternalWithoutPackfile)).toBe(
+		bareInternalWithoutPackfile,
+	)
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'packageGetGitRemote timed out reading the Artifacts git remote. Retry the call. Artifacts listServerRefs failed for https://acct.artifacts.cloudflare.net/git/production/repo-1.git: Artifacts git request timed out after 8000ms.',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+
+	// Bare Agents MCP session teardown abort (`ctx.abort("destroyed")`) —
+	// KODY-CLOUDFLARE-4K. Wrapped "stream was destroyed" forms stay visible.
+	expect(isMcpAgentSessionDestroyedAbortMessage('Error: destroyed')).toBe(true)
+	expect(isMcpAgentSessionDestroyedAbortMessage('destroyed.')).toBe(true)
+	expect(
+		isMcpAgentSessionDestroyedAbortMessage(
+			'Cannot call write after a stream was destroyed',
+		),
+	).toBe(false)
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [{ value: mcpAgentSessionDestroyedAbortMessage }],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: { values: [{ value: 'Error: destroyed' }] },
+		}),
+	).toBeNull()
+	const wrappedDestroyed = {
+		exception: {
+			values: [{ value: 'Cannot call write after a stream was destroyed' }],
+		},
+	}
+	expect(filterSentryEvent(wrappedDestroyed)).toBe(wrappedDestroyed)
+
+	const bareObjectReset = {
+		exception: {
+			values: [
+				{
+					value:
+						'D1_ERROR: Internal error in D1 DB storage caused object to be reset',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(bareObjectReset)).toBe(bareObjectReset)
+
+	const userModuleBuildFailure = {
+		exception: {
+			values: [
+				{
+					value:
+						'Build failed with 1 error:\nvirtual:.__kody_root__/entry.ts:11:49: ERROR: Unexpected "^"',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(userModuleBuildFailure)).toBeNull()
+	expect(
+		filterSentryEvent({
+			message:
+				'Build failed with 1 error:\nvirtual:.__kody_root__/entry.ts:11:49: ERROR: Unexpected "^"',
+		}),
+	).toBeNull()
+
+	const sandboxTimeout = {
+		exception: {
+			values: [{ value: executorSandboxTimeoutMessage }],
+		},
+	}
+	expect(filterSentryEvent(sandboxTimeout)).toBeNull()
+	expect(
+		filterSentryEvent({ message: executorSandboxTimeoutMessage }),
+	).toBeNull()
+	// The executor injects the enforced budget after the leading phrase; both
+	// budget spellings stay filtered, as does the bare legacy form emitted by
+	// older deployments.
+	expect(
+		filterSentryEvent({
+			message: `${executorSandboxTimeoutMessagePrefix} after 90s${executorSandboxTimeoutMessageExplanation}`,
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			message: `${executorSandboxTimeoutMessagePrefix} after 40ms${executorSandboxTimeoutMessageExplanation}`,
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({ message: executorSandboxTimeoutMessagePrefix }),
+	).toBeNull()
+
+	// OAuth token-refresh caller state (KODY-CLOUDFLARE-4J): the trailing
+	// marker is the stable beforeSend match. One marked drop + unmarked keeps.
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Token refresh was rejected for integration "google" with HTTP 400. (integrationTokenRefresh caller state)',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Token refresh failed for integration "google" with HTTP 503 (server_error).',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value: 'Integration "spotify" was not found.',
+					},
+				],
+			},
+		}),
+	).not.toBeNull()
+
+	const platformBuildFailure = {
+		exception: {
+			values: [
+				{
+					value:
+						'Build failed with 1 error:\npackages/worker/src/index.ts:1:0: ERROR: Unexpected "{"',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(platformBuildFailure)).toBe(platformBuildFailure)
+
+	const syntaxError = {
+		exception: {
+			values: [{ value: 'D1_ERROR: syntax error near INSERTZ' }],
+		},
+	}
+	expect(filterSentryEvent(syntaxError)).toBe(syntaxError)
+
+	const webhookTimeout = {
+		exception: {
+			values: [{ value: 'Webhook sync invocation timed out.' }],
+		},
+	}
+	expect(filterSentryEvent(webhookTimeout)).toBe(webhookTimeout)
+
+	const prefixedSandboxTimeout = {
+		exception: {
+			values: [{ value: `Error: ${executorSandboxTimeoutMessage}` }],
+		},
+	}
+	expect(filterSentryEvent(prefixedSandboxTimeout)).toBe(prefixedSandboxTimeout)
+
+	const userCodeEvent = {
+		exception: {
+			values: [{ type: 'UserCodeError', value: 'boom' }],
+		},
+	}
+	expect(
+		filterSentryEvent(userCodeEvent, {
+			originalException: new UserCodeError('boom'),
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent(userCodeEvent, {
+			originalException: new Error('wrapper', {
+				cause: new UserCodeError('boom'),
+			}),
+		}),
+	).toBeNull()
+
+	const nestedUserCode = new Error('handler failed', {
+		cause: new Error('step failed', { cause: new UserCodeError('boom') }),
+	})
+	expect(isUserCodeError(new UserCodeError('boom'))).toBe(true)
+	expect(isUserCodeError(nestedUserCode)).toBe(true)
+	expect(isUserCodeError(new Error('platform blew up'))).toBe(false)
+	expect(isUserCodeError('boom')).toBe(false)
+	expect(isUserCodeError(null)).toBe(false)
+
+	const platformEvent = {
+		exception: {
+			values: [{ type: 'Error', value: 'Durable Object storage failed' }],
+		},
+	}
+	expect(
+		filterSentryEvent(platformEvent, {
+			originalException: new Error('Durable Object storage failed'),
+		}),
+	).toBe(platformEvent)
+	expect(filterSentryEvent(platformEvent)).toBe(platformEvent)
+
+	// Plan-limit denials are account policy, not platform defects. Match the
+	// typed originalException (including wrappers) and the serialized type
+	// name when the instance is gone.
+	const entitlementLimitError = new EntitlementLimitError({
+		resource: 'storage_bytes',
+		plan: 'free',
+		limit: 67_108_864,
+		current: 449_966_219,
+		upgradeHint:
+			'Remove or finish existing storage bytes you no longer need, or upgrade your plan at /account/billing.',
+	})
+	const entitlementEvent = {
+		exception: {
+			values: [
+				{
+					type: 'EntitlementLimitError',
+					value: entitlementLimitError.message,
+				},
+			],
+		},
+	}
+	expect(
+		filterSentryEvent(entitlementEvent, {
+			originalException: entitlementLimitError,
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent(entitlementEvent, {
+			originalException: new Error('handler failed', {
+				cause: entitlementLimitError,
+			}),
+		}),
+	).toBeNull()
+	expect(filterSentryEvent(entitlementEvent)).toBeNull()
+	const computeOverageError = new ComputeOverageLimitError({
+		resource: 'unique_worker_days',
+		plan: 'free',
+		limit: 50,
+		current: 60,
+		creditsStatus: 'add_credits',
+	})
+	const computeOverageEvent = {
+		exception: {
+			values: [
+				{
+					type: 'ComputeOverageLimitError',
+					value: computeOverageError.message,
+				},
+			],
+		},
+	}
+	expect(
+		filterSentryEvent(computeOverageEvent, {
+			originalException: computeOverageError,
+		}),
+	).toBeNull()
+	expect(filterSentryEvent(computeOverageEvent)).toBeNull()
+	expect(
+		filterSentryEvent(
+			{
+				exception: {
+					values: [{ type: 'Error', value: entitlementLimitError.message }],
+				},
+			},
+			{ originalException: new Error(entitlementLimitError.message) },
+		),
+	).not.toBeNull()
+
+	// Bare Cloudflare DO platform resets (memory / CPU / SQLITE_NOMEM /
+	// deploy-time code update / blockConcurrencyWhile timeout / storage-op
+	// timeout / storage object-reset / instance-inactive RPC close) are
+	// transient — one representative form per family, plus an
+	// `Error:`-prefixed variant and a missing trailing period. Wrapped
+	// recovery failures and unreferenced storage resets must stay visible.
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [{ value: durableObjectIsolateMemoryResetMessage }],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value: `Error: ${durableObjectSqliteOutOfMemoryMessage.replace(/\.$/, '')}`,
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value: durableObjectCodeUpdatedResetMessage.replace(/\.$/, ''),
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value: durableObjectStorageOperationTimeoutResetMessage.replace(
+							/\.$/,
+							'',
+						),
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Internal error in Durable Object storage caused object to be reset; reference = 849rqmf61lg3qbmtb3j6moc4',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Error: Internal error in Durable Object storage caused object to be reset; reference = e_Gz3hrU_5c47162d21d24e238a5c25e98b89ee39',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	// KODY-82: D1 bindings surface DO-storage resets under D1_ERROR: (optionally
+	// after Error:). Same drop class as bare / Error:-prefixed DO forms above.
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'D1_ERROR: Internal error in Durable Object storage caused object to be reset; reference = b44vvje0qcq0ubd9ea522366',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Error: D1_ERROR: Internal error in Durable Object storage caused object to be reset; reference = b44vvje0qcq0ubd9ea522366',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'Internal error in Durable Object storage caused object to be reset; reference = 849rqmf6-1lg3qbmtb3j6moc4',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value: durableObjectInstanceInactiveCloseMessage.replace(/\.$/, ''),
+					},
+				],
+			},
+		}),
+	).toBeNull()
+
+	const exhaustedPublishRecovery = {
+		exception: {
+			values: [
+				{
+					value: `packagePublishExternalPush could not recover after 3 transient Durable Object reset attempts: ${durableObjectIsolateMemoryResetMessage}`,
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(exhaustedPublishRecovery)).toBe(
+		exhaustedPublishRecovery,
+	)
+
+	const wrappedSqliteNomem = {
+		exception: {
+			values: [
+				{
+					value: `UserMeter acquireWriteLease failed after retries: ${durableObjectSqliteOutOfMemoryMessage}`,
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(wrappedSqliteNomem)).toBe(wrappedSqliteNomem)
+
+	const exhaustedArtifactRebuildRecovery = {
+		exception: {
+			values: [
+				{
+					value: `rebuildPublishedPackageArtifactsViaRepoSession could not recover after 3 transient platform error attempts: Package source publish succeeded, but bundle artifact rebuild failed for source "source-1" at commit "commit-1". Succeeded: none. Failed: ${durableObjectCodeUpdatedResetMessage} Re-run the publish capability to repair artifacts.`,
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(exhaustedArtifactRebuildRecovery)).toBe(
+		exhaustedArtifactRebuildRecovery,
+	)
+
+	const unreferencedDoStorageReset = {
+		exception: {
+			values: [
+				{
+					value:
+						'Internal error in Durable Object storage caused object to be reset',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(unreferencedDoStorageReset)).toBe(
+		unreferencedDoStorageReset,
+	)
+
+	const unreferencedDoStorageResetWithD1Prefix = {
+		exception: {
+			values: [
+				{
+					value:
+						'D1_ERROR: Internal error in Durable Object storage caused object to be reset',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(unreferencedDoStorageResetWithD1Prefix)).toBe(
+		unreferencedDoStorageResetWithD1Prefix,
+	)
+
+	const unrelatedDoFailure = {
+		exception: {
+			values: [{ value: 'Durable Object was reset during migration' }],
+		},
+	}
+	expect(filterSentryEvent(unrelatedDoFailure)).toBe(unrelatedDoFailure)
+
+	// Bare Cloudflare DO queue saturation (KODY-6J). One representative form
+	// per family, plus an `Error:`-prefixed variant and a missing trailing
+	// period. Wrapped recovery failures must stay visible.
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{ value: durableObjectOverloadedRequestsQueuedTooLongMessage },
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value: `Error: ${durableObjectOverloadedTooManyRequestsQueuedMessage.replace(/\.$/, '')}`,
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	const wrappedDoOverload = {
+		exception: {
+			values: [
+				{
+					value: `serveMcp could not recover after retries: ${durableObjectOverloadedRequestsQueuedTooLongMessage}`,
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(wrappedDoOverload)).toBe(wrappedDoOverload)
+
+	// Expected CIMD unknown-client outcomes (KODY-6K / KODY-6M). Bare
+	// prefixes drop; wrapped recovery stays visible.
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'CIMD metadata resolution failed (metadata_resolution_failed): Client not found',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [
+					{
+						value:
+							'CIMD fetch failed for https://chatgpt.com/oauth/client.json: Failed to fetch client metadata: HTTP 404',
+					},
+				],
+			},
+		}),
+	).toBeNull()
+	const wrappedCimdFailure = {
+		exception: {
+			values: [
+				{
+					value:
+						'authorize could not recover after CIMD fetch failed for https://chatgpt.com/oauth/client.json: Failed to fetch client metadata: HTTP 404',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(wrappedCimdFailure)).toBe(wrappedCimdFailure)
+	const recoveryWithCimdCause = {
+		exception: {
+			values: [
+				{
+					value: 'authorize could not recover after a CIMD metadata lookup.',
+				},
+				{
+					value:
+						'CIMD fetch failed for https://chatgpt.com/oauth/client.json: Failed to fetch client metadata: HTTP 404',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(recoveryWithCimdCause)).toBe(recoveryWithCimdCause)
+
+	// Bare Workers KV binding HTTP 5xx / 429 (KODY-7W). Optional Error:
+	// prefix drops; other 4xx, wrapped recovery, and bare "Internal Server
+	// Error" stay visible.
+	expect(
+		isCloudflareKvTransientHttpErrorMessage(
+			'Error: KV PUT failed: 500 Internal Server Error',
+		),
+	).toBe(true)
+	expect(
+		isCloudflareKvTransientHttpErrorMessage(
+			'KV GET failed: 429 Too Many Requests',
+		),
+	).toBe(true)
+	expect(
+		isCloudflareKvTransientHttpErrorMessage('KV PUT failed: 400 Bad Request'),
+	).toBe(false)
+	expect(
+		isCloudflareKvTransientHttpErrorMessage(
+			'refresh family persist failed: KV PUT failed: 500 Internal Server Error',
+		),
+	).toBe(false)
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [{ value: 'KV PUT failed: 500 Internal Server Error' }],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			exception: {
+				values: [{ value: 'Error: KV LIST failed: 503 Service Unavailable' }],
+			},
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			message: 'KV DELETE failed: 502 Bad Gateway',
+		}),
+	).toBeNull()
+	const kvClientError = {
+		exception: { values: [{ value: 'KV PUT failed: 400 Bad Request' }] },
+	}
+	expect(filterSentryEvent(kvClientError)).toBe(kvClientError)
+	const wrappedKvFailure = {
+		exception: {
+			values: [
+				{
+					value:
+						'refresh family persist failed: KV PUT failed: 500 Internal Server Error',
+				},
+			],
+		},
+	}
+	expect(filterSentryEvent(wrappedKvFailure)).toBe(wrappedKvFailure)
+	const recoveryWithKvCause = {
+		exception: {
+			values: [
+				{ value: 'completeMcpOAuthTokenRequest could not persist tokens.' },
+				{ value: 'KV PUT failed: 500 Internal Server Error' },
+			],
+		},
+	}
+	expect(filterSentryEvent(recoveryWithKvCause)).toBe(recoveryWithKvCause)
+	const bareInternalServerError = {
+		exception: { values: [{ value: 'Internal Server Error' }] },
+	}
+	expect(filterSentryEvent(bareInternalServerError)).toBe(
+		bareInternalServerError,
+	)
+})

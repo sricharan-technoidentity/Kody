@@ -1,0 +1,1289 @@
+import { waitUntil } from 'cloudflare:workers'
+import { jsonResponse } from '#worker/json-response.ts'
+import { safeParseHost } from '@kody-internal/shared/url-hosts.ts'
+import { type Action } from 'remix/router'
+import {
+	buildAccountSecretId,
+	parseAccountSecretId,
+} from '@kody-internal/shared/account-secret-route.ts'
+import {
+	getHostApprovalStorageContext,
+	getSecretContextForAccountSecret,
+	listAccountSecrets,
+	loadAccountSecretsData,
+	readAccountSecretsSelectedSecretId,
+	readApprovalHosts,
+	readHostApprovalScope,
+	resolveApprovalRequest,
+	toPackageOptions,
+} from '#app/account-secrets-data.ts'
+import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
+import { buildConnectOauthNextSteps } from '#app/connect-oauth-next-steps.ts'
+import { renderAppPage } from '#app/ssr-render.tsx'
+import { normalizeBulkPackageSecretApprovalNames } from '#mcp/secrets/package-approval-url.ts'
+import {
+	deleteSecret,
+	listSecrets,
+	resolveSecret,
+	saveSecret,
+	setSecretAllowedHosts,
+	setSecretAllowedPackages,
+} from '#mcp/secrets/service.ts'
+import { type SecretScope } from '#mcp/secrets/types.ts'
+import { listSavedPackagesByUserId } from '#worker/package-registry/repo.ts'
+import { type routes } from '#universal/routes.ts'
+import { normalizeAllowedPackages } from '#mcp/secrets/allowed-packages.ts'
+import { normalizeAllowedHosts } from '#mcp/secrets/allowed-hosts.ts'
+import { filterValidApprovalHosts } from '#mcp/secrets/approval-host-shape.ts'
+import {
+	canonicalIntegrationName,
+	normalizeIntegrationConfig,
+	integrationConfigSchema,
+} from '#mcp/capabilities/integrations/integration-shared.ts'
+import {
+	findOauthAppForProviderSetup,
+	getJoinedIntegration,
+	upsertIntegration,
+	upsertOauthAppWithoutConnection,
+} from '#worker/integrations/service.ts'
+import {
+	persistIntegrationTokens,
+	persistUserOauthAppClientSecret,
+	resolveUserOauthAppClientSecret,
+} from '#worker/integrations/credentials.ts'
+import { dispatchIntegrationAuthSucceededSubscriptionEvents } from '#worker/integrations/package-subscriptions.ts'
+import { requireAuthenticatedPageUser } from '#app/page-auth.ts'
+import {
+	buildOAuthTokenExchangeFailurePayload,
+	buildOAuthTokenExchangeRequest,
+	isOAuthTokenExchangeSoftFailure,
+	normalizeOAuthTokenExchangePayload,
+	oauthTokenExchangeFailureHttpStatus,
+	resolveTokenExchangeStyle,
+	type TokenExchangeStyle,
+} from '#worker/integrations/oauth-token-exchange.ts'
+import { normalizeSecretExpiresAt } from '@kody-internal/shared/secret-expires-at.ts'
+import { readNonEmptyTrimmedString as readString } from '#app/request-body.ts'
+
+type AccountEditableSecretScope = Extract<SecretScope, 'package' | 'user'>
+
+type SavedPackageOption = {
+	id: string
+	title: string
+	updatedAt: string
+}
+
+type ConnectOauthHostApprovalLink = {
+	secretName: string
+	host: string
+	approvalUrl: string
+}
+
+type SecretApprovalAction = 'approve' | 'reject'
+
+export function createAccountSecretsHandler(env: Env) {
+	return {
+		middleware: [],
+		async handler({ request }) {
+			const user = await requireAuthenticatedPageUser(request, env)
+			if (user instanceof Response) {
+				return user
+			}
+
+			const accountSecrets = await loadAccountSecretsData({
+				request,
+				env,
+				user,
+			})
+			return renderAppPage({
+				request,
+				env,
+				title: 'Secrets',
+				loaderData: { accountSecrets },
+			})
+		},
+	} satisfies Action<
+		| typeof routes.accountSecrets
+		| typeof routes.accountSecretNew
+		| typeof routes.accountSecretsApprove
+		| typeof routes.accountSecretUserDetail
+		| typeof routes.accountSecretSessionDetail
+		| typeof routes.accountSecretPackageDetail
+	>
+}
+
+export function createAccountSecretsApiHandler(env: Env) {
+	return {
+		middleware: [],
+		async handler({ request }) {
+			const user = await readAuthenticatedAppUser(request, env)
+			if (!user) {
+				return jsonResponse({ ok: false, error: 'Unauthorized.' }, 401)
+			}
+
+			if (request.method === 'GET') {
+				const payload = await loadAccountSecretsData({
+					request,
+					env,
+					user,
+				})
+				return jsonResponse(payload)
+			}
+
+			if (request.method !== 'POST') {
+				return jsonResponse({ ok: false, error: 'Method not allowed.' }, 405)
+			}
+
+			const body = await request.json().catch(() => null)
+			if (!body || typeof body !== 'object') {
+				return jsonResponse({ ok: false, error: 'Invalid request body.' }, 400)
+			}
+
+			const action = readString(body, 'action')
+			if (action === 'approve' || action === 'reject') {
+				return handleApprovalAction({
+					request,
+					env,
+					user,
+					action,
+				})
+			}
+			if (action === 'save') {
+				return handleSaveAction({
+					request,
+					env,
+					user,
+					body,
+				})
+			}
+			if (action === 'delete') {
+				return handleDeleteAction({
+					request,
+					env,
+					user,
+					body,
+				})
+			}
+			if (action === 'save_oauth_app') {
+				return handleSaveOauthAppAction({
+					env,
+					user,
+					body,
+				})
+			}
+			if (action === 'connect_oauth') {
+				return handleConnectOauthAction({
+					request,
+					env,
+					user,
+					body,
+				})
+			}
+			if (action === 'oauth_exchange') {
+				return handleOAuthExchangeAction({
+					env,
+					user,
+					body,
+				})
+			}
+
+			return jsonResponse({ ok: false, error: 'Invalid action.' }, 400)
+		},
+	} satisfies Action<typeof routes.accountSecretsApi>
+}
+
+async function handleSaveOauthAppAction(input: {
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	body: object
+}) {
+	const provider = readString(input.body, 'provider')
+	const tokenUrl = readOptionalString(input.body, 'tokenUrl')
+	const apiBaseUrl = readOptionalString(input.body, 'apiBaseUrl')
+	const authorizeUrl = readOptionalString(input.body, 'authorizeUrl')
+	const flow = readOptionalString(input.body, 'flow')
+	const usePkce = readOptionalBoolean(input.body, 'usePkce')
+	const clientId = readOptionalString(input.body, 'clientId')
+	const scopeSeparator = readRawOptionalString(input.body, 'scopeSeparator')
+	const extraAuthorizeParams = readStringRecord(
+		input.body,
+		'extraAuthorizeParams',
+	)
+
+	if (!provider) {
+		return jsonResponse({ ok: false, error: 'Provider is required.' }, 400)
+	}
+	if (!tokenUrl) {
+		return jsonResponse({ ok: false, error: 'Token URL is required.' }, 400)
+	}
+	if (!clientId) {
+		return jsonResponse({ ok: false, error: 'Client ID is required.' }, 400)
+	}
+	if (flow && flow !== 'pkce' && flow !== 'confidential') {
+		return jsonResponse({ ok: false, error: 'Invalid OAuth flow.' }, 400)
+	}
+	if (authorizeUrl) {
+		const authorizeHost = safeParseHost(authorizeUrl)
+		if (!authorizeHost) {
+			return jsonResponse(
+				{ ok: false, error: 'Authorize URL is invalid.' },
+				400,
+			)
+		}
+	}
+
+	try {
+		const app = await upsertOauthAppWithoutConnection({
+			env: input.env,
+			userId: input.user.mcpUser.userId,
+			waitUntil,
+			config: {
+				name: provider,
+				tokenUrl,
+				apiBaseUrl,
+				flow: flow === 'confidential' ? 'confidential' : 'pkce',
+				...(usePkce == null ? {} : { usePkce }),
+				clientId,
+				tokenExchangeStyle: resolveTokenExchangeStyle({
+					tokenUrl,
+					tokenExchangeStyle: readOptionalString(
+						input.body,
+						'tokenExchangeStyle',
+					),
+				}),
+				authorization: authorizeUrl
+					? {
+							authorizeUrl,
+							scopes: [],
+							scopeSeparator,
+							extraAuthorizeParams,
+						}
+					: null,
+			},
+		})
+		const clientSecret = await resolveConnectClientSecret({
+			env: input.env,
+			userId: input.user.mcpUser.userId,
+			provider,
+			clientSecret: readOptionalString(input.body, 'clientSecret'),
+		})
+		if (clientSecret) {
+			await persistUserOauthAppClientSecret({
+				env: input.env,
+				userId: input.user.mcpUser.userId,
+				slug: app.slug,
+				value: clientSecret,
+			})
+		}
+		return jsonResponse({
+			ok: true,
+			app: {
+				slug: app.slug,
+				provider: app.provider,
+				clientId: app.clientId,
+				hasClientSecret: Boolean(clientSecret) || app.hasClientSecret,
+				tokenUrl: app.tokenUrl,
+				authorizeUrl: app.authorizeUrl,
+				apiBaseUrl: app.apiBaseUrl,
+				flow: app.flow,
+				usePkce: app.usePkce,
+				tokenExchangeStyle: app.tokenExchangeStyle,
+			},
+		})
+	} catch (error) {
+		return jsonResponse(
+			{
+				ok: false,
+				error:
+					error instanceof Error
+						? error.message
+						: 'Unable to save OAuth app configuration.',
+			},
+			400,
+		)
+	}
+}
+
+async function handleConnectOauthAction(input: {
+	request: Request
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	body: object
+}) {
+	const provider = readString(input.body, 'provider')
+	const platformAppSlug = readOptionalString(input.body, 'platformAppSlug')
+	if (platformAppSlug) {
+		return jsonResponse(
+			{
+				ok: false,
+				error:
+					'Built-in platform OAuth apps are no longer a connect path. Create your own OAuth app and connect it at /connect/oauth.',
+			},
+			400,
+		)
+	}
+	const tokenUrl = readOptionalString(input.body, 'tokenUrl')
+	const apiBaseUrl = readOptionalString(input.body, 'apiBaseUrl')
+	const authorizeUrl = readOptionalString(input.body, 'authorizeUrl')
+	const flow = readOptionalString(input.body, 'flow')
+	const usePkce = readOptionalBoolean(input.body, 'usePkce')
+	const clientId = readOptionalString(input.body, 'clientId')
+	const allowedHosts = normalizeAllowedHosts(
+		readStringArray(input.body, 'allowedHosts'),
+	)
+	const scopes = readStringArray(input.body, 'scopes')
+	const scopeSeparator = readRawOptionalString(input.body, 'scopeSeparator')
+	const extraAuthorizeParams = readStringRecord(
+		input.body,
+		'extraAuthorizeParams',
+	)
+	const tokenPayload =
+		(input.body as Record<string, unknown>)['tokenPayload'] ?? null
+
+	if (!provider) {
+		return jsonResponse({ ok: false, error: 'Provider is required.' }, 400)
+	}
+	if (!tokenUrl) {
+		return jsonResponse({ ok: false, error: 'Token URL is required.' }, 400)
+	}
+	const tokenHost = safeParseHost(tokenUrl)
+	const normalizedHosts = normalizeAllowedHosts([
+		...allowedHosts,
+		...(tokenHost ? [tokenHost] : []),
+	])
+	allowedHosts.splice(0, allowedHosts.length, ...normalizedHosts)
+	if (!allowedHosts.length) {
+		return jsonResponse(
+			{ ok: false, error: 'Allowed hosts are required.' },
+			400,
+		)
+	}
+	if (flow && flow !== 'pkce' && flow !== 'confidential') {
+		return jsonResponse({ ok: false, error: 'Invalid OAuth flow.' }, 400)
+	}
+	if (!clientId) {
+		return jsonResponse({ ok: false, error: 'Client ID is required.' }, 400)
+	}
+	if (!tokenPayload || typeof tokenPayload !== 'object') {
+		return jsonResponse({ ok: false, error: 'Token payload is required.' }, 400)
+	}
+	const tokenRecord = tokenPayload as Record<string, unknown>
+	const accessToken = readTokenField(tokenRecord, 'access_token')
+	const refreshToken = readTokenField(tokenRecord, 'refresh_token')
+	if (!accessToken) {
+		return jsonResponse(
+			{ ok: false, error: 'Token payload did not include an access_token.' },
+			400,
+		)
+	}
+	const integrationName = await saveIntegrationConfig({
+		env: input.env,
+		userId: input.user.mcpUser.userId,
+		provider,
+		tokenUrl,
+		apiBaseUrl,
+		flow: flow === 'confidential' ? 'confidential' : 'pkce',
+		usePkce,
+		clientId,
+		tokenExchangeStyle: resolveTokenExchangeStyle({
+			tokenUrl,
+			tokenExchangeStyle: readOptionalString(input.body, 'tokenExchangeStyle'),
+		}),
+		allowedHosts,
+		authorization: authorizeUrl
+			? {
+					authorizeUrl,
+					scopes,
+					scopeSeparator,
+					extraAuthorizeParams,
+				}
+			: null,
+	})
+	await persistIntegrationTokens({
+		env: input.env,
+		userId: input.user.mcpUser.userId,
+		name: integrationName,
+		accessToken,
+		refreshToken,
+	})
+	const clientSecret = await resolveConnectClientSecret({
+		env: input.env,
+		userId: input.user.mcpUser.userId,
+		provider: integrationName,
+		clientSecret: readOptionalString(input.body, 'clientSecret'),
+	})
+	const saved = await getJoinedIntegration({
+		env: input.env,
+		userId: input.user.mcpUser.userId,
+		name: integrationName,
+	})
+	if (clientSecret && saved?.lane === 'user') {
+		await persistUserOauthAppClientSecret({
+			env: input.env,
+			userId: input.user.mcpUser.userId,
+			slug: saved.app.slug,
+			value: clientSecret,
+		})
+	}
+	const hostApprovalLinks: Array<ConnectOauthHostApprovalLink> = []
+
+	const nextSteps = buildConnectOauthNextSteps({
+		integrationName,
+		integration: {
+			name: integrationName,
+			tokenUrl,
+			apiBaseUrl: apiBaseUrl ?? null,
+			requiredHosts: allowedHosts,
+			authorization: authorizeUrl
+				? {
+						authorizeUrl,
+						scopes,
+					}
+				: null,
+		},
+	})
+
+	await emitConnectOauthAuthSucceeded({
+		env: input.env,
+		userId: input.user.mcpUser.userId,
+		integration: {
+			name: integrationName,
+			lane: 'user',
+			account_label: null,
+			description: null,
+			provider: null,
+			platform_app_slug: null,
+			scopes,
+			connected_at: null,
+			token_refreshed_at: null,
+		},
+	})
+
+	return jsonResponse({
+		ok: true,
+		accessTokenSaved: true,
+		refreshTokenSaved: Boolean(refreshToken),
+		allowedHosts,
+		hostApprovalLinks,
+		integrationName,
+		nextSteps,
+	})
+}
+
+async function emitConnectOauthAuthSucceeded(input: {
+	env: Env
+	userId: string
+	integration: {
+		name: string
+		lane: 'user' | 'platform'
+		account_label: string | null
+		description: string | null
+		provider: string | null
+		platform_app_slug: string | null
+		scopes: Array<string>
+		connected_at: string | null
+		token_refreshed_at: string | null
+	}
+}) {
+	try {
+		await dispatchIntegrationAuthSucceededSubscriptionEvents({
+			env: input.env,
+			userId: input.userId,
+			eventId: crypto.randomUUID(),
+			occurredAt: new Date().toISOString(),
+			integration: input.integration,
+			source: 'oauth_connect',
+		})
+	} catch (error) {
+		console.warn(
+			'integration.auth.succeeded package subscription dispatch failed',
+			{
+				integrationName: input.integration.name,
+				error,
+			},
+		)
+	}
+}
+
+async function handleOAuthExchangeAction(input: {
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	body: object
+}) {
+	const paramsRaw = readOptionalString(input.body, 'params')
+	if (!paramsRaw) {
+		return jsonResponse({ ok: false, error: 'Token params are required.' }, 400)
+	}
+	if (readOptionalString(input.body, 'platformAppSlug')) {
+		return jsonResponse(
+			{
+				ok: false,
+				error:
+					'Built-in platform OAuth apps are no longer a connect path. Create your own OAuth app and connect it at /connect/oauth.',
+			},
+			400,
+		)
+	}
+
+	const tokenUrl = readOptionalString(input.body, 'tokenUrl')
+	const flow = readOptionalString(input.body, 'flow') ?? 'pkce'
+	const allowedHosts = normalizeAllowedHosts(
+		readStringArray(input.body, 'allowedHosts'),
+	)
+	let clientSecret: string | null = null
+
+	if (!tokenUrl) {
+		return jsonResponse({ ok: false, error: 'Token URL is required.' }, 400)
+	}
+	if (flow !== 'pkce' && flow !== 'confidential') {
+		return jsonResponse({ ok: false, error: 'Invalid OAuth flow.' }, 400)
+	}
+	const tokenHost = safeParseHost(tokenUrl)
+	if (!tokenHost) {
+		return jsonResponse({ ok: false, error: 'Token URL is invalid.' }, 400)
+	}
+	if (allowedHosts.length > 0 && !allowedHosts.includes(tokenHost)) {
+		return jsonResponse(
+			{ ok: false, error: 'Token host is not in allowed hosts.' },
+			400,
+		)
+	}
+
+	const tokenExchangeStyle = resolveTokenExchangeStyle({
+		tokenUrl,
+		tokenExchangeStyle: readOptionalString(input.body, 'tokenExchangeStyle'),
+	})
+
+	if (flow === 'confidential') {
+		clientSecret = await resolveConnectClientSecret({
+			env: input.env,
+			userId: input.user.mcpUser.userId,
+			provider: readOptionalString(input.body, 'provider') ?? '',
+			clientSecret: readOptionalString(input.body, 'clientSecret'),
+		})
+		if (!clientSecret) {
+			return jsonResponse(
+				{ ok: false, error: 'Client secret is required.' },
+				400,
+			)
+		}
+	}
+
+	const params = new URLSearchParams(paramsRaw)
+
+	let exchangeRequest: { headers: Record<string, string>; body: string }
+	try {
+		exchangeRequest = buildOAuthTokenExchangeRequest({
+			params,
+			flow,
+			clientSecret,
+			style: tokenExchangeStyle,
+		})
+	} catch (error) {
+		return jsonResponse(
+			{
+				ok: false,
+				error:
+					error instanceof Error
+						? error.message
+						: 'Unable to build token exchange request.',
+			},
+			400,
+		)
+	}
+
+	const response = await fetch(tokenUrl, {
+		method: 'POST',
+		headers: exchangeRequest.headers,
+		body: exchangeRequest.body,
+	})
+	const text = await response.text()
+	let payload: unknown = null
+	try {
+		payload = JSON.parse(text)
+	} catch {
+		payload = null
+	}
+	const payloadRecord =
+		payload && typeof payload === 'object' && !Array.isArray(payload)
+			? (payload as Record<string, unknown>)
+			: null
+	if (!response.ok) {
+		return jsonResponse(
+			buildOAuthTokenExchangeFailurePayload({
+				providerStatus: response.status,
+				payload: payloadRecord,
+			}),
+			oauthTokenExchangeFailureHttpStatus(),
+		)
+	}
+	if (!payloadRecord) {
+		return jsonResponse(
+			buildOAuthTokenExchangeFailurePayload({
+				providerStatus: response.status,
+				payload: null,
+			}),
+			oauthTokenExchangeFailureHttpStatus(),
+		)
+	}
+	if (isOAuthTokenExchangeSoftFailure(payloadRecord)) {
+		return jsonResponse(
+			buildOAuthTokenExchangeFailurePayload({
+				providerStatus: response.status,
+				payload: payloadRecord,
+			}),
+			oauthTokenExchangeFailureHttpStatus(),
+		)
+	}
+	return jsonResponse(
+		normalizeOAuthTokenExchangePayload(payloadRecord),
+		response.status,
+	)
+}
+
+async function saveIntegrationConfig(input: {
+	env: Env
+	userId: string
+	provider: string
+	tokenUrl: string
+	apiBaseUrl: string | null
+	flow: 'pkce' | 'confidential'
+	usePkce: boolean | null
+	clientId: string
+	tokenExchangeStyle: TokenExchangeStyle | null
+	allowedHosts: Array<string>
+	authorization: {
+		authorizeUrl: string
+		scopes: Array<string>
+		scopeSeparator: string | null
+		extraAuthorizeParams: Record<string, string>
+	} | null
+}) {
+	const providerKey = canonicalIntegrationName(input.provider)
+	if (!providerKey) {
+		throw new Error('Provider must contain letters or numbers.')
+	}
+	const parsed = integrationConfigSchema.safeParse({
+		name: input.provider,
+		tokenUrl: input.tokenUrl,
+		apiBaseUrl: input.apiBaseUrl,
+		flow: input.flow,
+		...(input.usePkce == null ? {} : { usePkce: input.usePkce }),
+		clientId: input.clientId,
+		requiredHosts: input.allowedHosts,
+		...(input.tokenExchangeStyle && input.tokenExchangeStyle !== 'form'
+			? { tokenExchangeStyle: input.tokenExchangeStyle }
+			: {}),
+		...(input.authorization ? { authorization: input.authorization } : {}),
+	})
+	if (!parsed.success) {
+		throw new Error('OAuth integration configuration is invalid.')
+	}
+	const integration = await upsertIntegration({
+		env: input.env,
+		userId: input.userId,
+		config: normalizeIntegrationConfig(parsed.data),
+		waitUntil,
+	})
+	return integration.name
+}
+
+async function resolveConnectClientSecret(input: {
+	env: Env
+	userId: string
+	provider: string
+	clientSecret?: string | null
+}): Promise<string | null> {
+	const inline = input.clientSecret?.trim()
+	if (inline) return inline
+	const slugs = await listConnectClientSecretSlugs(input)
+	for (const slug of slugs) {
+		const fromApp = await resolveUserOauthAppClientSecret({
+			env: input.env,
+			userId: input.userId,
+			slug,
+		})
+		if (fromApp) return fromApp
+	}
+	return null
+}
+
+async function listConnectClientSecretSlugs(input: {
+	env: Env
+	userId: string
+	provider: string
+}): Promise<Array<string>> {
+	const slugs: Array<string> = []
+	const add = (slug: string | null | undefined) => {
+		const normalized = slug?.trim()
+		if (normalized && !slugs.includes(normalized)) slugs.push(normalized)
+	}
+	add(canonicalIntegrationName(input.provider))
+	const joined = await getJoinedIntegration({
+		env: input.env,
+		userId: input.userId,
+		name: input.provider,
+	})
+	if (joined?.lane === 'user') add(joined.app.slug)
+	const setup = await findOauthAppForProviderSetup({
+		env: input.env,
+		userId: input.userId,
+		name: input.provider,
+	})
+	add(setup?.slug)
+	return slugs
+}
+
+function readTokenField(
+	payload: Record<string, unknown>,
+	field: string,
+): string | null {
+	const value = payload[field]
+	return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function readRequestedPackageId(url: URL) {
+	const value = url.searchParams.get('package_id')
+	return value?.trim() ? value.trim() : null
+}
+
+function readRequestedSecretNames(url: URL) {
+	const values = [
+		...url.searchParams.getAll('names'),
+		...url.searchParams.getAll('name'),
+	]
+	return normalizeBulkPackageSecretApprovalNames(
+		values.flatMap((value) => value.split(',')),
+	)
+}
+
+async function handleApprovalAction(input: {
+	request: Request
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	action: SecretApprovalAction
+}) {
+	try {
+		const url = new URL(input.request.url)
+		const classifiedHosts = readApprovalHosts(url)
+		const approval = resolveApprovalRequest({
+			secretId: readAccountSecretsSelectedSecretId(input.request.url),
+			requestedHosts: classifiedHosts.valid,
+			rejectedHosts: classifiedHosts.rejected,
+			requestedPackageId: readRequestedPackageId(url),
+			requestedSecretNames: readRequestedSecretNames(url),
+			requestedHostScope: readHostApprovalScope(url),
+			requestedHostStorageContext: getHostApprovalStorageContext(url),
+		})
+
+		if (approval.kind === 'package_bulk') {
+			if (input.action === 'approve') {
+				const savedPackages = await listSavedPackagesByUserId(
+					input.env.APP_DB,
+					{
+						userId: input.user.mcpUser.userId,
+					},
+				)
+				if (!savedPackages.some((entry) => entry.id === approval.packageId)) {
+					return jsonResponse(
+						{ ok: false, error: 'Package not found for approval.' },
+						404,
+					)
+				}
+				const current = await listSecrets({
+					env: input.env,
+					userId: input.user.mcpUser.userId,
+					scope: 'user',
+				})
+				const byName = new Map(
+					current
+						.filter((item) => item.scope === 'user')
+						.map((item) => [item.name, item]),
+				)
+				const missingNames: Array<string> = []
+				for (const name of approval.names) {
+					const secret = byName.get(name)
+					if (!secret) {
+						missingNames.push(name)
+						continue
+					}
+					if (secret.allowedPackages.includes(approval.packageId)) continue
+					await setSecretAllowedPackages({
+						env: input.env,
+						userId: input.user.mcpUser.userId,
+						name,
+						scope: 'user',
+						allowedPackages: Array.from(
+							new Set([...secret.allowedPackages, approval.packageId]),
+						),
+						storageContext: null,
+					})
+				}
+				if (missingNames.length === approval.names.length) {
+					return jsonResponse(
+						{ ok: false, error: 'None of the listed secrets were found.' },
+						404,
+					)
+				}
+			}
+			const payload = await loadAccountSecretsData({
+				request: input.request,
+				env: input.env,
+				user: input.user,
+				selectedSecretId: null,
+			})
+			return jsonResponse(payload)
+		}
+
+		if (approval.kind === 'package') {
+			if (input.action === 'approve') {
+				const savedPackages = await listSavedPackagesByUserId(
+					input.env.APP_DB,
+					{
+						userId: input.user.mcpUser.userId,
+					},
+				)
+				if (!savedPackages.some((entry) => entry.id === approval.packageId)) {
+					return jsonResponse(
+						{ ok: false, error: 'Package not found for approval.' },
+						404,
+					)
+				}
+				const current = await listSecrets({
+					env: input.env,
+					userId: input.user.mcpUser.userId,
+					scope: approval.scope,
+					storageContext: approval.storageContext,
+				})
+				const secret = current.find(
+					(item) =>
+						item.name === approval.name && item.scope === approval.scope,
+				)
+				if (!secret) {
+					return jsonResponse({ ok: false, error: 'Secret not found.' }, 404)
+				}
+				await setSecretAllowedPackages({
+					env: input.env,
+					userId: input.user.mcpUser.userId,
+					name: approval.name,
+					scope: approval.scope,
+					allowedPackages: Array.from(
+						new Set([...secret.allowedPackages, approval.packageId]),
+					),
+					storageContext: approval.storageContext,
+				})
+			}
+			const payload = await loadAccountSecretsData({
+				request: input.request,
+				env: input.env,
+				user: input.user,
+				selectedSecretId: readAccountSecretsSelectedSecretId(input.request.url),
+			})
+			return jsonResponse(payload)
+		}
+
+		if (approval.kind === 'host') {
+			if (input.action === 'approve') {
+				const hostsToGrant = filterValidApprovalHosts([approval.requestedHost])
+				if (hostsToGrant.length === 0) {
+					return jsonResponse(
+						{
+							ok: false,
+							error:
+								'None of the requested hosts are valid. The approval link may have been truncated — copy it again.',
+						},
+						400,
+					)
+				}
+				const current = await listSecrets({
+					env: input.env,
+					userId: input.user.mcpUser.userId,
+					scope: approval.scope,
+					storageContext: approval.storageContext,
+				})
+				const secret = current.find(
+					(item) =>
+						item.name === approval.name && item.scope === approval.scope,
+				)
+				if (!secret) {
+					return jsonResponse({ ok: false, error: 'Secret not found.' }, 404)
+				}
+				await setSecretAllowedHosts({
+					env: input.env,
+					userId: input.user.mcpUser.userId,
+					name: approval.name,
+					scope: approval.scope,
+					allowedHosts: normalizeAllowedHosts([
+						...secret.allowedHosts,
+						...hostsToGrant,
+					]),
+					storageContext: approval.storageContext,
+				})
+			}
+
+			const payload = await loadAccountSecretsData({
+				request: input.request,
+				env: input.env,
+				user: input.user,
+				selectedSecretId: readAccountSecretsSelectedSecretId(input.request.url),
+			})
+			return jsonResponse(payload)
+		}
+
+		if (approval.kind === 'host_bulk') {
+			if (input.action === 'approve') {
+				const hostsToGrant = filterValidApprovalHosts(approval.hosts)
+				if (hostsToGrant.length === 0) {
+					return jsonResponse(
+						{
+							ok: false,
+							error:
+								'None of the requested hosts are valid. The approval link may have been truncated — copy it again.',
+						},
+						400,
+					)
+				}
+				const current = await listSecrets({
+					env: input.env,
+					userId: input.user.mcpUser.userId,
+					scope: approval.scope,
+					storageContext: approval.storageContext,
+				})
+				const byName = new Map(
+					current
+						.filter((item) => item.scope === approval.scope)
+						.map((item) => [item.name, item]),
+				)
+				const missingNames: Array<string> = []
+				for (const name of approval.names) {
+					const secret = byName.get(name)
+					if (!secret) {
+						missingNames.push(name)
+						continue
+					}
+					await setSecretAllowedHosts({
+						env: input.env,
+						userId: input.user.mcpUser.userId,
+						name,
+						scope: approval.scope,
+						allowedHosts: normalizeAllowedHosts([
+							...secret.allowedHosts,
+							...hostsToGrant,
+						]),
+						storageContext: approval.storageContext,
+					})
+				}
+				if (missingNames.length === approval.names.length) {
+					return jsonResponse(
+						{ ok: false, error: 'None of the listed secrets were found.' },
+						404,
+					)
+				}
+			}
+			const payload = await loadAccountSecretsData({
+				request: input.request,
+				env: input.env,
+				user: input.user,
+				selectedSecretId: readAccountSecretsSelectedSecretId(input.request.url),
+			})
+			return jsonResponse(payload)
+		}
+
+		const _exhaustive: never = approval
+		throw new Error(`Unsupported approval kind: ${String(_exhaustive)}`)
+	} catch (error) {
+		return jsonResponse(
+			{
+				ok: false,
+				error:
+					error instanceof Error
+						? error.message
+						: 'Unable to process approval request.',
+			},
+			400,
+		)
+	}
+}
+
+async function handleSaveAction(input: {
+	request: Request
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	body: object
+}) {
+	const currentId = readOptionalString(input.body, 'currentId')
+	const name = readString(input.body, 'name')
+	let value = readString(input.body, 'value')
+	const scope = readAccountSecretScope(input.body)
+	const description = readOptionalString(input.body, 'description') ?? ''
+	const expiresAt = readOptionalExpiresAt(input.body)
+	if (expiresAt === false) {
+		return jsonResponse(
+			{
+				ok: false,
+				error:
+					'Expiry must be a UTC ISO timestamp (for example 2026-12-01T00:00:00Z), a YYYY-MM-DD date, or empty.',
+			},
+			400,
+		)
+	}
+	const allowedHosts = normalizeAllowedHosts(
+		readStringArray(input.body, 'allowedHosts'),
+	)
+	const allowedPackages = normalizeAllowedPackages(
+		readStringArray(input.body, 'allowedPackages'),
+	)
+
+	if (!name) {
+		return jsonResponse({ ok: false, error: 'Secret name is required.' }, 400)
+	}
+	if (!scope) {
+		return jsonResponse({ ok: false, error: 'Secret scope is required.' }, 400)
+	}
+	if (scope === 'package' && allowedPackages.length > 0) {
+		return jsonResponse(
+			{
+				ok: false,
+				error: 'Package secrets are accessible only to their owning package.',
+			},
+			400,
+		)
+	}
+
+	if (!value && currentId) {
+		const parsed = parseAccountSecretId(currentId)
+		if (parsed) {
+			const existing = await resolveSecret({
+				env: input.env,
+				userId: input.user.mcpUser.userId,
+				name: parsed.name,
+				scope: parsed.scope,
+				includeExpired: true,
+				storageContext: getSecretContextForAccountSecret(parsed),
+			})
+			if (existing.found && existing.value != null) {
+				value = existing.value
+			}
+		}
+	}
+
+	if (!value) {
+		return jsonResponse({ ok: false, error: 'Secret value is required.' }, 400)
+	}
+
+	const savedPackages = await listSavedPackagesByUserId(input.env.APP_DB, {
+		userId: input.user.mcpUser.userId,
+	})
+	const packageOptions = toPackageOptions(savedPackages)
+	const packageId = readPackageIdForScope({
+		body: input.body,
+		scope,
+		packageOptions,
+	})
+	if (scope === 'package' && !packageId) {
+		return jsonResponse(
+			{ ok: false, error: 'Choose a package for package secrets.' },
+			400,
+		)
+	}
+
+	const secrets = await listAccountSecrets({
+		env: input.env,
+		user: input.user,
+		packageOptions,
+	})
+	const secretById = new Map(secrets.map((secret) => [secret.id, secret]))
+	const currentSecret = currentId ? (secretById.get(currentId) ?? null) : null
+	if (currentId && !currentSecret) {
+		return jsonResponse({ ok: false, error: 'Secret not found.' }, 404)
+	}
+
+	const nextId = buildAccountSecretId({
+		name,
+		scope,
+		packageId,
+	})
+	if (currentId !== nextId && secretById.has(nextId)) {
+		return jsonResponse(
+			{
+				ok: false,
+				error: 'A secret with that name and scope already exists.',
+			},
+			409,
+		)
+	}
+
+	try {
+		await saveSecret({
+			env: input.env,
+			userId: input.user.mcpUser.userId,
+			userEmail: input.user.mcpUser.email,
+			name,
+			value,
+			scope,
+			description,
+			expiresAt,
+			storageContext: getSecretContextForAccountSecret({
+				scope,
+				packageId,
+			}),
+		})
+		await setSecretAllowedHosts({
+			env: input.env,
+			userId: input.user.mcpUser.userId,
+			name,
+			scope,
+			allowedHosts,
+			storageContext: getSecretContextForAccountSecret({
+				scope,
+				packageId,
+			}),
+		})
+		await setSecretAllowedPackages({
+			env: input.env,
+			userId: input.user.mcpUser.userId,
+			name,
+			scope,
+			allowedPackages,
+			storageContext: getSecretContextForAccountSecret({
+				scope,
+				packageId,
+			}),
+		})
+
+		if (currentSecret && currentSecret.id !== nextId) {
+			await deleteSecret({
+				env: input.env,
+				userId: input.user.mcpUser.userId,
+				name: currentSecret.name,
+				scope: currentSecret.scope,
+				storageContext: getSecretContextForAccountSecret(currentSecret),
+			})
+		}
+
+		const payload = await loadAccountSecretsData({
+			request: input.request,
+			env: input.env,
+			user: input.user,
+			packageOptions,
+			savedPackages,
+			selectedSecretId: nextId,
+		})
+		return jsonResponse(payload)
+	} catch (error) {
+		return jsonResponse(
+			{
+				ok: false,
+				error:
+					error instanceof Error ? error.message : 'Unable to save secret.',
+			},
+			400,
+		)
+	}
+}
+
+async function handleDeleteAction(input: {
+	request: Request
+	env: Env
+	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
+	body: object
+}) {
+	const currentId = readString(input.body, 'currentId')
+	if (!currentId) {
+		return jsonResponse({ ok: false, error: 'Secret id is required.' }, 400)
+	}
+
+	const secret = parseAccountSecretId(currentId)
+	if (!secret || secret.scope === 'session') {
+		return jsonResponse({ ok: false, error: 'Invalid secret id.' }, 400)
+	}
+
+	const deleted = await deleteSecret({
+		env: input.env,
+		userId: input.user.mcpUser.userId,
+		name: secret.name,
+		scope: secret.scope,
+		storageContext: getSecretContextForAccountSecret(secret),
+	})
+	if (!deleted) {
+		return jsonResponse({ ok: false, error: 'Secret not found.' }, 404)
+	}
+
+	const payload = await loadAccountSecretsData({
+		request: input.request,
+		env: input.env,
+		user: input.user,
+		selectedSecretId: null,
+	})
+	return jsonResponse({
+		...payload,
+		deleted: true,
+	})
+}
+
+function readOptionalString(body: object, key: string) {
+	const value = (body as Record<string, unknown>)[key]
+	return typeof value === 'string' ? value.trim() : null
+}
+
+function readOptionalExpiresAt(body: object) {
+	if (!Object.hasOwn(body, 'expiresAt')) return undefined
+	const value = (body as Record<string, unknown>).expiresAt
+	if (value == null) return null
+	if (typeof value !== 'string') return false
+	try {
+		return normalizeSecretExpiresAt(value)
+	} catch {
+		return false
+	}
+}
+
+function readOptionalBoolean(body: object, key: string) {
+	const value = (body as Record<string, unknown>)[key]
+	return typeof value === 'boolean' ? value : null
+}
+
+function readRawOptionalString(body: object, key: string) {
+	const value = (body as Record<string, unknown>)[key]
+	return typeof value === 'string' ? value : null
+}
+
+function readStringArray(body: object, key: string) {
+	const value = (body as Record<string, unknown>)[key]
+	if (!Array.isArray(value)) return []
+	return value.filter((item): item is string => typeof item === 'string')
+}
+
+function readStringRecord(body: object, key: string) {
+	const value = (body as Record<string, unknown>)[key]
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+	return Object.fromEntries(
+		Object.entries(value)
+			.filter(
+				(entry): entry is [string, string] => typeof entry[1] === 'string',
+			)
+			.map(([recordKey, recordValue]) => [recordKey, recordValue]),
+	)
+}
+
+function readAccountSecretScope(
+	body: object,
+): AccountEditableSecretScope | null {
+	const raw = readString(body, 'scope')
+	return raw === 'package' || raw === 'user' ? raw : null
+}
+
+function readPackageIdForScope(input: {
+	body: object
+	scope: AccountEditableSecretScope
+	packageOptions: Array<SavedPackageOption>
+}) {
+	if (input.scope !== 'package') return null
+	const packageId = readString(input.body, 'packageId')
+	if (!packageId) return null
+	return input.packageOptions.some(
+		(packageOption) => packageOption.id === packageId,
+	)
+		? packageId
+		: null
+}

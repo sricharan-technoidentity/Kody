@@ -1,0 +1,403 @@
+import { expect, test, vi } from 'vitest'
+import { consoleWarn } from '#worker/test-support/console-spies.ts'
+import { type RunRecordHandle } from './types.ts'
+
+const mocks = vi.hoisted(() => ({
+	dispatchRunErrorSubscriptionEvents: vi.fn(async () => []),
+	finishRun: vi.fn(async () => ({ ok: true })),
+	startRun: vi.fn(async () => ({ ok: true })),
+	listPackageRunSuccesses: vi.fn(async () => []),
+	listActivationMilestones: vi.fn(async () => []),
+	getAdminInsightsSnapshot: vi.fn(async () => ({
+		workflowStatusCounts: [],
+		activationMilestones: [],
+		jobRunCounts: { success: 0, error: 0 },
+	})),
+	getSqlBillingStats: vi.fn(async () => ({
+		databaseSize: 0,
+		rowsReadTotal: 0,
+		rowsWrittenTotal: 0,
+		ops: [],
+	})),
+	inspectSqlBilling: vi.fn(async () => ({
+		schemaVersion: 11,
+		billing: {
+			databaseSize: 0,
+			rowsReadTotal: 0,
+			rowsWrittenTotal: 0,
+			ops: [],
+		},
+		runLogsIndexes: [],
+		runLogsColumns: [],
+		tableCounts: {
+			runs: 0,
+			runLogs: 0,
+			packageInvocationLedger: 0,
+			workflowProjections: 0,
+		},
+		runCount: { meta: 0, actual: 0, matches: true },
+		explainRunLogsDeleteByRunId: [],
+		explainRunLogsSelectByRunId: [],
+	})),
+}))
+
+vi.mock('./package-subscriptions.ts', () => ({
+	dispatchRunErrorSubscriptionEvents: mocks.dispatchRunErrorSubscriptionEvents,
+}))
+
+const {
+	beginRunRecord,
+	finishRunRecord,
+	getAdminInsightsSnapshot,
+	getSqlBillingStats,
+	inspectRunLogSqlBilling,
+	listActivationMilestones,
+	listPackageRunSuccesses,
+	recordRunRecord,
+} = await import('./service.ts')
+
+function createEnv(overrides: Partial<Env> = {}) {
+	return {
+		RUN_LOG: {
+			idFromName: () => ({ toString: () => 'run-log-id' }),
+			get: () => ({
+				startRun: mocks.startRun,
+				finishRun: mocks.finishRun,
+				listPackageRunSuccesses: mocks.listPackageRunSuccesses,
+				listActivationMilestones: mocks.listActivationMilestones,
+				getAdminInsightsSnapshot: mocks.getAdminInsightsSnapshot,
+				getSqlBillingStats: mocks.getSqlBillingStats,
+				inspectSqlBilling: mocks.inspectSqlBilling,
+			}),
+		},
+		APP_DB: {},
+		BUNDLE_ARTIFACTS_KV: {},
+		APP_BASE_URL: 'https://example.com',
+		...overrides,
+	} as unknown as Env
+}
+
+test('finishRunRecord dispatches run.error.recorded only for persisted non-subscription errors', async () => {
+	consoleWarn.mockImplementation(() => {})
+	mocks.dispatchRunErrorSubscriptionEvents.mockReset()
+	mocks.finishRun.mockReset()
+	mocks.finishRun.mockResolvedValue({ ok: true })
+	mocks.dispatchRunErrorSubscriptionEvents.mockResolvedValue([])
+	const env = createEnv()
+
+	const errorHandle = beginRunRecord({
+		env,
+		userId: 'user-1',
+		context: { surface: 'job', name: 'daily', jobId: 'job-1' },
+	})
+	expect(errorHandle).not.toBeNull()
+	const timeoutError = new Error('Execution timed out after 2.5s')
+	timeoutError.name = 'TimeoutError'
+	await finishRunRecord({
+		env,
+		handle: errorHandle,
+		status: 'error',
+		logs: ['started context lookup'],
+		error: timeoutError,
+	})
+	expect(mocks.finishRun).toHaveBeenCalledTimes(1)
+	expect(mocks.dispatchRunErrorSubscriptionEvents).toHaveBeenCalledWith(
+		expect.objectContaining({
+			userId: 'user-1',
+			run: expect.objectContaining({
+				id: errorHandle!.id,
+				status: 'error',
+				surface: 'job',
+				errorName: 'TimeoutError',
+				errorMessage: 'Execution timed out after 2.5s',
+			}),
+		}),
+	)
+	expect(mocks.finishRun).toHaveBeenCalledWith({
+		run: expect.objectContaining({
+			errorName: 'TimeoutError',
+		}),
+		logs: [
+			expect.objectContaining({
+				level: 'log',
+				message: 'started context lookup',
+			}),
+		],
+	})
+
+	mocks.dispatchRunErrorSubscriptionEvents.mockClear()
+	const successHandle = beginRunRecord({
+		env,
+		userId: 'user-1',
+		context: { surface: 'job', name: 'ok', packageId: 'pkg-a' },
+	})
+	await finishRunRecord({
+		env,
+		handle: successHandle,
+		status: 'success',
+	})
+	expect(mocks.dispatchRunErrorSubscriptionEvents).not.toHaveBeenCalled()
+	expect(mocks.finishRun).toHaveBeenCalledTimes(2)
+
+	const subscriptionHandle = beginRunRecord({
+		env,
+		userId: 'user-1',
+		context: { surface: 'subscription', name: 'run.error.recorded' },
+	})
+	await finishRunRecord({
+		env,
+		handle: subscriptionHandle,
+		status: 'error',
+		error: new Error('handler failed'),
+	})
+	expect(mocks.dispatchRunErrorSubscriptionEvents).not.toHaveBeenCalled()
+
+	await recordRunRecord({
+		env,
+		userId: 'user-1',
+		context: { surface: 'execute', name: 'adhoc' },
+		status: 'error',
+		error: new Error('execute failed'),
+	})
+	expect(mocks.dispatchRunErrorSubscriptionEvents).toHaveBeenCalledWith(
+		expect.objectContaining({
+			userId: 'user-1',
+			run: expect.objectContaining({
+				status: 'error',
+				surface: 'execute',
+				errorMessage: 'execute failed',
+			}),
+		}),
+	)
+
+	mocks.dispatchRunErrorSubscriptionEvents.mockClear()
+	mocks.finishRun.mockRejectedValueOnce(new Error('do unavailable'))
+	const rpcFailHandle = beginRunRecord({
+		env,
+		userId: 'user-1',
+		context: { surface: 'job', name: 'daily' },
+	})
+	await expect(
+		finishRunRecord({
+			env,
+			handle: rpcFailHandle,
+			status: 'error',
+			error: new Error('boom'),
+		}),
+	).resolves.toBe(false)
+	expect(mocks.dispatchRunErrorSubscriptionEvents).not.toHaveBeenCalled()
+
+	mocks.finishRun.mockRejectedValueOnce(new Error('do unavailable'))
+	await expect(
+		recordRunRecord({
+			env,
+			userId: 'user-1',
+			context: { surface: 'webhook', name: 'durable-hook' },
+			status: 'success',
+		}),
+	).resolves.toBeNull()
+
+	mocks.dispatchRunErrorSubscriptionEvents.mockRejectedValueOnce(
+		new Error('dispatch exploded'),
+	)
+	const swallowHandle = beginRunRecord({
+		env,
+		userId: 'user-1',
+		context: { surface: 'webhook', name: 'hook' },
+	})
+	await expect(
+		finishRunRecord({
+			env,
+			handle: swallowHandle,
+			status: 'error',
+			error: new Error('boom'),
+		}),
+	).resolves.toBe(true)
+	expect(consoleWarn).toHaveBeenCalledWith(
+		'run-error-subscription-dispatch-failed',
+		expect.any(Error),
+	)
+})
+
+test('finishRunRecord awaits the terminal Durable Object write before scheduling side effects', async () => {
+	let releaseFinish!: () => void
+	const finishGate = new Promise<void>((resolve) => {
+		releaseFinish = resolve
+	})
+	const finishRun = vi.fn(async () => {
+		await finishGate
+		return { ok: true }
+	})
+	const env = createEnv({
+		RUN_LOG: {
+			idFromName: () => ({ toString: () => 'run-log-id' }),
+			get: () => ({ finishRun }),
+		} as unknown as Env['RUN_LOG'],
+	})
+	const waitUntil = vi.fn<(promise: Promise<unknown>) => void>()
+	const handle: RunRecordHandle = {
+		id: 'slow-export-run',
+		userId: 'user-1',
+		startedAt: new Date().toISOString(),
+		persistence: 'eager',
+		context: { surface: 'export', name: './slow-export' },
+	}
+
+	let settled = false
+	const finishing = finishRunRecord({
+		env,
+		handle,
+		status: 'success',
+		waitUntil,
+	}).then(() => {
+		settled = true
+	})
+	await Promise.resolve()
+	expect(settled).toBe(false)
+	expect(waitUntil).not.toHaveBeenCalled()
+
+	releaseFinish()
+	await finishing
+	expect(finishRun).toHaveBeenCalledTimes(1)
+	expect(waitUntil).toHaveBeenCalledTimes(1)
+})
+
+test('activation reads never throw when RunLog is missing or RPC fails', async () => {
+	consoleWarn.mockImplementation(() => {})
+	const envWithoutBinding = {} as Env
+	await expect(
+		listPackageRunSuccesses({ env: envWithoutBinding, userId: 'user-1' }),
+	).resolves.toEqual([])
+	await expect(
+		listActivationMilestones({ env: envWithoutBinding, userId: 'user-1' }),
+	).resolves.toEqual([])
+
+	mocks.listPackageRunSuccesses.mockRejectedValueOnce(
+		new Error('do unavailable'),
+	)
+	mocks.listActivationMilestones.mockRejectedValueOnce(
+		new Error('do unavailable'),
+	)
+	const env = createEnv()
+	await expect(
+		listPackageRunSuccesses({ env, userId: 'user-1' }),
+	).resolves.toEqual([])
+	await expect(
+		listActivationMilestones({ env, userId: 'user-1' }),
+	).resolves.toEqual([])
+	expect(consoleWarn).toHaveBeenCalledWith(
+		'package-run-successes-list-failed',
+		expect.any(Error),
+	)
+	expect(consoleWarn).toHaveBeenCalledWith(
+		'activation-milestones-list-failed',
+		expect.any(Error),
+	)
+})
+
+test('getAdminInsightsSnapshot requires RUN_LOG and forwards the RPC', async () => {
+	await expect(
+		getAdminInsightsSnapshot({ env: {} as Env, userId: 'user-1' }),
+	).rejects.toThrow('RUN_LOG Durable Object binding is not configured.')
+
+	mocks.getAdminInsightsSnapshot.mockResolvedValueOnce({
+		workflowStatusCounts: [{ status: 'running', count: 2 }],
+		jobRunCounts: { success: 8, error: 3 },
+		activationMilestones: [
+			{
+				milestone: 'package_activated',
+				reachedAt: '2026-08-01T00:00:00.000Z',
+				packageId: 'pkg-1',
+			},
+		],
+	})
+	const env = createEnv()
+	await expect(
+		getAdminInsightsSnapshot({ env, userId: 'user-1' }),
+	).resolves.toEqual({
+		workflowStatusCounts: [{ status: 'running', count: 2 }],
+		jobRunCounts: { success: 8, error: 3 },
+		activationMilestones: [
+			{
+				milestone: 'package_activated',
+				reachedAt: '2026-08-01T00:00:00.000Z',
+				packageId: 'pkg-1',
+			},
+		],
+	})
+})
+
+test('getSqlBillingStats requires RUN_LOG and forwards the RPC', async () => {
+	await expect(
+		getSqlBillingStats({ env: {} as Env, userId: 'user-1' }),
+	).rejects.toThrow('RUN_LOG Durable Object binding is not configured.')
+
+	mocks.getSqlBillingStats.mockResolvedValueOnce({
+		databaseSize: 4096,
+		rowsReadTotal: 12,
+		rowsWrittenTotal: 3,
+		ops: [{ op: 'listRuns', rowsRead: 12, rowsWritten: 0, calls: 1 }],
+	})
+	const env = createEnv()
+	await expect(getSqlBillingStats({ env, userId: 'user-1' })).resolves.toEqual({
+		databaseSize: 4096,
+		rowsReadTotal: 12,
+		rowsWrittenTotal: 3,
+		ops: [{ op: 'listRuns', rowsRead: 12, rowsWritten: 0, calls: 1 }],
+	})
+})
+
+test('inspectRunLogSqlBilling requires RUN_LOG and forwards the RPC', async () => {
+	await expect(
+		inspectRunLogSqlBilling({ env: {} as Env, userId: 'user-1' }),
+	).rejects.toThrow('RUN_LOG Durable Object binding is not configured.')
+
+	const inspection = {
+		schemaVersion: 11,
+		billing: {
+			databaseSize: 4096,
+			rowsReadTotal: 12,
+			rowsWrittenTotal: 3,
+			ops: [
+				{ op: 'listRuns' as const, rowsRead: 12, rowsWritten: 0, calls: 1 },
+			],
+		},
+		runLogsIndexes: [
+			{
+				seq: 0,
+				name: 'sqlite_autoindex_run_logs_1',
+				unique: true,
+				origin: 'pk',
+				partial: false,
+			},
+		],
+		runLogsColumns: [
+			{
+				cid: 0,
+				name: 'run_id',
+				type: 'TEXT',
+				notnull: true,
+				dfltValue: null,
+				pk: 1,
+			},
+		],
+		tableCounts: {
+			runs: 2,
+			runLogs: 4,
+			packageInvocationLedger: 0,
+			workflowProjections: 0,
+		},
+		runCount: { meta: 2, actual: 2, matches: true },
+		explainRunLogsDeleteByRunId: [
+			{ id: 2, parent: 0, detail: 'SEARCH run_logs USING INTEGER PRIMARY KEY' },
+		],
+		explainRunLogsSelectByRunId: [
+			{ id: 3, parent: 0, detail: 'SEARCH run_logs USING INTEGER PRIMARY KEY' },
+		],
+	}
+	mocks.inspectSqlBilling.mockResolvedValueOnce(inspection)
+	const env = createEnv()
+	await expect(
+		inspectRunLogSqlBilling({ env, userId: 'user-1' }),
+	).resolves.toEqual(inspection)
+})

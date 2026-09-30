@@ -1,0 +1,545 @@
+import { z } from 'zod'
+import { communityPackageCategories } from '#universal/community-categories.ts'
+import { type ForkListingRelation } from '#universal/community-listing-ahead.ts'
+
+export const kodyPackageIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+export const packageJobScheduleSchema = z.union([
+	z.object({
+		type: z.literal('cron'),
+		expression: z.string().min(1),
+	}),
+	z.object({
+		type: z.literal('interval'),
+		every: z.string().min(1),
+	}),
+	z.object({
+		type: z.literal('once'),
+		runAt: z.string().min(1),
+	}),
+])
+
+export type PackageJobSchedule = z.infer<typeof packageJobScheduleSchema>
+
+export const packageJobDefinitionSchema = z.object({
+	entry: z.string().min(1),
+	schedule: packageJobScheduleSchema,
+	timezone: z.string().min(1).optional(),
+	enabled: z.boolean().optional(),
+})
+
+export type PackageJobDefinition = z.infer<typeof packageJobDefinitionSchema>
+
+/**
+ * A bare package specifier the browser bundle leaves as an `import` for the
+ * page's import map to resolve (for example `@remix-run/ui`). Relative
+ * paths, URLs, and Worker-only schemes are not externals: the first two need
+ * no declaration and the last never belong in a browser graph.
+ */
+export const packageAppClientExternalSchema = z
+	.string()
+	.trim()
+	.min(1)
+	.refine(
+		(specifier) =>
+			!specifier.startsWith('.') &&
+			!specifier.startsWith('/') &&
+			!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(specifier),
+		{
+			message:
+				'kody.app.client.externals entries must be bare package specifiers such as "@remix-run/ui" or "preact/hooks" (no relative paths, URLs, or kody:/cloudflare:/node: schemes).',
+		},
+	)
+
+export const packageAppClientDefinitionSchema = z.object({
+	/** Browser entry (`.ts`/`.tsx`/`.js`/`.jsx`). */
+	entry: z.string().trim().min(1),
+	/**
+	 * Bare specifiers kept as external `import`s in the bundled module so an
+	 * import map on the page resolves them. Matches the specifier and its
+	 * subpaths (`preact` also covers `preact/hooks`).
+	 */
+	externals: z.array(packageAppClientExternalSchema).optional(),
+})
+
+export type PackageAppClientDefinition = z.infer<
+	typeof packageAppClientDefinitionSchema
+>
+
+export const packageAppDefinitionSchema = z.object({
+	/**
+	 * Server entry bundled for the package-app isolate. The default export
+	 * is a fetch handler (a function, `{ fetch }`, or a named `fetch`
+	 * export). The host strips the app mount before forwarding, so every
+	 * entry sees `/notes` for `/packages/<id>/notes`.
+	 */
+	entry: z.string().trim().min(1),
+	/**
+	 * Browser entry the platform bundles to a fingerprinted ESM module served
+	 * under `<appBasePath>/_assets/`. A path string, or an object when the
+	 * client needs `externals` for an import map.
+	 */
+	client: z
+		.union([z.string().trim().min(1), packageAppClientDefinitionSchema])
+		.optional(),
+	/**
+	 * Directory of static files served as-is under `<appBasePath>/_assets/`
+	 * (no bundling; content types inferred from the extension).
+	 */
+	assets: z.string().trim().min(1).optional(),
+})
+
+export type PackageAppDefinition = z.infer<typeof packageAppDefinitionSchema>
+
+export const packageSecretMountDefinitionSchema = z.object({
+	name: z.string().min(1),
+	scope: z.enum(['user', 'package', 'session']).optional(),
+})
+
+export const packageSecretProviderIdPattern = /^[a-z0-9][a-z0-9._-]{0,63}$/
+
+export const packageSecretProviderSchema = z.object({
+	id: z.string().regex(packageSecretProviderIdPattern),
+})
+
+export type PackageSecretMountDefinition = z.infer<
+	typeof packageSecretMountDefinitionSchema
+>
+
+export const packageSubscriptionDefinitionSchema = z.object({
+	handler: z.string().min(1),
+	description: z.string().min(1).optional(),
+	filters: z.record(z.string().min(1), z.unknown()).optional(),
+})
+
+export type PackageSubscriptionDefinition = z.infer<
+	typeof packageSubscriptionDefinitionSchema
+>
+
+/** RFC 9110 token characters for HTTP field names. */
+const httpFieldNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+export const webhookSignedPayloadValues = ['body', 'timestamp.body'] as const
+export type WebhookSignedPayload = (typeof webhookSignedPayloadValues)[number]
+
+export const webhookTimestampFormatValues = [
+	'unix-seconds',
+	'unix-millis',
+	'iso-8601',
+	'stripe-signature',
+] as const
+export type WebhookTimestampFormat =
+	(typeof webhookTimestampFormatValues)[number]
+
+export const packageWebhookVerificationSchema = z.object({
+	type: z.enum(['hmac-sha256', 'hmac-sha1']),
+	header: z.string().regex(httpFieldNamePattern),
+	secretName: z.string().min(1),
+	encoding: z.enum(['hex', 'base64']),
+	prefix: z.string().optional(),
+	signedPayload: z.enum(webhookSignedPayloadValues).optional(),
+})
+
+export type PackageWebhookVerification = z.infer<
+	typeof packageWebhookVerificationSchema
+>
+
+/**
+ * Platform-handled ownership quizzes on the minted webhook URL. Challenge
+ * requests never invoke package code: the worker answers from query/body +
+ * optional named secret only. `secretName` is the same secret-store name
+ * pattern as `verification.secretName`.
+ */
+export const webhookChallengeTypeValues = [
+	'x-activity-crc',
+	'websub-hub',
+	'meta-hub',
+	'slack-url-verification',
+] as const
+export type WebhookChallengeType = (typeof webhookChallengeTypeValues)[number]
+
+export const packageWebhookChallengeSchema = z.discriminatedUnion('type', [
+	z.object({
+		type: z.literal('x-activity-crc'),
+		secretName: z.string().min(1),
+	}),
+	z.object({
+		type: z.literal('websub-hub'),
+		/** When set, `hub.verify_token` must match this secret. */
+		secretName: z.string().min(1).optional(),
+	}),
+	z.object({
+		type: z.literal('meta-hub'),
+		secretName: z.string().min(1),
+	}),
+	z.object({
+		type: z.literal('slack-url-verification'),
+		/**
+		 * When set, the challenge POST must carry a valid Slack signing
+		 * signature for this signing secret (`X-Slack-Signature`).
+		 */
+		secretName: z.string().min(1).optional(),
+	}),
+])
+
+export type PackageWebhookChallenge = z.infer<
+	typeof packageWebhookChallengeSchema
+>
+
+const webhookTimestampFormatSchema = z.string().superRefine((value, ctx) => {
+	if (
+		!(webhookTimestampFormatValues as ReadonlyArray<string>).includes(value)
+	) {
+		ctx.addIssue({
+			code: 'custom',
+			message: `Unknown webhook replay timestampFormat "${value}". Expected one of: ${webhookTimestampFormatValues.join(', ')}.`,
+		})
+	}
+}) as z.ZodType<WebhookTimestampFormat>
+
+export const packageWebhookReplaySchema = z
+	.object({
+		timestampHeader: z.string().regex(httpFieldNamePattern).optional(),
+		timestampFormat: webhookTimestampFormatSchema.optional(),
+		toleranceSeconds: z.number().int().positive().max(86_400).optional(),
+		deliveryIdHeader: z.string().regex(httpFieldNamePattern).optional(),
+	})
+	.superRefine((replay, ctx) => {
+		if (replay.timestampHeader && replay.timestampFormat === undefined) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['timestampFormat'],
+				message:
+					'replay.timestampFormat is required when timestampHeader is set.',
+			})
+		}
+		if (replay.timestampFormat !== undefined && !replay.timestampHeader) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['timestampHeader'],
+				message:
+					'replay.timestampHeader is required when timestampFormat is set.',
+			})
+		}
+	})
+
+export type PackageWebhookReplay = z.infer<typeof packageWebhookReplaySchema>
+
+export const webhookInputModeValues = ['request', 'params'] as const
+export type WebhookInputMode = (typeof webhookInputModeValues)[number]
+
+export const webhookDefaultRateLimitPerMinute = 60
+export const webhookMaxRateLimitPerMinute = 600
+
+export const packageWebhookDefinitionSchema = z
+	.object({
+		name: z.string().regex(kodyPackageIdPattern),
+		export: z.string().min(1),
+		description: z.string().min(1).optional(),
+		responseMode: z.enum(['ack', 'sync']).optional(),
+		inputMode: z.enum(webhookInputModeValues).optional(),
+		rateLimitPerMinute: z
+			.number()
+			.int()
+			.min(1)
+			.max(webhookMaxRateLimitPerMinute)
+			.optional(),
+		verification: packageWebhookVerificationSchema.optional(),
+		replay: packageWebhookReplaySchema.optional(),
+		challenge: packageWebhookChallengeSchema.optional(),
+	})
+	.superRefine((webhook, ctx) => {
+		if (
+			webhook.verification?.signedPayload === 'timestamp.body' &&
+			!webhook.replay?.timestampHeader
+		) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['verification', 'signedPayload'],
+				message:
+					'verification.signedPayload "timestamp.body" requires replay.timestampHeader.',
+			})
+		}
+	})
+
+export type PackageWebhookDefinition = z.infer<
+	typeof packageWebhookDefinitionSchema
+>
+
+const packageWebhooksSchema = z
+	.array(packageWebhookDefinitionSchema)
+	.superRefine((webhooks, ctx) => {
+		const seen = new Set<string>()
+		for (const [index, webhook] of webhooks.entries()) {
+			if (seen.has(webhook.name)) {
+				ctx.addIssue({
+					code: 'custom',
+					path: [index, 'name'],
+					message: `Duplicate webhook name "${webhook.name}". Webhook names must be unique within a package.`,
+				})
+			}
+			seen.add(webhook.name)
+		}
+	})
+
+export const packageEmittedEventDefinitionSchema = z.object({
+	description: z.string().min(1),
+	// JSON Schema subset for dispatch-time payload validation; the supported
+	// keyword set is enforced in parseAuthoredPackageJson (manifest.ts) so
+	// schema problems surface as publish-time manifest errors.
+	payloadSchema: z.record(z.string(), z.unknown()).optional(),
+})
+
+export type PackageEmittedEventDefinition = z.infer<
+	typeof packageEmittedEventDefinitionSchema
+>
+
+export const packageRetrieverScopeValues = ['search', 'context'] as const
+export type PackageRetrieverScope = (typeof packageRetrieverScopeValues)[number]
+
+export const packageRetrieverDefinitionSchema = z.object({
+	export: z.string().min(1),
+	name: z.string().min(1),
+	description: z.string().min(1),
+	scopes: z
+		.array(z.enum(packageRetrieverScopeValues))
+		.min(1)
+		.max(packageRetrieverScopeValues.length),
+	timeoutMs: z.number().int().positive().max(5_000).optional(),
+	maxResults: z.number().int().positive().max(20).optional(),
+})
+
+export type PackageRetrieverDefinition = z.infer<
+	typeof packageRetrieverDefinitionSchema
+>
+
+const packageExportConditionSchema = z
+	.object({
+		import: z.string().min(1).optional(),
+		default: z.string().min(1).optional(),
+		types: z.string().min(1).optional(),
+	})
+	.refine(
+		(value) =>
+			value.import !== undefined ||
+			value.default !== undefined ||
+			value.types !== undefined,
+		{
+			message:
+				'Package export condition objects must define at least one of `import`, `default`, or `types`.',
+		},
+	)
+
+export const packageExportTargetSchema = z.union([
+	z.string().min(1),
+	packageExportConditionSchema,
+])
+
+export type PackageExportTarget = z.infer<typeof packageExportTargetSchema>
+
+const scopedPackageNamePattern = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/
+
+export const kodyPackageDependencySchema = z
+	.string()
+	.min(1)
+	.regex(scopedPackageNamePattern, {
+		message:
+			'Static Kody package dependencies must be scoped package names like "@scope/package".',
+	})
+
+export const kodyPackageDependencyWildcard = '*' as const
+
+export type KodyPackageDependencyWildcard = typeof kodyPackageDependencyWildcard
+
+export type KodyPackageDependencies = Record<
+	string,
+	KodyPackageDependencyWildcard
+>
+
+export type KodyPackageDependency = z.infer<typeof kodyPackageDependencySchema>
+
+export function listKodyPackageDependencyNames(
+	dependencies:
+		| KodyPackageDependencies
+		| ReadonlyArray<unknown>
+		| Record<string, string>
+		| null
+		| undefined,
+): Array<string> {
+	if (dependencies == null) return []
+	const names = Array.isArray(dependencies)
+		? dependencies.filter((name): name is string => typeof name === 'string')
+		: Object.keys(dependencies)
+	return Array.from(
+		new Set(names.map((name) => name.trim()).filter((name) => name.length > 0)),
+	).sort((left, right) => left.localeCompare(right))
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return value != null && typeof value === 'object' && !Array.isArray(value)
+}
+
+const kodyPackageDependenciesSchema = z
+	.unknown()
+	.superRefine((value, ctx) => {
+		if (value === undefined) return
+		if (Array.isArray(value) || !isPlainObject(value)) {
+			ctx.addIssue({
+				code: 'custom',
+				message: 'kody.dependencies must be a map of "@scope/package": "*".',
+				fatal: true,
+			})
+			return
+		}
+		for (const [name, version] of Object.entries(value)) {
+			if (!kodyPackageDependencySchema.safeParse(name).success) {
+				ctx.addIssue({
+					code: 'custom',
+					path: [name],
+					message:
+						'Static Kody package dependencies must be scoped package names like "@scope/package".',
+				})
+			}
+			if (version !== kodyPackageDependencyWildcard) {
+				ctx.addIssue({
+					code: 'custom',
+					path: [name],
+					message:
+						'must be "*" (latest published commit, captured when this package publishes).',
+				})
+			}
+		}
+	})
+	.transform((value): KodyPackageDependencies | undefined => {
+		if (value === undefined || !isPlainObject(value)) return undefined
+		return Object.fromEntries(
+			listKodyPackageDependencyNames(value as Record<string, string>).map(
+				(name) => [name, kodyPackageDependencyWildcard],
+			),
+		)
+	})
+
+/** Soft cap for new/updated `kody.description` taglines on write/publish only. */
+export const KODY_DESCRIPTION_MAX_LENGTH = 200
+
+/**
+ * Stable phrase used to recognize oversized taglines after the Error leaves
+ * `package-registry` (no MCP types here). `isKodyDescriptionLengthMessage`
+ * and MCP observability depend on it. KODY-7S.
+ */
+const kodyDescriptionTooLongPhrase = `must be at most ${KODY_DESCRIPTION_MAX_LENGTH} characters (short public tagline)`
+
+export function kodyDescriptionTooLongMessage() {
+	return `kody.description ${kodyDescriptionTooLongPhrase}.`
+}
+
+export function isKodyDescriptionLengthMessage(message: string) {
+	return message.includes(kodyDescriptionTooLongPhrase)
+}
+
+export function assertKodyDescriptionLength(description: string) {
+	if (description.length > KODY_DESCRIPTION_MAX_LENGTH) {
+		throw new Error(kodyDescriptionTooLongMessage())
+	}
+}
+
+export const authoredPackageKodySchema = z.object({
+	id: z.string().regex(kodyPackageIdPattern).optional(),
+	// No max here: this schema is shared by load/parse. Enforce
+	// KODY_DESCRIPTION_MAX_LENGTH only at write/publish boundaries via
+	// assertKodyDescriptionLength so existing longer descriptions still load.
+	description: z.string().min(1),
+	tags: z.array(z.string().min(1)).optional(),
+	category: z.enum(communityPackageCategories).optional(),
+	searchText: z.string().min(1).optional(),
+	dependencies: kodyPackageDependenciesSchema.optional(),
+	secretMounts: z
+		.record(z.string().min(1), packageSecretMountDefinitionSchema)
+		.optional(),
+	secretProvider: packageSecretProviderSchema.optional(),
+	subscriptions: z
+		.record(z.string().min(1), packageSubscriptionDefinitionSchema)
+		.optional(),
+	emits: z
+		.record(z.string().min(1), packageEmittedEventDefinitionSchema)
+		.optional(),
+	app: packageAppDefinitionSchema.optional(),
+	jobs: z.record(z.string().min(1), packageJobDefinitionSchema).optional(),
+	retrievers: z
+		.record(
+			z.string().regex(kodyPackageIdPattern),
+			packageRetrieverDefinitionSchema,
+		)
+		.optional(),
+	webhooks: packageWebhooksSchema.optional(),
+})
+
+export type AuthoredPackageKody = Omit<
+	z.infer<typeof authoredPackageKodySchema>,
+	'id'
+> & {
+	id: string
+}
+
+export const authoredPackageJsonSchema = z.object({
+	name: z.string().min(1),
+	private: z.boolean().optional(),
+	exports: z.record(z.string().min(1), packageExportTargetSchema),
+	kody: authoredPackageKodySchema,
+})
+
+export type AuthoredPackageJson = Omit<
+	z.infer<typeof authoredPackageJsonSchema>,
+	'kody'
+> & {
+	kody: AuthoredPackageKody
+}
+
+export type SavedPackageRow = {
+	id: string
+	user_id: string
+	name: string
+	kody_id: string
+	description: string
+	tags_json: string
+	search_text: string | null
+	source_id: string
+	has_app: 0 | 1
+	hidden: 0 | 1
+	is_private: 0 | 1
+	locked_at: string | null
+	created_at: string
+	updated_at: string
+}
+
+export type SavedPackageRecord = {
+	id: string
+	userId: string
+	name: string
+	kodyId: string
+	description: string
+	tags: Array<string>
+	searchText: string | null
+	sourceId: string
+	hasApp: boolean
+	hidden: boolean
+	isPrivate: boolean
+	lockedAt: string | null
+	createdAt: string
+	updatedAt: string
+}
+
+export type SavedPackageCommunityProvenance = {
+	sourceListingId: string | null
+	listingCurrent: boolean | null
+	listingKodyId: string | null
+	listingName: string | null
+	originCommit: string | null
+	listingPinnedCommit: string | null
+	listingPublishedAt: string | null
+	listingAhead: boolean | null
+	forkListingRelation: ForkListingRelation | null
+}
+
+export type SavedPackageWithCommunityProvenanceRecord = SavedPackageRecord &
+	SavedPackageCommunityProvenance

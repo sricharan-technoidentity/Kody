@@ -1,0 +1,243 @@
+import { type SecretScope } from '#mcp/secrets/types.ts'
+
+const secretPlaceholderRegex =
+	/\{\{secret:([a-zA-Z0-9._-]+)(?:\|scope=(session|package|user))?\}\}/g
+const providerSecretPlaceholderRegex =
+	/\{\{secret\/([a-zA-Z0-9._-]+):([^}]+)\}\}/g
+const basicAuthSecretPlaceholderRegex =
+	/\{\{secret-basic:username=([a-zA-Z0-9._-]+),password=([a-zA-Z0-9._-]+)(?:\|scope=(session|package|user))?\}\}/g
+const integrationTokenPlaceholderRegex =
+	/\{\{integration-token:([a-zA-Z0-9._-]+)\}\}/g
+
+export type ReferencedSecret = {
+	name: string
+	scope: SecretScope | null
+}
+
+export type ReferencedBasicAuthSecretPlaceholder = {
+	username: ReferencedSecret
+	password: ReferencedSecret
+	scope: SecretScope | null
+}
+
+export type ReferencedProviderSecret = {
+	provider: string
+	ref: string
+	/** Exact `{{secret/...}}` token from the request, if parsed from text. */
+	placeholder?: string
+}
+
+/**
+ * WHATWG URL serialization percent-encodes `{` and `}` in pathnames
+ * (`%7B` / `%7D`). `new Request('https://host/bot{{secret:name}}/me')`
+ * therefore stores `bot%7B%7Bsecret:name%7D%7D` on `request.url`, and
+ * the literal `{{secret:...}}` regex never matches. Restore those
+ * delimiters so path placeholders parse and replace the same as
+ * headers, bodies, and query strings (where `{` / `}` stay unencoded).
+ */
+export function decodeSecretPlaceholderDelimiters(value: string) {
+	return value.replaceAll(/%7B/gi, '{').replaceAll(/%7D/gi, '}')
+}
+
+export function parseSecretPlaceholders(value: string) {
+	const secrets: Array<ReferencedSecret> = []
+	for (const match of value.matchAll(secretPlaceholderRegex)) {
+		const name = match[1]?.trim()
+		if (!name) continue
+		const scope = match[2]
+		secrets.push({
+			name,
+			scope:
+				scope === 'package' || scope === 'session' || scope === 'user'
+					? scope
+					: null,
+		})
+	}
+	return secrets
+}
+
+export function parseBasicAuthSecretPlaceholders(value: string) {
+	const placeholders: Array<ReferencedBasicAuthSecretPlaceholder> = []
+	for (const match of value.matchAll(basicAuthSecretPlaceholderRegex)) {
+		const usernameSecretName = match[1]?.trim()
+		const passwordSecretName = match[2]?.trim()
+		if (!usernameSecretName || !passwordSecretName) continue
+		const scope = parseSecretScope(match[3])
+		placeholders.push({
+			username: {
+				name: usernameSecretName,
+				scope,
+			},
+			password: {
+				name: passwordSecretName,
+				scope,
+			},
+			scope,
+		})
+	}
+	return placeholders
+}
+
+export function parseSecretPlaceholdersFromFormUrlEncoded(value: string) {
+	const secrets: Array<ReferencedSecret> = []
+	for (const [key, entryValue] of new URLSearchParams(value)) {
+		secrets.push(...parseSecretPlaceholders(key))
+		secrets.push(...parseSecretPlaceholders(entryValue))
+	}
+	return secrets
+}
+
+export function parseBasicAuthSecretPlaceholdersFromFormUrlEncoded(
+	value: string,
+) {
+	const placeholders: Array<ReferencedBasicAuthSecretPlaceholder> = []
+	for (const [key, entryValue] of new URLSearchParams(value)) {
+		placeholders.push(...parseBasicAuthSecretPlaceholders(key))
+		placeholders.push(...parseBasicAuthSecretPlaceholders(entryValue))
+	}
+	return placeholders
+}
+
+export function parseProviderSecretPlaceholders(value: string) {
+	const secrets: Array<ReferencedProviderSecret> = []
+	for (const match of value.matchAll(providerSecretPlaceholderRegex)) {
+		const provider = match[1]?.trim()
+		const ref = match[2]?.trim()
+		if (!provider || !ref) continue
+		secrets.push({ provider, ref, placeholder: match[0] })
+	}
+	return secrets
+}
+
+export function parseProviderSecretPlaceholdersFromFormUrlEncoded(
+	value: string,
+) {
+	const secrets: Array<ReferencedProviderSecret> = []
+	for (const [key, entryValue] of new URLSearchParams(value)) {
+		secrets.push(...parseProviderSecretPlaceholders(key))
+		secrets.push(...parseProviderSecretPlaceholders(entryValue))
+	}
+	return secrets
+}
+
+export function buildProviderSecretPlaceholder(
+	secret: ReferencedProviderSecret,
+) {
+	return secret.placeholder ?? `{{secret/${secret.provider}:${secret.ref}}}`
+}
+
+export function parseIntegrationTokenPlaceholders(value: string) {
+	const names: Array<string> = []
+	for (const match of value.matchAll(integrationTokenPlaceholderRegex)) {
+		const name = match[1]?.trim()
+		if (name) names.push(name)
+	}
+	return names
+}
+
+export function parseIntegrationTokenPlaceholdersFromFormUrlEncoded(
+	value: string,
+) {
+	const names: Array<string> = []
+	for (const [key, entryValue] of new URLSearchParams(value)) {
+		names.push(...parseIntegrationTokenPlaceholders(key))
+		names.push(...parseIntegrationTokenPlaceholders(entryValue))
+	}
+	return names
+}
+
+export function buildIntegrationTokenPlaceholder(name: string) {
+	return `{{integration-token:${name}}}`
+}
+
+export function buildSecretPlaceholder(secret: ReferencedSecret) {
+	return secret.scope
+		? `{{secret:${secret.name}|scope=${secret.scope}}}`
+		: `{{secret:${secret.name}}}`
+}
+
+export function buildBasicAuthSecretPlaceholder(input: {
+	usernameSecret: string
+	passwordSecret: string
+	scope?: SecretScope | null
+}) {
+	return input.scope
+		? `{{secret-basic:username=${input.usernameSecret},password=${input.passwordSecret}|scope=${input.scope}}}`
+		: `{{secret-basic:username=${input.usernameSecret},password=${input.passwordSecret}}}`
+}
+
+export function buildBasicAuthSecretPlaceholderFromReference(
+	placeholder: ReferencedBasicAuthSecretPlaceholder,
+) {
+	return buildBasicAuthSecretPlaceholder({
+		usernameSecret: placeholder.username.name,
+		passwordSecret: placeholder.password.name,
+		scope: placeholder.scope,
+	})
+}
+
+export function replaceSecretPlaceholders(
+	value: string,
+	replacements: ReadonlyMap<string, string>,
+) {
+	let nextValue = value
+	for (const [placeholder, secretValue] of replacements.entries()) {
+		nextValue = nextValue.replaceAll(placeholder, secretValue)
+	}
+	return nextValue
+}
+
+export function replaceSecretPlaceholdersInFormUrlEncoded(
+	value: string,
+	replacements: ReadonlyMap<string, string>,
+) {
+	const nextParams = new URLSearchParams()
+	for (const [key, entryValue] of new URLSearchParams(value)) {
+		nextParams.append(
+			replaceSecretPlaceholders(key, replacements),
+			replaceSecretPlaceholders(entryValue, replacements),
+		)
+	}
+	return nextParams.toString()
+}
+
+/**
+ * Accept a bare saved-secret name or a single opaque `{{secret:…}}`
+ * placeholder (as returned by packageSecrets.get). Derived ops
+ * (secretHeaders.basic, secretJwtSign) use this so package JS can pass
+ * either form without ever seeing plaintext.
+ */
+export function parseSecretNameOrPlaceholder(
+	value: string,
+	fieldName: string,
+): ReferencedSecret {
+	const trimmed = value.trim()
+	if (!trimmed) {
+		throw new Error(`${fieldName} is required.`)
+	}
+	if (trimmed.startsWith('{{') && trimmed.endsWith('}}')) {
+		const parsed = parseSecretPlaceholders(trimmed)
+		if (parsed.length !== 1 || buildSecretPlaceholder(parsed[0]!) !== trimmed) {
+			throw new Error(
+				`${fieldName} must be a saved secret name or a single {{secret:…}} opaque ref.`,
+			)
+		}
+		return parsed[0]!
+	}
+	if (!/^[a-zA-Z0-9._-]+$/.test(trimmed)) {
+		throw new Error(
+			`${fieldName} must be a saved secret name using letters, numbers, dots, underscores, or hyphens, or a single {{secret:…}} opaque ref.`,
+		)
+	}
+	return { name: trimmed, scope: null }
+}
+
+export function containsSecretPlaceholder(value: string) {
+	return /\{\{(?:secret(?:\/|:|-basic:)|integration-token:)/.test(value)
+}
+
+function parseSecretScope(scope: string | undefined) {
+	return scope === 'package' || scope === 'session' || scope === 'user'
+		? scope
+		: null
+}

@@ -1,0 +1,228 @@
+import { z } from 'zod'
+import { defineDomainCapability } from '#mcp/capabilities/define-domain-capability.ts'
+import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
+import { requireMcpUser } from '#mcp/capabilities/meta/require-user.ts'
+import {
+	gitAuthorIdentityFromUser,
+	gitAuthorIdentitySchema,
+	gitAuthorSetupCommands,
+	shellQuote,
+} from '#worker/identity/git-author-identity.ts'
+import {
+	normalizePackageNameInput,
+	packageIdLookupDescription,
+	packageNameLookupDescription,
+} from '#worker/package-registry/package-name.ts'
+import {
+	packageScopeInputDescription,
+	resolvePackageOwnerContext,
+} from '#worker/package-registry/package-owner.ts'
+import { getSavedPackageByKodyId } from '#worker/package-registry/repo.ts'
+import {
+	KODY_DESCRIPTION_MAX_LENGTH,
+	kodyDescriptionTooLongMessage,
+} from '#worker/package-registry/types.ts'
+import {
+	buildAuthenticatedArtifactsRemote,
+	parseArtifactTokenSecret,
+} from '#worker/repo/artifacts.ts'
+import { markEntitySourcePendingExternalReconcile } from '#worker/repo/entity-sources.ts'
+import {
+	assertPublishedPackageSourceRepoHead,
+	assertRestorablePackageSourceSnapshot,
+} from '#worker/repo/source-safety-policy.ts'
+import { createStubSavedPackage } from './create-stub-package.ts'
+import { resolveOwnedPackageSource } from './resolve-package-source.ts'
+
+const getGitRemoteInputSchema = z.object({
+	package_id: z.string().min(1).optional().describe(packageIdLookupDescription),
+	kody_id: z.string().min(1).optional().describe(packageNameLookupDescription),
+	package_scope: z
+		.string()
+		.min(1)
+		.optional()
+		.describe(packageScopeInputDescription),
+	create: z
+		.boolean()
+		.optional()
+		.default(false)
+		.describe(
+			'Set true with the new `@scope/leaf` name (or the name leaf) to register a new stub saved package (private, minimal scaffold) when none exists yet, then mint its remote in the same call. Existing packages are reused as-is. Prefer the scoped name for existing packages; use `package_id` only when the name is not known.',
+		),
+	description: z
+		.string()
+		.min(1)
+		.max(KODY_DESCRIPTION_MAX_LENGTH, kodyDescriptionTooLongMessage())
+		.optional()
+		.describe(
+			`Package description used when \`create: true\` registers a new stub package. At most ${KODY_DESCRIPTION_MAX_LENGTH} characters (short public tagline). Ignored for existing packages.`,
+		),
+	scope: z.enum(['read', 'write']).default('write'),
+	ttl_seconds: z.number().int().min(60).max(86_400).default(14_400),
+})
+
+const outputSchema = z.toJSONSchema(
+	z.object({
+		package_id: z.string(),
+		kody_id: z.string(),
+		created: z
+			.boolean()
+			.describe(
+				'True when this call registered a new stub saved package before minting the remote.',
+			),
+		remote: z.string(),
+		authenticated_remote: z.string(),
+		git_extra_header: z.string(),
+		scope: z.enum(['read', 'write']),
+		expires_at: z.string(),
+		git_author: gitAuthorIdentitySchema,
+		setup_commands: z.array(z.string()),
+	}),
+) as Record<string, unknown>
+
+export const getGitRemoteCapability = defineDomainCapability(
+	capabilityDomainNames.packages,
+	{
+		name: 'packageGetGitRemote',
+		description:
+			'Start or continue the git lane for saved packages: mint a short-lived Cloudflare Artifacts git remote so coding agents with local filesystem/git access can clone into a temporary directory, edit normally (including binary assets), push, and publish with packagePublishExternalPush. Pass `create: true` with a new `@scope/leaf` name (or the name leaf) to register a stub saved package and mint its remote in one call, so new packages can be authored via clone-edit-push instead of packageSave file blobs. Prefer the scoped name for existing packages; use `package_id` only when the name is not known. The result includes `git_author` (signed-in Kody account email and display name) and `setup_commands` that set local `user.email` / `user.name` to that identity — never invent a git email. Write access verifies the current package source has a restorable backup snapshot before clone/edit/publish. Individual files may be at most 10 MiB (10,485,760 stored bytes; UTF-8 for text, raw for binary): publish rejects anything larger with external-hosting guidance (commit a link or pointer instead), and the Artifacts remote itself fails pushes above ~32 MiB of pack content with a raw HTTP 413.',
+		keywords: [
+			'package',
+			'create',
+			'new',
+			'scaffold',
+			'git',
+			'remote',
+			'artifacts',
+			'clone',
+			'push',
+			'local clone',
+			'temporary directory',
+		],
+		readOnly: false,
+		idempotent: false,
+		destructive: false,
+		inputSchema: getGitRemoteInputSchema,
+		outputSchema,
+		async handler(args, ctx) {
+			const user = requireMcpUser(ctx.callerContext)
+			const gitAuthor = gitAuthorIdentityFromUser(user)
+			const owner = await resolvePackageOwnerContext(
+				ctx.env,
+				user,
+				args.package_scope,
+			)
+			const requestedKodyId =
+				args.kody_id === undefined || args.kody_id.trim() === ''
+					? undefined
+					: normalizePackageNameInput({
+							value: args.kody_id,
+							ownerScope: owner.ownerScope,
+							action: args.create ? 'create' : 'resolve',
+						})
+			let created = false
+			if (args.create) {
+				if (requestedKodyId === undefined || args.package_id !== undefined) {
+					throw new Error(
+						'`create: true` requires a package name leaf or `@scope/leaf` (without `package_id`); new package ids are generated by Kody.',
+					)
+				}
+				const existing = await getSavedPackageByKodyId(ctx.env.APP_DB, {
+					userId: owner.ownerUserId,
+					kodyId: requestedKodyId,
+				})
+				if (!existing) {
+					await createStubSavedPackage({
+						env: ctx.env,
+						baseUrl: ctx.callerContext.baseUrl,
+						owner,
+						kodyId: requestedKodyId,
+						description: args.description,
+					})
+					created = true
+				}
+			}
+			const { source, packageId, kodyId } = await resolveOwnedPackageSource({
+				db: ctx.env.APP_DB,
+				userId: owner.ownerUserId,
+				ownerScope: owner.ownerScope,
+				args: {
+					package_id: args.package_id,
+					kody_id: requestedKodyId,
+				},
+			})
+			const headPromise = assertPublishedPackageSourceRepoHead({
+				env: ctx.env,
+				source,
+				operation: 'packageGetGitRemote',
+				accessToken: {
+					scope: args.scope,
+					ttlSeconds: args.ttl_seconds,
+				},
+			})
+			let sourceHead: Awaited<typeof headPromise>
+			if (args.scope === 'write') {
+				const [snapshotResult, headResult] = await Promise.allSettled([
+					assertRestorablePackageSourceSnapshot({
+						env: ctx.env,
+						userId: owner.ownerUserId,
+						source,
+						operation: 'packageGetGitRemote write access',
+					}),
+					headPromise,
+				])
+				if (snapshotResult.status === 'rejected') {
+					throw snapshotResult.reason
+				}
+				if (headResult.status === 'rejected') {
+					throw headResult.reason
+				}
+				sourceHead = headResult.value
+			} else {
+				sourceHead = await headPromise
+			}
+			if (!sourceHead) {
+				throw new Error('packageGetGitRemote requires a package source.')
+			}
+			const token = sourceHead.accessToken
+			if (!token) {
+				throw new Error(
+					'packageGetGitRemote failed to mint an artifact access token.',
+				)
+			}
+			if (args.scope === 'write') {
+				await markEntitySourcePendingExternalReconcile(ctx.env.APP_DB, {
+					id: source.id,
+					userId: owner.ownerUserId,
+					tokenExpiresAt: token.expiresAt,
+				})
+			}
+			const gitExtraHeader = `Authorization: Bearer ${parseArtifactTokenSecret(token.plaintext)}`
+			const cloneDirectory = source.entity_id
+			return {
+				package_id: packageId,
+				kody_id: kodyId,
+				created,
+				remote: sourceHead.remote,
+				authenticated_remote: buildAuthenticatedArtifactsRemote({
+					remote: sourceHead.remote,
+					token: token.plaintext,
+				}),
+				git_extra_header: gitExtraHeader,
+				scope: args.scope,
+				expires_at: token.expiresAt,
+				git_author: gitAuthor,
+				setup_commands: [
+					`git -c http.extraHeader=${shellQuote(gitExtraHeader)} clone ${shellQuote(sourceHead.remote)} ${shellQuote(cloneDirectory)}`,
+					`cd ${shellQuote(cloneDirectory)}`,
+					...gitAuthorSetupCommands(gitAuthor),
+					`git remote add kody ${shellQuote(sourceHead.remote)}`,
+					`git config remote.kody.fetch '+refs/heads/*:refs/remotes/kody/*'`,
+					`git config --add remote.kody.fetch '+refs/notes/*:refs/notes/*'`,
+					`git -c http.extraHeader=${shellQuote(gitExtraHeader)} fetch kody 'refs/notes/*:refs/notes/*'`,
+					`git -c http.extraHeader=${shellQuote(gitExtraHeader)} push kody HEAD:${shellQuote(sourceHead.defaultBranch)}`,
+				],
+			}
+		},
+	},
+)

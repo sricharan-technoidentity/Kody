@@ -1,0 +1,552 @@
+import { expect, test, vi } from 'vitest'
+
+const entitlementMocks = vi.hoisted(() => ({
+	readAdminEntitlementConsumption: vi.fn(),
+}))
+
+vi.mock('#worker/admin/entitlement-consumption.ts', () => ({
+	readAdminEntitlementConsumption:
+		entitlementMocks.readAdminEntitlementConsumption,
+	entitlementWarningThreshold: 0.8,
+}))
+
+const {
+	detectFleetUsagePressure,
+	fleetRuntimeDurationAlertThresholdMs,
+	loadFleetEntitlementCrossingSnapshots,
+	loadFleetUsageInsights,
+} = await import('#worker/admin/fleet-usage-insights.ts')
+
+function createFleetDb(input: {
+	runtimeLeaders?: Array<{
+		stable_user_id: string
+		username: string
+		total_duration_ms: number
+	}>
+	eventLeaders?: Array<{
+		stable_user_id: string
+		username: string
+		event_count: number
+	}>
+	metricLeaders?: Array<{
+		user_id: string
+		username: string
+		metric: string
+		total_duration_ms: number
+	}>
+	activeUsers?: Array<{
+		stable_user_id: string
+		username: string
+		plan: string
+		stripe_plan: string | null
+		entitlement_ladder: string | null
+		event_count: number
+	}>
+	runtimeByUser?: Record<string, number>
+	adminUserIds?: Array<string>
+	dynamicWorkerLeaders?: Array<{
+		stable_user_id: string
+		username: string
+		event_count: number
+	}>
+	dynamicWorkerDays?: number
+	uniqueWorkerDaysByUser?: Record<string, number>
+	onDurationQueryBind?: (params: Array<unknown>) => void
+	onEventCountQueryBind?: (params: Array<unknown>) => void
+}) {
+	return {
+		prepare(query: string) {
+			const normalized = query.replace(/\s+/g, ' ').trim().toLowerCase()
+			return {
+				bind(...params: Array<unknown>) {
+					if (
+						normalized.includes('sum(total_duration_ms)') &&
+						normalized.includes('user_id in')
+					) {
+						input.onDurationQueryBind?.(params)
+					}
+					if (
+						normalized.includes('sum(r.event_count)') &&
+						normalized.includes('not in')
+					) {
+						input.onEventCountQueryBind?.(params)
+					}
+					return this
+				},
+				async first<T>() {
+					if (
+						normalized.includes("metric = 'dynamic_worker_day'") &&
+						normalized.includes('sum(event_count)')
+					) {
+						return {
+							unique_worker_days: input.dynamicWorkerDays ?? 0,
+						} as T
+					}
+					return null
+				},
+				async all<T>() {
+					if (
+						normalized.includes('sum(r.total_duration_ms)') &&
+						normalized.includes('limit ?') &&
+						!normalized.includes('partition by')
+					) {
+						return {
+							results: (input.runtimeLeaders ?? []) as Array<T>,
+						}
+					}
+					if (
+						normalized.includes('u.plan') &&
+						normalized.includes('entitlement_ladder') &&
+						normalized.includes('event_count')
+					) {
+						return {
+							results: (input.activeUsers ?? []) as Array<T>,
+						}
+					}
+					if (
+						normalized.includes("r.name = 'admin'") &&
+						normalized.includes('stable_user_id')
+					) {
+						return {
+							results: (input.adminUserIds ?? []).map((stable_user_id) => ({
+								stable_user_id,
+							})) as Array<T>,
+						}
+					}
+					if (
+						normalized.includes('sum(r.event_count)') &&
+						normalized.includes('limit ?')
+					) {
+						return {
+							results: (input.eventLeaders ?? []) as Array<T>,
+						}
+					}
+					if (
+						normalized.includes("metric = 'dynamic_worker_day'") &&
+						normalized.includes('user_id in')
+					) {
+						const rows = Object.entries(input.uniqueWorkerDaysByUser ?? {}).map(
+							([user_id, event_count]) => ({
+								user_id,
+								event_count,
+							}),
+						)
+						return { results: rows as Array<T> }
+					}
+					if (
+						normalized.includes("metric = 'dynamic_worker_day'") &&
+						normalized.includes('limit ?')
+					) {
+						return {
+							results: (input.dynamicWorkerLeaders ?? []) as Array<T>,
+						}
+					}
+					if (normalized.includes('row_number() over')) {
+						return {
+							results: (input.metricLeaders ?? []) as Array<T>,
+						}
+					}
+					if (
+						normalized.includes('sum(total_duration_ms)') &&
+						normalized.includes('user_id in')
+					) {
+						const rows = Object.entries(input.runtimeByUser ?? {}).map(
+							([user_id, total_duration_ms]) => ({
+								user_id,
+								total_duration_ms,
+							}),
+						)
+						return { results: rows as Array<T> }
+					}
+					throw new Error(`Unsupported fleet query: ${query}`)
+				},
+			}
+		},
+	} as unknown as D1Database
+}
+
+test('loadFleetUsageInsights returns bounded consumer rankings and pressure panel', async () => {
+	entitlementMocks.readAdminEntitlementConsumption.mockResolvedValue([
+		{
+			resource: 'saved_packages',
+			label: 'saved packages',
+			current: 9,
+			limit: 10,
+			percentOfLimit: 0.9,
+			overEightyPercent: true,
+		},
+	])
+	const eventCountBinds: Array<Array<unknown>> = []
+	const db = createFleetDb({
+		runtimeLeaders: [
+			{
+				stable_user_id: 'user-a',
+				username: 'alice',
+				total_duration_ms: 3_600_000,
+			},
+		],
+		eventLeaders: [
+			{
+				stable_user_id: 'user-b',
+				username: 'bob',
+				event_count: 42,
+			},
+		],
+		metricLeaders: [
+			{
+				user_id: 'user-a',
+				username: 'alice',
+				metric: 'execute',
+				total_duration_ms: 1_000,
+			},
+		],
+		activeUsers: [
+			{
+				stable_user_id: 'user-a',
+				username: 'alice',
+				plan: 'free',
+				stripe_plan: null,
+				entitlement_ladder: 'public',
+				event_count: 50,
+			},
+		],
+		dynamicWorkerDays: 150,
+		dynamicWorkerLeaders: [
+			{
+				stable_user_id: 'user-c',
+				username: 'cara',
+				event_count: 90,
+			},
+		],
+		onEventCountQueryBind(params) {
+			eventCountBinds.push(params)
+		},
+	})
+	const data = await loadFleetUsageInsights({
+		db,
+		env: { APP_DB: db } as Env,
+		now: new Date('2026-07-08T12:00:00.000Z'),
+	})
+	expect(data.topRuntimeDurationConsumers).toEqual([
+		{
+			stableUserId: 'user-a',
+			username: 'alice',
+			totalDurationMs: 3_600_000,
+		},
+	])
+	expect(data.topEventCountConsumers).toEqual([
+		{
+			stableUserId: 'user-b',
+			username: 'bob',
+			eventCount: 42,
+		},
+	])
+	expect(eventCountBinds.length).toBeGreaterThan(0)
+	expect(eventCountBinds[0]?.slice(1, 6)).toEqual([
+		'dynamic_worker_invoke',
+		'dynamic_worker_cpu',
+		'durable_object_gb_seconds',
+		'durable_object_rows_read',
+		'durable_object_platform_rows_read',
+	])
+	expect(data.topDurationConsumersByMetric).toHaveLength(3)
+	expect(data.topDurationConsumersByMetric[0]?.consumers).toEqual([
+		{
+			stableUserId: 'user-a',
+			username: 'alice',
+			totalDurationMs: 1_000,
+		},
+	])
+	expect(data.entitlementPressure).toEqual([
+		{
+			stableUserId: 'user-a',
+			username: 'alice',
+			plan: 'free',
+			pressuredResources: [
+				{
+					resource: 'saved_packages',
+					label: 'saved packages',
+					current: 9,
+					limit: 10,
+					percentOfLimit: 0.9,
+				},
+			],
+		},
+	])
+	expect(data.dynamicWorkerCost).toEqual({
+		uniqueWorkerDays: 150,
+		estimatedGrossUsd: 0.3,
+		usdPerUniqueDay: 0.002,
+		includedPerAccountMonth: 1000,
+		topConsumers: [
+			{
+				stableUserId: 'user-c',
+				username: 'cara',
+				uniqueWorkerDays: 90,
+				estimatedGrossUsd: 0.18,
+				estimatedPaidUsdCents: 0,
+				estimatedMarginUsd: -0.18,
+				underwater: false,
+				paidSource: 'none',
+				risk: 'none',
+			},
+		],
+		riskConsumers: [],
+	})
+})
+
+test('detectFleetUsagePressure flags entitlement, runtime, and unique-worker cost', async () => {
+	entitlementMocks.readAdminEntitlementConsumption.mockImplementation(
+		async (input) => {
+			if (input.usageUserId === 'user-a') {
+				return [
+					{
+						resource: 'secrets',
+						label: 'secrets',
+						current: 9,
+						limit: 10,
+						percentOfLimit: 0.9,
+						overEightyPercent: true,
+					},
+				]
+			}
+			if (input.usageUserId === 'user-admin') {
+				return [
+					{
+						resource: 'saved_packages',
+						label: 'saved packages',
+						current: 9_001,
+						limit: 10_000,
+						percentOfLimit: 0.9001,
+						overEightyPercent: true,
+					},
+				]
+			}
+			return []
+		},
+	)
+	let durationQueryBind: Array<unknown> | undefined
+	const db = createFleetDb({
+		activeUsers: [
+			{
+				stable_user_id: 'user-a',
+				username: 'alice',
+				plan: 'free',
+				stripe_plan: null,
+				entitlement_ladder: 'public',
+				event_count: 50,
+			},
+			{
+				stable_user_id: 'user-b',
+				username: 'bob',
+				plan: 'pro',
+				stripe_plan: null,
+				entitlement_ladder: 'public',
+				event_count: 40,
+			},
+			{
+				stable_user_id: 'user-admin',
+				username: 'kentcdodds',
+				plan: 'max',
+				stripe_plan: null,
+				entitlement_ladder: 'public',
+				event_count: 90,
+			},
+		],
+		adminUserIds: ['user-admin'],
+		runtimeByUser: {
+			'user-b': fleetRuntimeDurationAlertThresholdMs + 1,
+			'user-admin': fleetRuntimeDurationAlertThresholdMs * 2,
+		},
+		uniqueWorkerDaysByUser: {
+			'user-a': 1000,
+			'user-admin': 50_000,
+		},
+		onDurationQueryBind(params) {
+			durationQueryBind = params
+		},
+	})
+	const issues = await detectFleetUsagePressure({
+		db,
+		env: { APP_DB: db } as Env,
+		now: new Date('2026-07-08T12:00:00.000Z'),
+	})
+	expect(issues).toEqual([
+		{
+			kind: 'entitlement',
+			stableUserId: 'user-a',
+			username: 'alice',
+			resource: 'secrets',
+			label: 'secrets',
+			current: 9,
+			limit: 10,
+			percentOfLimit: 0.9,
+		},
+		{
+			kind: 'dynamic_worker_cost',
+			stableUserId: 'user-a',
+			username: 'alice',
+			uniqueWorkerDays: 1000,
+			estimatedGrossUsd: 2,
+			thresholdUsd: 2,
+		},
+		{
+			kind: 'entitlement',
+			stableUserId: 'user-admin',
+			username: 'kentcdodds',
+			resource: 'saved_packages',
+			label: 'saved packages',
+			current: 9_001,
+			limit: 10_000,
+			percentOfLimit: 0.9001,
+		},
+		{
+			kind: 'runtime_duration',
+			stableUserId: 'user-b',
+			username: 'bob',
+			totalDurationMs: fleetRuntimeDurationAlertThresholdMs + 1,
+		},
+	])
+	expect(durationQueryBind?.slice(1, 4)).toEqual([
+		'execute',
+		'job_run',
+		'workflow_run',
+	])
+	expect(
+		entitlementMocks.readAdminEntitlementConsumption.mock.calls.map(
+			([input]) => ({
+				usageUserId: input.usageUserId,
+				plan: input.plan,
+				ladder: input.ladder,
+			}),
+		),
+	).toEqual(
+		expect.arrayContaining([
+			{ usageUserId: 'user-a', plan: 'free', ladder: 'public' },
+			{ usageUserId: 'user-b', plan: 'pro', ladder: 'public' },
+			{ usageUserId: 'user-admin', plan: 'max', ladder: 'public' },
+		]),
+	)
+})
+
+test('fleet entitlement pressure scores legacy Standard against the legacy outbound ceiling', async () => {
+	const outboundCurrent = 15_016
+	const publicStandardOutboundLimit = 5_000
+	const legacyStandardOutboundLimit = 20_000
+	entitlementMocks.readAdminEntitlementConsumption.mockImplementation(
+		async (input) => {
+			const limit =
+				input.ladder === 'legacy'
+					? legacyStandardOutboundLimit
+					: publicStandardOutboundLimit
+			const percentOfLimit = outboundCurrent / limit
+			return [
+				{
+					resource: 'outbound_fetches_per_day',
+					label: 'outbound fetches / day',
+					current: outboundCurrent,
+					limit,
+					percentOfLimit,
+					overEightyPercent: percentOfLimit > 0.8,
+				},
+			]
+		},
+	)
+	const db = createFleetDb({
+		activeUsers: [
+			{
+				stable_user_id: 'grant',
+				username: 'grant',
+				plan: 'standard',
+				stripe_plan: 'standard',
+				entitlement_ladder: 'legacy',
+				event_count: 80,
+			},
+			{
+				stable_user_id: 'pat',
+				username: 'pat',
+				plan: 'standard',
+				stripe_plan: 'standard',
+				entitlement_ladder: 'public',
+				event_count: 70,
+			},
+		],
+	})
+	const now = new Date('2026-07-08T12:00:00.000Z')
+	const env = { APP_DB: db } as Env
+	const [snapshots, issues, insights] = await Promise.all([
+		loadFleetEntitlementCrossingSnapshots({ db, env, now }),
+		detectFleetUsagePressure({ db, env, now }),
+		loadFleetUsageInsights({ db, env, now }),
+	])
+	expect(
+		entitlementMocks.readAdminEntitlementConsumption.mock.calls.map(
+			([input]) => ({
+				usageUserId: input.usageUserId,
+				plan: input.plan,
+				ladder: input.ladder,
+			}),
+		),
+	).toEqual(
+		expect.arrayContaining([
+			{ usageUserId: 'grant', plan: 'standard', ladder: 'legacy' },
+			{ usageUserId: 'pat', plan: 'standard', ladder: 'public' },
+		]),
+	)
+	expect(snapshots).toEqual([
+		expect.objectContaining({
+			stableUserId: 'grant',
+			plan: 'standard',
+			ladder: 'legacy',
+			entitlements: [
+				expect.objectContaining({
+					resource: 'outbound_fetches_per_day',
+					current: outboundCurrent,
+					limit: legacyStandardOutboundLimit,
+					overEightyPercent: false,
+				}),
+			],
+		}),
+		expect.objectContaining({
+			stableUserId: 'pat',
+			plan: 'standard',
+			ladder: 'public',
+			entitlements: [
+				expect.objectContaining({
+					resource: 'outbound_fetches_per_day',
+					current: outboundCurrent,
+					limit: publicStandardOutboundLimit,
+					overEightyPercent: true,
+				}),
+			],
+		}),
+	])
+	expect(issues).toEqual([
+		{
+			kind: 'entitlement',
+			stableUserId: 'pat',
+			username: 'pat',
+			resource: 'outbound_fetches_per_day',
+			label: 'outbound fetches / day',
+			current: outboundCurrent,
+			limit: publicStandardOutboundLimit,
+			percentOfLimit: outboundCurrent / publicStandardOutboundLimit,
+		},
+	])
+	expect(insights.entitlementPressure).toEqual([
+		{
+			stableUserId: 'pat',
+			username: 'pat',
+			plan: 'standard',
+			pressuredResources: [
+				{
+					resource: 'outbound_fetches_per_day',
+					label: 'outbound fetches / day',
+					current: outboundCurrent,
+					limit: publicStandardOutboundLimit,
+					percentOfLimit: outboundCurrent / publicStandardOutboundLimit,
+				},
+			],
+		},
+	])
+})

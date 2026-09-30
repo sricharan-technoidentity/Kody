@@ -1,0 +1,36 @@
+# 0045: Official guides load through search, not execute
+
+- **Status:** accepted
+- **Date:** 2026-09-01
+
+## Context
+
+Official guide markdown (`docs/guides/`) used to be discovered with `search` and
+then read by executing `codingGuideGet`. That second hop spins up an isolate for
+a bundled read. Search already has `{type}:{id}` entity detail for capabilities,
+packages, secrets, and integrations.
+
+Agents that follow MCP instructions and walkthroughs still paid execute cost
+every time they opened a guide. The next agent would otherwise keep teaching
+`execute` + `codingGuideGet` as the read path.
+
+## Decision
+
+Official guides are search entities. Ranked `search({ query })` can return
+`guide:{id}` hits. `search({ entity: "guide:{id}" })` returns the full bundled
+markdown. Do not add an execute-only path for reading official docs, and do not
+tell agents to execute `codingGuideGet` just to load a guide.
+
+`codingGuideGet` stays for execute-module code that needs the markdown body
+programmatically.
+
+## Consequences
+
+- MCP instructions, usage docs, and interactive transcripts teach
+  `search({ entity: "guide:{id}" })`.
+- Guide ranking lives on the guide entities, not on a kitchen-sink keyword list
+  on `codingGuideGet`.
+- Unadvertised guides stay omitted from ranked listings and remain callable by
+  exact entity id.
+- Revisit only if search entity detail cannot return the full guide body (size
+  budget or a host that cannot follow `guide:{id}` refs).

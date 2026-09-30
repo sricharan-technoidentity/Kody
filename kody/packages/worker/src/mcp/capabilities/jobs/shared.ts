@@ -1,0 +1,643 @@
+import { z } from 'zod'
+import { McpCallerError } from '#mcp/caller-error.ts'
+import { requireMcpUser } from '#mcp/capabilities/meta/require-user.ts'
+import { type CapabilityContext } from '#mcp/capabilities/types.ts'
+import {
+	isPackageOwnedJobId,
+	packageOwnedJobDeleteErrorMessage,
+} from '#worker/jobs/job-retention.ts'
+import { type JobManagerDebugState } from '#worker/jobs/manager-client.ts'
+import { logJobSchedulerEvent } from '#worker/jobs/scheduler-logging.ts'
+import {
+	type JobExecutionResult,
+	type JobSchedule,
+	type JobSourceInspection,
+	type JobUpdateInput,
+	type JobView,
+} from '#worker/jobs/types.ts'
+import { type RunRecord } from '#worker/run-records/types.ts'
+
+const onceScheduleSchema = z.object({
+	type: z.literal('once'),
+	run_at: z
+		.string()
+		.min(1)
+		.describe(
+			'UTC timestamp for the one-off run, for example 2026-04-20T18:30:00Z.',
+		),
+})
+
+const intervalScheduleSchema = z.object({
+	type: z.literal('interval'),
+	every: z
+		.string()
+		.min(1)
+		.describe(
+			'Recurring interval such as 15m, 1h, or 1d using ms, s, m, h, or d units.',
+		),
+})
+
+const cronScheduleSchema = z.object({
+	type: z.literal('cron'),
+	expression: z
+		.string()
+		.min(1)
+		.describe(
+			'Standard 5-field cron expression: minute hour day-of-month month day-of-week.',
+		),
+})
+
+export const scheduledJobScheduleSchema = z.discriminatedUnion('type', [
+	onceScheduleSchema,
+	intervalScheduleSchema,
+	cronScheduleSchema,
+])
+
+export const scheduledJobSummarySchema = scheduledJobScheduleSchema
+
+export const jobInspectionInputSchema = z.object({
+	id: z.string().min(1).describe('Job id from jobList or jobGet output.'),
+})
+
+export const jobGetInputSchema = z
+	.object({
+		id: z
+			.string()
+			.min(1)
+			.optional()
+			.describe('Job id from jobList or jobGet output.'),
+		job_id: z
+			.string()
+			.min(1)
+			.optional()
+			.describe('Alias for id, accepted for callers copying job_id outputs.'),
+		includeCode: z
+			.boolean()
+			.optional()
+			.describe(
+				'When true, include the published job source entrypoint path and code in the response.',
+			),
+	})
+	.refine((input) => input.id !== undefined || input.job_id !== undefined, {
+		message: 'Provide id or job_id.',
+		path: ['id'],
+	})
+	.refine(
+		(input) =>
+			input.id === undefined ||
+			input.job_id === undefined ||
+			input.id === input.job_id,
+		{
+			message: 'id and job_id must match when both are provided.',
+			path: ['job_id'],
+		},
+	)
+
+const nonNegativeIntegerSchema = z.number().int().min(0)
+
+const jobRunHistoryEntrySchema = z.object({
+	id: z
+		.string()
+		.optional()
+		.describe('Run record id for drill-down with runGet when available.'),
+	started_at: z.string(),
+	finished_at: z.string(),
+	status: z.enum(['success', 'error']),
+	duration_ms: nonNegativeIntegerSchema,
+	error: z.string().nullable(),
+})
+
+const runHistoryEntrySchema = z.object({
+	id: z
+		.string()
+		.optional()
+		.describe('Run record id for drill-down with runGet when available.'),
+	started_at: z.string(),
+	finished_at: z.string(),
+	status: z.enum(['success', 'error']),
+	duration_ms: nonNegativeIntegerSchema,
+	error: z.string().optional(),
+})
+
+export type JobRecentRunOutput = z.infer<typeof jobRunHistoryEntrySchema>
+
+export const jobInspectionSchema = z.object({
+	id: z.string(),
+	name: z.string(),
+	source_id: z.string(),
+	published_commit: z.string().nullable(),
+	storage_id: z.string(),
+	params: z.record(z.string(), z.unknown()).nullable(),
+	schedule: scheduledJobSummarySchema,
+	schedule_summary: z.string(),
+	timezone: z.string(),
+	enabled: z.boolean(),
+	kill_switch_enabled: z.boolean(),
+	preserved: z.boolean(),
+	expires_at: z
+		.string()
+		.nullable()
+		.describe('UTC ISO expiry timestamp, or null when the job never expires.'),
+	expired: z
+		.boolean()
+		.describe(
+			'True when expires_at is set and now is at or past that timestamp.',
+		),
+	created_at: z.string(),
+	updated_at: z.string(),
+	next_run_at: z.string(),
+	due_now: z.boolean(),
+	last_run_at: z.string().nullable(),
+	last_run_status: z.enum(['success', 'error']).nullable(),
+	last_run_error: z.string().nullable(),
+	last_duration_ms: nonNegativeIntegerSchema.nullable(),
+	run_count: nonNegativeIntegerSchema,
+	success_count: nonNegativeIntegerSchema,
+	error_count: nonNegativeIntegerSchema,
+	recent_runs: z.array(jobRunHistoryEntrySchema),
+})
+
+export const jobSourceInspectionSchema = z.object({
+	entrypoint: z
+		.string()
+		.nullable()
+		.describe(
+			'Normalized manifest-declared job entrypoint path, when resolved.',
+		),
+	code: z
+		.string()
+		.nullable()
+		.describe(
+			'Stored source code for the entrypoint, or null when unavailable.',
+		),
+	error: z
+		.string()
+		.nullable()
+		.describe('Source resolution error, or null when code was loaded.'),
+})
+
+export const jobManagerDebugSchema = z.object({
+	binding_available: z.boolean(),
+	status: z.enum(['missing_binding', 'idle', 'armed', 'out_of_sync']),
+	stored_user_id: z.string().nullable(),
+	alarm_scheduled_for: z.string().nullable(),
+	next_runnable_job_id: z.string().nullable(),
+	next_runnable_run_at: z.string().nullable(),
+	alarm_in_sync: z.boolean().nullable(),
+})
+
+export const jobListOutputSchema = z.object({
+	jobs: z.array(jobInspectionSchema),
+	alarm: jobManagerDebugSchema,
+})
+
+export const jobGetOutputSchema = z.object({
+	job: jobInspectionSchema,
+	alarm: jobManagerDebugSchema,
+	source: jobSourceInspectionSchema
+		.optional()
+		.describe('Published job source details when includeCode is true.'),
+})
+
+export const jobViewOutputSchema = z.object({
+	job_id: z.string(),
+	name: z.string(),
+	source_id: z.string(),
+	published_commit: z.string().nullable(),
+	storage_id: z.string(),
+	params: z.record(z.string(), z.unknown()).optional(),
+	schedule: scheduledJobSummarySchema,
+	schedule_summary: z.string(),
+	timezone: z.string(),
+	enabled: z.boolean(),
+	kill_switch_enabled: z.boolean(),
+	preserved: z.boolean(),
+	expires_at: z.string().nullable(),
+	expired: z.boolean(),
+	created_at: z.string(),
+	updated_at: z.string(),
+	last_run_at: z.string().optional(),
+	last_run_status: z.enum(['success', 'error']).optional(),
+	last_run_error: z.string().optional(),
+	last_duration_ms: nonNegativeIntegerSchema.optional(),
+	next_run_at: z.string(),
+	run_count: nonNegativeIntegerSchema,
+	success_count: nonNegativeIntegerSchema,
+	error_count: nonNegativeIntegerSchema,
+	run_history: z.array(runHistoryEntrySchema),
+})
+
+export const jobExecutionOutputSchema = z.discriminatedUnion('ok', [
+	z.object({
+		ok: z.literal(true),
+		result: z.unknown().optional(),
+		logs: z.array(z.string()),
+	}),
+	z.object({
+		ok: z.literal(false),
+		error: z.string(),
+		logs: z.array(z.string()),
+	}),
+])
+
+export const jobRunNowInputSchema = z.object({
+	id: z.string().min(1).describe('Existing job id to execute immediately.'),
+})
+
+export const jobDeleteInputSchema = jobInspectionInputSchema
+
+export const jobDeleteOutputSchema = z.object({
+	job_id: z.string(),
+	deleted: z.literal(true),
+})
+
+export const jobUpdateInputSchema = z
+	.object({
+		id: z
+			.string()
+			.min(1)
+			.describe('Existing job id from jobList or jobGet output.'),
+		name: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(
+				'Optional new human-readable name for the job. Rejected for package-owned jobs.',
+			),
+		params: z
+			.record(z.string(), z.unknown())
+			.nullable()
+			.optional()
+			.describe(
+				'Optional replacement params object passed as the first argument to the job entrypoint. Pass null to clear existing params.',
+			),
+		schedule: scheduledJobScheduleSchema
+			.optional()
+			.describe('Optional replacement schedule for the job.'),
+		timezone: z
+			.string()
+			.min(1)
+			.nullable()
+			.optional()
+			.describe(
+				'Optional timezone label for cron display and schedule calculation. Pass null to reset to UTC.',
+			),
+		enabled: z
+			.boolean()
+			.optional()
+			.describe('Enable or disable the job without deleting it.'),
+		kill_switch_enabled: z
+			.boolean()
+			.optional()
+			.describe(
+				'Force the job off regardless of schedule. This remains visible in jobList and jobGet for debugging.',
+			),
+		preserved: z
+			.boolean()
+			.optional()
+			.describe(
+				'When true, platform job auto-cleanup never deletes this job. Preserved jobs still count toward scheduled_jobs and storage_bytes entitlements. Forever keep is only available via Preserve — account retention preferences cannot be unbounded.',
+			),
+		expires_at: z
+			.string()
+			.min(1)
+			.nullable()
+			.optional()
+			.describe(
+				'Optional UTC ISO timestamp after which the platform stops scheduling this job and auto-disables it (enabled=false). Pass null to clear. Separate from preserved (retention).',
+			),
+		code: z
+			.unknown()
+			.optional()
+			.describe(
+				'Rejected. Job source cannot be changed via jobUpdate. Edit a package job in the package repo and publish.',
+			),
+	})
+	.superRefine((input, ctx) => {
+		if (input.code !== undefined) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['code'],
+				message: 'Job code cannot be changed via jobUpdate.',
+			})
+			return
+		}
+		if (
+			input.name === undefined &&
+			input.params === undefined &&
+			input.schedule === undefined &&
+			input.timezone === undefined &&
+			input.enabled === undefined &&
+			input.kill_switch_enabled === undefined &&
+			input.preserved === undefined &&
+			input.expires_at === undefined
+		) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: 'Provide at least one mutable field to update.',
+			})
+		}
+	})
+
+export const jobRunNowOutputSchema = z.object({
+	job: jobViewOutputSchema,
+	execution: jobExecutionOutputSchema,
+	deleted_after_run: z
+		.boolean()
+		.describe(
+			'Whether the job was deleted after this run. One-off jobs are retained for account/platform cleanup instead of being deleted immediately.',
+		),
+})
+
+export type JobGetCapabilityInput = z.infer<typeof jobGetInputSchema>
+export type JobDeleteCapabilityInput = z.infer<typeof jobDeleteInputSchema>
+export type JobRunNowCapabilityInput = z.infer<typeof jobRunNowInputSchema>
+export type JobUpdateCapabilityInput = z.infer<typeof jobUpdateInputSchema>
+
+export function resolveJobGetId(input: { id?: string; job_id?: string }) {
+	if (input.id && input.job_id && input.id !== input.job_id) {
+		throw new Error('id and job_id must match when both are provided.')
+	}
+	const jobId = input.id ?? input.job_id
+	if (!jobId) {
+		throw new Error('Job id is required.')
+	}
+	return jobId
+}
+
+function assertNeverScheduledJobSchedule(schedule: never): never {
+	throw new Error(
+		`Unhandled scheduled job schedule: ${JSON.stringify(schedule)}`,
+	)
+}
+
+export function buildJobScheduleSummaryOutput(schedule: JobView['schedule']) {
+	switch (schedule.type) {
+		case 'once':
+			return {
+				type: 'once' as const,
+				run_at: schedule.runAt,
+			}
+		case 'interval':
+			return {
+				type: 'interval' as const,
+				every: schedule.every,
+			}
+		case 'cron':
+			return {
+				type: 'cron' as const,
+				expression: schedule.expression,
+			}
+	}
+	return assertNeverScheduledJobSchedule(schedule)
+}
+
+export function toJobSchedule(
+	schedule: z.infer<typeof scheduledJobScheduleSchema>,
+): JobSchedule {
+	switch (schedule.type) {
+		case 'once':
+			return {
+				type: 'once',
+				runAt: schedule.run_at,
+			}
+		case 'interval':
+			return {
+				type: 'interval',
+				every: schedule.every,
+			}
+		case 'cron':
+			return {
+				type: 'cron',
+				expression: schedule.expression,
+			}
+	}
+	return assertNeverScheduledJobSchedule(schedule)
+}
+
+export function formatJobRecentRunFromRecord(
+	run: RunRecord,
+): JobRecentRunOutput | null {
+	if (run.status === 'running' || run.finishedAt == null) return null
+	return {
+		id: run.id,
+		started_at: run.startedAt,
+		finished_at: run.finishedAt,
+		status: run.status,
+		duration_ms: run.durationMs ?? 0,
+		error: run.errorMessage,
+	}
+}
+
+export function buildJobViewOutput(
+	job: JobView,
+	input: { recentRuns?: Array<JobRecentRunOutput>; now?: Date } = {},
+) {
+	const now = input.now ?? new Date()
+	const expiresAt = job.expiresAt ?? null
+	const expired =
+		expiresAt != null &&
+		Number.isFinite(new Date(expiresAt).valueOf()) &&
+		new Date(expiresAt).valueOf() <= now.valueOf()
+	const recentRuns = input.recentRuns ?? []
+	return {
+		job_id: job.id,
+		name: job.name,
+		source_id: job.sourceId,
+		published_commit: job.publishedCommit,
+		storage_id: job.storageId,
+		params: job.params,
+		schedule: buildJobScheduleSummaryOutput(job.schedule),
+		schedule_summary: job.scheduleSummary,
+		timezone: job.timezone,
+		enabled: job.enabled,
+		kill_switch_enabled: job.killSwitchEnabled,
+		preserved: job.preserved,
+		expires_at: expiresAt,
+		expired,
+		created_at: job.createdAt,
+		updated_at: job.updatedAt,
+		last_run_at: job.lastRunAt,
+		last_run_status: job.lastRunStatus,
+		last_run_error: job.lastRunError,
+		last_duration_ms: job.lastDurationMs,
+		next_run_at: job.nextRunAt,
+		run_count: job.runCount,
+		success_count: job.successCount,
+		error_count: job.errorCount,
+		run_history: recentRuns.map((entry) => ({
+			id: entry.id,
+			started_at: entry.started_at,
+			finished_at: entry.finished_at,
+			status: entry.status,
+			duration_ms: entry.duration_ms,
+			...(entry.error ? { error: entry.error } : {}),
+		})),
+	}
+}
+
+export function buildJobDeleteOutput(input: { id: string; deleted: true }) {
+	return {
+		job_id: input.id,
+		deleted: input.deleted,
+	}
+}
+
+export function buildJobSourceInspectionOutput(source: JobSourceInspection) {
+	return {
+		entrypoint: source.entrypoint,
+		code: source.code,
+		error: source.error,
+	}
+}
+
+export function buildJobInspectionOutput(
+	job: JobView,
+	input: { now?: Date; recentRuns?: Array<JobRecentRunOutput> } = {},
+) {
+	const now = input.now ?? new Date()
+	const nextRunAtValue = new Date(job.nextRunAt).valueOf()
+	const expiresAt = job.expiresAt ?? null
+	const expired =
+		expiresAt != null &&
+		Number.isFinite(new Date(expiresAt).valueOf()) &&
+		new Date(expiresAt).valueOf() <= now.valueOf()
+	const dueNow =
+		job.enabled &&
+		job.killSwitchEnabled === false &&
+		!expired &&
+		Number.isFinite(nextRunAtValue) &&
+		nextRunAtValue <= now.valueOf()
+
+	return {
+		id: job.id,
+		name: job.name,
+		source_id: job.sourceId,
+		published_commit: job.publishedCommit,
+		storage_id: job.storageId,
+		params: job.params ?? null,
+		schedule: buildJobScheduleSummaryOutput(job.schedule),
+		schedule_summary: job.scheduleSummary,
+		timezone: job.timezone,
+		enabled: job.enabled,
+		kill_switch_enabled: job.killSwitchEnabled,
+		preserved: job.preserved,
+		expires_at: expiresAt,
+		expired,
+		created_at: job.createdAt,
+		updated_at: job.updatedAt,
+		next_run_at: job.nextRunAt,
+		due_now: dueNow,
+		last_run_at: job.lastRunAt ?? null,
+		last_run_status: job.lastRunStatus ?? null,
+		last_run_error: job.lastRunError ?? null,
+		last_duration_ms: job.lastDurationMs ?? null,
+		run_count: job.runCount,
+		success_count: job.successCount,
+		error_count: job.errorCount,
+		recent_runs: input.recentRuns ?? [],
+	}
+}
+
+export function buildJobManagerDebugOutput(state: JobManagerDebugState) {
+	return {
+		binding_available: state.bindingAvailable,
+		status: state.status,
+		stored_user_id: state.storedUserId,
+		alarm_scheduled_for: state.alarmScheduledFor,
+		next_runnable_job_id: state.nextRunnableJobId,
+		next_runnable_run_at: state.nextRunnableRunAt,
+		alarm_in_sync: state.alarmInSync,
+	}
+}
+
+export function buildJobRunNowOutput(input: {
+	job: JobView
+	execution: JobExecutionResult
+	deletedAfterRun: boolean
+}) {
+	return {
+		job: buildJobViewOutput(input.job),
+		execution: input.execution,
+		deleted_after_run: input.deletedAfterRun,
+	}
+}
+
+export function resolveJobUpdateBody(
+	input: JobUpdateCapabilityInput,
+): JobUpdateInput {
+	return {
+		id: input.id,
+		name: input.name,
+		params: input.params,
+		schedule:
+			input.schedule === undefined ? undefined : toJobSchedule(input.schedule),
+		timezone: input.timezone,
+		enabled: input.enabled,
+		killSwitchEnabled: input.kill_switch_enabled,
+		preserved: input.preserved,
+		...(input.expires_at !== undefined ? { expiresAt: input.expires_at } : {}),
+	}
+}
+
+export async function runJobNowFromArgs(input: {
+	env: Env
+	callerContext: CapabilityContext['callerContext']
+	args: JobRunNowCapabilityInput
+}) {
+	const user = requireMcpUser(input.callerContext)
+	const { runJobNowViaManager } = await import('#worker/jobs/manager-client.ts')
+	const result = await runJobNowViaManager({
+		env: input.env,
+		userId: user.userId,
+		jobId: input.args.id,
+		callerContext: input.callerContext,
+	})
+	return buildJobRunNowOutput(result)
+}
+
+export async function updateJobFromArgs(input: {
+	env: Env
+	callerContext: CapabilityContext['callerContext']
+	args: JobUpdateCapabilityInput
+}) {
+	const user = requireMcpUser(input.callerContext)
+	const { updateJob } = await import('#worker/jobs/service.ts')
+	const updated = await updateJob({
+		env: input.env,
+		callerContext: input.callerContext,
+		body: resolveJobUpdateBody(input.args),
+	})
+	logJobSchedulerEvent({
+		event: 'job_updated',
+		userId: user.userId,
+		jobId: updated.id,
+		scheduleType: updated.schedule.type,
+		nextRunAt: updated.nextRunAt,
+	})
+	return buildJobViewOutput(updated)
+}
+
+export async function deleteJobFromArgs(input: {
+	env: Env
+	callerContext: CapabilityContext['callerContext']
+	args: JobDeleteCapabilityInput
+}) {
+	const user = requireMcpUser(input.callerContext)
+	if (isPackageOwnedJobId(input.args.id)) {
+		throw new McpCallerError(packageOwnedJobDeleteErrorMessage)
+	}
+	const { deleteJob } = await import('#worker/jobs/service.ts')
+	const result = await deleteJob({
+		env: input.env,
+		userId: user.userId,
+		jobId: input.args.id,
+	})
+	logJobSchedulerEvent({
+		event: 'job_deleted',
+		userId: user.userId,
+		jobId: result.id,
+		reason: 'mcp_capability',
+	})
+	return buildJobDeleteOutput(result)
+}

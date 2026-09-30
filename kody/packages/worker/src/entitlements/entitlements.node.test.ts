@@ -1,0 +1,1861 @@
+import { expect, test } from 'vitest'
+import { createStableUserIdFromEmail } from '#worker/user-id.ts'
+import {
+	ComputeOverageLimitError,
+	EntitlementLimitError,
+	buildEntitlementLimitMessage,
+	buildEntitlementUpgradeHint,
+	buildJobIntervalFloorMessage,
+	jobIntervalFloorUpgradeHint,
+	jobIntervalFloorErrorCode,
+	parseComputeOverageLimitMessage,
+	parseEntitlementLimitMessage,
+	parseJobIntervalFloorMessage,
+} from './errors.ts'
+import { buildEntitlementHowToReduce } from './resource-visibility.ts'
+import {
+	legacyPlanLimits,
+	parseStripePlanName,
+	planLimits,
+} from '#universal/plans.ts'
+import {
+	assertWithinEntitlement,
+	assertWithinStorageBytesEntitlement,
+	consumeDailyEntitlement,
+	estimateEntitlementStorageEntryByteDelta,
+	findCachedUserAccountByStableUserId,
+	getCachedUserEntitlement,
+	getCachedUserPlan,
+	getUserEntitlement,
+	getUserPlan,
+	isPayingForCreditsPro,
+	readCurrentEntitlementResourceUsage,
+	refundDailyEntitlement,
+	resolveUserPlanFromRow,
+} from './service.ts'
+import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
+import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import { userMeterRpc } from './user-meter-client.ts'
+
+function createEntitlementsTestDb(
+	input: {
+		users?: Array<{
+			email: string
+			plan: string | null
+			stripe_plan?: string | null
+			entitlement_ladder?: 'public' | 'legacy' | null
+			second_agent_standard_gift_expires_at?: string | null
+			referral_standard_credit_expires_at?: string | null
+			stable_user_id: string
+		}>
+		counts?: Partial<
+			Record<
+				| 'saved_packages'
+				| 'jobs'
+				| 'repo_sessions'
+				| 'published_bundle_artifacts'
+				| 'secret_entries'
+				| 'value_entries'
+				| 'mcp_memories'
+				| 'saved_packages'
+				| 'entity_sources'
+				| 'email_messages'
+				| 'email_attachments',
+				number
+			>
+		>
+	} = {},
+) {
+	const users = input.users ?? []
+	const counts = input.counts ?? {}
+	const queries: Array<{ sql: string; params: Array<unknown> }> = []
+
+	function countFor(query: string) {
+		const tableNames = [
+			'email_attachments',
+			'email_messages',
+			'value_entries',
+			'secret_entries',
+			'mcp_memories',
+			'saved_packages',
+			'entity_sources',
+			'jobs',
+			'repo_sessions',
+			'published_bundle_artifacts',
+		] as const
+		for (const table of tableNames) {
+			if (query.includes(`FROM ${table}`)) {
+				return counts[table] ?? 0
+			}
+		}
+		return null
+	}
+
+	const db = {
+		prepare(query: string) {
+			return {
+				bind(...params: Array<unknown>) {
+					queries.push({ sql: query, params })
+					return {
+						async first<T>() {
+							if (query.includes('FROM credit_wallets')) {
+								return null as T | null
+							}
+							if (
+								query.includes(
+									'SELECT plan, stripe_plan, entitlement_ladder, stripe_credits_eligible, admin_credits_eligible, second_agent_standard_gift_expires_at, referral_standard_credit_expires_at FROM users',
+								) ||
+								query.includes(
+									'SELECT plan, stripe_plan, entitlement_ladder FROM users',
+								) ||
+								query.includes('SELECT plan, stripe_plan FROM users') ||
+								query.includes('SELECT plan FROM users')
+							) {
+								const isPairLookup = query.includes('email = ?')
+								if (isPairLookup) {
+									const email = params[0]
+									const stableUserId = params[1]
+									// Pair match is required: omitted bind params or
+									// email-only fixtures must not resolve a plan.
+									if (
+										typeof email !== 'string' ||
+										typeof stableUserId !== 'string'
+									) {
+										return null as T | null
+									}
+									const user = users.find(
+										(row) =>
+											row.email === email &&
+											row.stable_user_id === stableUserId,
+									)
+									return (
+										user
+											? {
+													plan: user.plan,
+													stripe_plan: user.stripe_plan ?? null,
+													entitlement_ladder:
+														user.entitlement_ladder ?? 'public',
+													second_agent_standard_gift_expires_at:
+														user.second_agent_standard_gift_expires_at ?? null,
+													referral_standard_credit_expires_at:
+														user.referral_standard_credit_expires_at ?? null,
+												}
+											: null
+									) as T | null
+								}
+								const stableUserId = params[0]
+								if (typeof stableUserId !== 'string') {
+									return null as T | null
+								}
+								const user = users.find(
+									(row) => row.stable_user_id === stableUserId,
+								)
+								return (
+									user
+										? {
+												plan: user.plan,
+												stripe_plan: user.stripe_plan ?? null,
+												entitlement_ladder: user.entitlement_ladder ?? 'public',
+												second_agent_standard_gift_expires_at:
+													user.second_agent_standard_gift_expires_at ?? null,
+												referral_standard_credit_expires_at:
+													user.referral_standard_credit_expires_at ?? null,
+											}
+										: null
+								) as T | null
+							}
+							if (query.includes('SELECT email, plan, email_verified_at')) {
+								const stableUserId = params[0]
+								const user = users.find(
+									(row) => row.stable_user_id === stableUserId,
+								)
+								return (
+									user
+										? {
+												email: user.email,
+												plan: user.plan,
+												email_verified_at: null,
+											}
+										: null
+								) as T | null
+							}
+							if (query.includes('SELECT 1 AS present FROM users')) {
+								const userId = String(params[0])
+								const user = users.find((row) => row.stable_user_id === userId)
+								return (user ? { present: 1 } : null) as T | null
+							}
+							const count = countFor(query)
+							if (count !== null) {
+								return { count } as T
+							}
+							throw new Error(`Unsupported first query: ${query}`)
+						},
+						async run() {
+							throw new Error(`Unsupported run query: ${query}`)
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database
+
+	return { db, queries }
+}
+
+async function readMeterDailyCount(input: {
+	env: ReturnType<typeof createInMemoryUserMeterEnv>['env']
+	userId: string
+	resource:
+		| 'email_sends_per_day'
+		| 'email_receives_per_day'
+		| 'execute_calls_per_day'
+		| 'outbound_fetches_per_day'
+		| 'job_runs_per_day'
+		| 'automation_invocations_per_day'
+	now: Date
+}) {
+	const result = await userMeterRpc({
+		env: input.env,
+		userId: input.userId,
+	}).read({
+		resource: input.resource,
+		day: utcDayKey(input.now),
+		now: input.now.toISOString(),
+	})
+	return result.outcome === 'ready' ? result.count : 0
+}
+
+const plannedEmail = 'planned@example.com'
+
+test('admin credit eligibility counts only on an effective Pro and never enables buying credits', () => {
+	const row = {
+		plan: 'pro',
+		stripe_plan: null,
+		entitlement_ladder: 'public',
+		stripe_credits_eligible: 0,
+		admin_credits_eligible: 1,
+		second_agent_standard_gift_expires_at: null,
+		referral_standard_credit_expires_at: null,
+	}
+	expect(resolveUserPlanFromRow(row).creditsEligible).toBe(true)
+	expect(isPayingForCreditsPro(row)).toBe(false)
+	expect(
+		resolveUserPlanFromRow({ ...row, admin_credits_eligible: 0 })
+			.creditsEligible,
+	).toBe(false)
+	expect(resolveUserPlanFromRow({ ...row, plan: 'max' }).creditsEligible).toBe(
+		false,
+	)
+	expect(resolveUserPlanFromRow({ ...row, plan: 'free' }).creditsEligible).toBe(
+		false,
+	)
+})
+
+test('entitlement limit messages always identify a known plan name', () => {
+	const details = {
+		code: 'entitlement_limit_exceeded' as const,
+		resource: 'concurrent_workflows' as const,
+		plan: 'max' as const,
+		limit: 100,
+		current: 100,
+		upgradeHint: buildEntitlementUpgradeHint('concurrent_workflows', 'max'),
+	}
+	const message = buildEntitlementLimitMessage(details)
+	expect(parseEntitlementLimitMessage(message)).toEqual(details)
+	expect(details.upgradeHint).not.toMatch(/upgrade/i)
+
+	const weeklyDetails = {
+		code: 'entitlement_limit_exceeded' as const,
+		resource: 'execute_calls_per_day' as const,
+		plan: 'free' as const,
+		limit: 400,
+		current: 400,
+		window: 'week' as const,
+		upgradeHint: buildEntitlementUpgradeHint('execute_calls_per_day', 'free'),
+	}
+	expect(
+		parseEntitlementLimitMessage(buildEntitlementLimitMessage(weeklyDetails)),
+	).toEqual(weeklyDetails)
+	expect(weeklyDetails.upgradeHint).toMatch(
+		/upgrade your plan at \/account\/billing/,
+	)
+	expect(
+		parseEntitlementLimitMessage(
+			'Plan limit reached: this deployment allows at most 100 concurrent workflows and you currently have 100. hint',
+		),
+	).toBeNull()
+	expect(
+		parseEntitlementLimitMessage(
+			'Plan limit reached: your "enterprise" plan allows at most 100 concurrent workflows and you currently have 100. hint',
+		),
+	).toBeNull()
+})
+
+test('rate/compute include hints: $0 Pro adds credits to keep going, Free upgrades', () => {
+	const emptyPro = buildEntitlementUpgradeHint(
+		'execute_calls_per_day',
+		'pro',
+		'empty',
+	)
+	expect(emptyPro).toBe(
+		'Remove or finish existing execute calls per day you no longer need, or add credits at /account/usage#credits to keep going past your include.',
+	)
+	expect(buildEntitlementHowToReduce('job_runs_per_day', 'pro', 'empty')).toBe(
+		'Run fewer jobs today, space them out, or add credits at /account/usage#credits to keep going past your include.',
+	)
+	// Free stays hard-capped: the next step is Pro, not credits.
+	expect(buildEntitlementUpgradeHint('execute_calls_per_day', 'free')).toBe(
+		'Remove or finish existing execute calls per day you no longer need, or upgrade your plan at /account/billing.',
+	)
+	expect(buildEntitlementHowToReduce('job_runs_per_day', 'free')).toBe(
+		'Run fewer jobs today, space them out, or upgrade your plan.',
+	)
+	// Retired and gift/referral Pro have no wallet: Pro with credits runs past
+	// its include.
+	for (const plan of ['standard', 'pro'] as const) {
+		expect(buildEntitlementUpgradeHint('execute_calls_per_day', plan)).toMatch(
+			/Pro with prepaid credits at \/account\/usage#credits runs past its include\.$/,
+		)
+		expect(
+			buildEntitlementUpgradeHint('execute_calls_per_day', plan),
+		).not.toMatch(/\/account\/billing/)
+	}
+	// Funded (already at the credits ceiling), or operator max: reduce-only.
+	for (const [plan, wallet] of [
+		['pro', 'funded'],
+		['max', 'none'],
+	] as const) {
+		const hint = buildEntitlementUpgradeHint(
+			'execute_calls_per_day',
+			plan,
+			wallet,
+		)
+		expect(hint).not.toMatch(/credits|upgrade/i)
+		expect(
+			buildEntitlementHowToReduce('execute_calls_per_day', plan, wallet),
+		).not.toMatch(/credits|upgrade/i)
+		const denial = new EntitlementLimitError({
+			resource: 'execute_calls_per_day',
+			plan,
+			limit: 400,
+			current: 400,
+			window: 'week',
+			upgradeHint: hint,
+		})
+		expect(denial.message).toMatch(/^Plan limit reached:/)
+	}
+	// Stock is on the Pro subscription (not a credits unlock); only Free
+	// gets a billing upgrade offer.
+	expect(buildEntitlementUpgradeHint('saved_packages', 'free')).toMatch(
+		/\/account\/billing/,
+	)
+	for (const plan of ['standard', 'pro', 'max'] as const) {
+		expect(buildEntitlementUpgradeHint('saved_packages', plan)).not.toMatch(
+			/upgrade|credits/i,
+		)
+	}
+	expect(
+		buildEntitlementUpgradeHint('saved_packages', 'pro', 'empty'),
+	).not.toMatch(/credits/i)
+	expect(jobIntervalFloorUpgradeHint).toBe('Space this job out.')
+})
+
+test('job interval floor messages parse back to known plan and interval', () => {
+	const details = {
+		code: jobIntervalFloorErrorCode,
+		plan: 'free' as const,
+		minIntervalMs: planLimits.free.minJobIntervalMs,
+		upgradeHint: 'Space this job out, or upgrade at /account/billing.',
+	}
+	expect(
+		parseJobIntervalFloorMessage(buildJobIntervalFloorMessage(details)),
+	).toEqual(details)
+	expect(
+		parseJobIntervalFloorMessage(
+			'Your "enterprise" plan cannot run jobs more often than every 15 minutes. hint',
+		),
+	).toBeNull()
+	expect(
+		parseJobIntervalFloorMessage(
+			'Your "free" plan cannot run jobs more often than every often. hint',
+		),
+	).toBeNull()
+	expect(
+		parseJobIntervalFloorMessage(
+			buildJobIntervalFloorMessage({
+				...details,
+				upgradeHint: '',
+			}),
+		),
+	).toEqual({
+		...details,
+		upgradeHint: '',
+	})
+	expect(
+		parseJobIntervalFloorMessage(
+			buildJobIntervalFloorMessage({
+				...details,
+				upgradeHint: 'Space this job out. Then upgrade at /account/billing.',
+			}),
+		),
+	).toEqual({
+		...details,
+		upgradeHint: 'Space this job out. Then upgrade at /account/billing.',
+	})
+})
+
+test('storage byte entry estimates support net-positive upsert deltas', () => {
+	const existing = {
+		key: 'workspace',
+		value: {
+			description: 'Workspace slug',
+			value: 'kent-main-site',
+		},
+	}
+	expect(
+		estimateEntitlementStorageEntryByteDelta({
+			next: existing,
+			existing,
+		}),
+	).toBe(0)
+	expect(
+		estimateEntitlementStorageEntryByteDelta({
+			next: {
+				key: 'workspace',
+				value: {
+					description: 'Workspace slug',
+					value: 'kent',
+				},
+			},
+			existing,
+		}),
+	).toBe(0)
+	const growing = {
+		key: 'workspace',
+		value: {
+			description: 'Workspace slug',
+			value: 'kent-main-site-production',
+		},
+	}
+	expect(
+		estimateEntitlementStorageEntryByteDelta({
+			next: growing,
+			existing,
+		}),
+	).toBeGreaterThan(0)
+})
+
+test('getUserPlan resolves plans, defaults unresolved contexts to free, and rejects invalid stored plans', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const unknownPlanEmail = 'unknown-plan@example.com'
+	const unknownPlanUserId = await createStableUserIdFromEmail(unknownPlanEmail)
+	const { db, queries } = createEntitlementsTestDb({
+		users: [
+			{ email: plannedEmail, plan: 'pro', stable_user_id: userId },
+			{
+				email: unknownPlanEmail,
+				plan: 'enterprise-2099',
+				stable_user_id: unknownPlanUserId,
+			},
+		],
+	})
+	expect(await getUserPlan(db, { userId: 'user-1', email: null })).toBe('free')
+	expect(await getUserPlan(db, { userId: 'user-1', email: undefined })).toBe(
+		'free',
+	)
+	expect(await getUserPlan(db, { userId: 'user-1', email: plannedEmail })).toBe(
+		'free',
+	)
+	expect(queries).toEqual([])
+
+	expect(await getUserPlan(db, { userId, email: plannedEmail })).toBe('pro')
+	expect(
+		await getUserPlan(db, { userId, email: ' Planned@Example.com ' }),
+	).toBe('pro')
+	expect(queries.at(-1)?.sql).toContain('email = ? AND stable_user_id = ?')
+	expect(queries.at(-1)?.params).toEqual([plannedEmail, userId])
+
+	// Background contexts reverse-resolve valid stable ids when their persisted
+	// email is blank or missing.
+	for (const email of [null, undefined, '   ']) {
+		expect(await getUserPlan(db, { userId, email })).toBe('pro')
+		expect(queries.at(-1)?.sql).toContain('WHERE stable_user_id = ?')
+		expect(queries.at(-1)?.params).toEqual([userId])
+	}
+
+	// Mismatched email/stable-id pairs fail closed without warning.
+	expect(
+		await getUserPlan(db, {
+			userId,
+			email: unknownPlanEmail,
+		}),
+	).toBe('free')
+
+	await expect(
+		getUserPlan(db, {
+			userId: unknownPlanUserId,
+			email: unknownPlanEmail,
+		}),
+	).rejects.toThrow('Stored plan is not a registered plan name.')
+})
+
+test('getCachedUserPlan caches per db binding and never caches failures', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const users = [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }]
+	const { db, queries } = createEntitlementsTestDb({ users })
+
+	expect(await getCachedUserPlan(db, { userId, email: plannedEmail })).toBe(
+		'pro',
+	)
+	expect(await getCachedUserPlan(db, { userId, email: plannedEmail })).toBe(
+		'pro',
+	)
+	const planQueries = () =>
+		queries.filter((query) =>
+			query.sql.includes('email = ? AND stable_user_id = ?'),
+		)
+	expect(planQueries()).toHaveLength(1)
+
+	// A plan change is visible to the uncached lookup immediately and to the
+	// cached lookup only after the TTL: quota checks tolerate that staleness.
+	users[0]!.plan = 'free'
+	expect(await getUserPlan(db, { userId, email: plannedEmail })).toBe('free')
+	expect(await getCachedUserPlan(db, { userId, email: plannedEmail })).toBe(
+		'pro',
+	)
+
+	// Another db binding (fresh test database) never shares cache entries.
+	const second = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'free', stable_user_id: userId }],
+	})
+	expect(
+		await getCachedUserPlan(second.db, { userId, email: plannedEmail }),
+	).toBe('free')
+
+	// Blank-email background contexts use their own cache entry and resolve by
+	// stable id. Invalid ids still short-circuit without touching D1.
+	expect(await getCachedUserPlan(db, { userId, email: null })).toBe('free')
+	expect(
+		await getCachedUserPlan(db, { userId: 'user-1', email: plannedEmail }),
+	).toBe('free')
+
+	// Failures are not pinned for the TTL: the next call retries D1.
+	let firstCall = true
+	const flaky = {
+		prepare() {
+			return {
+				bind() {
+					return {
+						async first() {
+							if (firstCall) {
+								firstCall = false
+								throw new Error('D1 blip')
+							}
+							return { plan: 'pro', stripe_plan: null }
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database
+	await expect(
+		getCachedUserPlan(flaky, { userId, email: plannedEmail }),
+	).rejects.toThrow('D1 blip')
+	expect(await getCachedUserPlan(flaky, { userId, email: plannedEmail })).toBe(
+		'pro',
+	)
+})
+
+test('findCachedUserAccountByStableUserId caches the account reverse-resolution per db', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const { db, queries } = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+	const accountQueries = () =>
+		queries.filter((query) =>
+			query.sql.includes('SELECT email, plan, email_verified_at'),
+		)
+	expect(await findCachedUserAccountByStableUserId(db, userId)).toEqual({
+		email: plannedEmail,
+		plan: 'pro',
+		emailVerified: false,
+	})
+	expect(await findCachedUserAccountByStableUserId(db, userId)).toEqual({
+		email: plannedEmail,
+		plan: 'pro',
+		emailVerified: false,
+	})
+	expect(accountQueries()).toHaveLength(1)
+	expect(await findCachedUserAccountByStableUserId(db, '  ')).toBeNull()
+})
+
+test('assertWithinEntitlement passes under the limit, throws at it, and enforces finite max ordinary limits', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const freeLimit = planLimits.free.maxScheduledJobs
+	const maxLimit = planLimits.max.maxScheduledJobs
+
+	const missingReader = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'free', stable_user_id: userId }],
+		counts: { jobs: 0 },
+	})
+	await expect(
+		assertWithinEntitlement({
+			db: missingReader.db,
+			userId,
+			email: plannedEmail,
+			resource: 'scheduled_jobs',
+		}),
+	).rejects.toThrow(
+		'scheduled_jobs usage must be read from jobsData (pass getCurrent or use readCurrentEntitlementResourceUsage).',
+	)
+	expect(
+		missingReader.queries.some((query) => query.sql.includes('FROM jobs')),
+	).toBe(false)
+
+	const maxUnder = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'max', stable_user_id: userId }],
+		counts: { jobs: maxLimit - 1 },
+	})
+	await assertWithinEntitlement({
+		db: maxUnder.db,
+		userId,
+		email: plannedEmail,
+		resource: 'scheduled_jobs',
+		getCurrent: async () => maxLimit - 1,
+	})
+
+	const maxAt = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'max', stable_user_id: userId }],
+		counts: { jobs: maxLimit },
+	})
+	const maxDenied = await assertWithinEntitlement({
+		db: maxAt.db,
+		userId,
+		email: plannedEmail,
+		resource: 'scheduled_jobs',
+		getCurrent: async () => maxLimit,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(maxDenied instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError for max plan.')
+	}
+	expect(maxDenied.details).toMatchObject({
+		plan: 'max',
+		limit: maxLimit,
+		current: maxLimit,
+	})
+
+	const under = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'free', stable_user_id: userId }],
+		counts: { jobs: freeLimit - 1 },
+	})
+	await assertWithinEntitlement({
+		db: under.db,
+		userId,
+		email: plannedEmail,
+		resource: 'scheduled_jobs',
+		getCurrent: async () => freeLimit - 1,
+	})
+
+	const at = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'free', stable_user_id: userId }],
+		counts: { jobs: freeLimit },
+	})
+	const error = await assertWithinEntitlement({
+		db: at.db,
+		userId,
+		email: plannedEmail,
+		resource: 'scheduled_jobs',
+		getCurrent: async () => freeLimit,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(error instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	expect(error.details).toEqual({
+		code: 'entitlement_limit_exceeded',
+		resource: 'scheduled_jobs',
+		plan: 'free',
+		limit: freeLimit,
+		current: freeLimit,
+		upgradeHint: error.details.upgradeHint,
+	})
+	expect(error.message).toBe(buildEntitlementLimitMessage(error.details))
+})
+
+test('assertWithinEntitlement reuses cached plan within TTL while still enforcing usage', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const freeLimit = planLimits.free.maxScheduledJobs
+	const counts = { jobs: freeLimit - 1 }
+	const { db, queries } = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'free', stable_user_id: userId }],
+		counts,
+	})
+	let usageReads = 0
+	const getCurrent = async () => {
+		usageReads += 1
+		return counts.jobs
+	}
+	const planQueries = () =>
+		queries.filter((query) =>
+			query.sql.includes('email = ? AND stable_user_id = ?'),
+		)
+
+	await assertWithinEntitlement({
+		db,
+		userId,
+		email: plannedEmail,
+		resource: 'scheduled_jobs',
+		getCurrent,
+	})
+	await assertWithinEntitlement({
+		db,
+		userId,
+		email: plannedEmail,
+		resource: 'scheduled_jobs',
+		getCurrent,
+	})
+	expect(planQueries()).toHaveLength(1)
+	expect(usageReads).toBe(2)
+
+	counts.jobs = freeLimit
+	const denied = await assertWithinEntitlement({
+		db,
+		userId,
+		email: plannedEmail,
+		resource: 'scheduled_jobs',
+		getCurrent,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(denied instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	expect(denied.details).toMatchObject({
+		plan: 'free',
+		limit: freeLimit,
+		current: freeLimit,
+	})
+	expect(planQueries()).toHaveLength(1)
+	expect(usageReads).toBe(3)
+})
+
+test('assertWithinEntitlement enforces concurrent workflow limits for unresolved and max-plan callers', async () => {
+	const freeLimit = planLimits.free.maxConcurrentWorkflows
+	const { db } = createEntitlementsTestDb()
+	// concurrent_workflows occupancy is RunLog-backed; create path passes
+	// getCurrent from reserveWorkflowProjectionSlot.
+	const freeDenial = await assertWithinEntitlement({
+		db,
+		userId: 'user-1',
+		email: null,
+		resource: 'concurrent_workflows',
+		getCurrent: async () => freeLimit,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(freeDenial instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	expect(freeDenial.details).toMatchObject({
+		plan: 'free',
+		limit: freeLimit,
+		current: freeLimit,
+	})
+
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const maxLimit = planLimits.max.maxConcurrentWorkflows
+	const underMax = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'max', stable_user_id: userId }],
+	})
+	await assertWithinEntitlement({
+		db: underMax.db,
+		userId,
+		email: '',
+		resource: 'concurrent_workflows',
+		getCurrent: async () => freeLimit,
+	})
+
+	const atMax = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'max', stable_user_id: userId }],
+	})
+	const maxDenial = await assertWithinEntitlement({
+		db: atMax.db,
+		userId,
+		email: null,
+		resource: 'concurrent_workflows',
+		getCurrent: async () => maxLimit,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(maxDenial instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError at the max ceiling.')
+	}
+	expect(maxDenial.details).toMatchObject({
+		plan: 'max',
+		limit: maxLimit,
+		current: maxLimit,
+	})
+})
+
+test('plan user daily entitlements increment, enforce at limit, and reset on a new UTC day', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const now = new Date('2026-07-05T15:00:00.000Z')
+	const { db } = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'free', stable_user_id: userId }],
+	})
+	const { env } = createInMemoryUserMeterEnv()
+	expect(utcDayKey(now)).toBe('2026-07-05')
+
+	const limit = planLimits.free.maxEmailSendsPerDay
+	if (limit === null) throw new Error('Expected a numeric email send limit.')
+	for (let index = 0; index < limit; index += 1) {
+		await consumeDailyEntitlement({
+			db,
+			env,
+			userId,
+			email: plannedEmail,
+			resource: 'email_sends_per_day',
+			now,
+		})
+	}
+	expect(
+		await readMeterDailyCount({
+			env,
+			userId,
+			resource: 'email_sends_per_day',
+			now,
+		}),
+	).toBe(limit)
+	await expect(
+		assertWithinEntitlement({
+			db,
+			userId,
+			email: plannedEmail,
+			resource: 'email_sends_per_day',
+			now,
+		}),
+	).rejects.toThrow(/must be read from UserMeter/)
+
+	const denied = await consumeDailyEntitlement({
+		db,
+		env,
+		userId,
+		email: plannedEmail,
+		resource: 'email_sends_per_day',
+		now,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(denied instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	expect(denied.details).toMatchObject({
+		code: 'entitlement_limit_exceeded',
+		resource: 'email_sends_per_day',
+		plan: 'free',
+		limit,
+		current: limit,
+	})
+
+	const nextDay = new Date('2026-07-06T00:00:01.000Z')
+	await consumeDailyEntitlement({
+		db,
+		env,
+		userId,
+		email: plannedEmail,
+		resource: 'email_sends_per_day',
+		now: nextDay,
+	})
+	expect(
+		await readMeterDailyCount({
+			env,
+			userId,
+			resource: 'email_sends_per_day',
+			now: nextDay,
+		}),
+	).toBe(1)
+	expect(
+		await readMeterDailyCount({
+			env,
+			userId,
+			resource: 'email_sends_per_day',
+			now,
+		}),
+	).toBe(limit)
+})
+
+test('public execute and outbound enforce daily and weekly windows; legacy and max stay daily-only', async () => {
+	const freeEmail = 'weekly-free@example.com'
+	const legacyEmail = 'weekly-legacy@example.com'
+	const maxEmail = 'weekly-max@example.com'
+	const freeUserId = await createStableUserIdFromEmail(freeEmail)
+	const legacyUserId = await createStableUserIdFromEmail(legacyEmail)
+	const maxUserId = await createStableUserIdFromEmail(maxEmail)
+	const { db } = createEntitlementsTestDb({
+		users: [
+			{ email: freeEmail, plan: 'free', stable_user_id: freeUserId },
+			{
+				email: legacyEmail,
+				plan: 'free',
+				stripe_plan: 'standard',
+				entitlement_ladder: 'legacy',
+				stable_user_id: legacyUserId,
+			},
+			{ email: maxEmail, plan: 'max', stable_user_id: maxUserId },
+		],
+	})
+	const meter = createInMemoryUserMeterEnv()
+	const wednesday = new Date('2026-07-08T15:00:00.000Z')
+	const monday = new Date('2026-07-06T15:00:00.000Z')
+	const tuesday = new Date('2026-07-07T15:00:00.000Z')
+
+	await meter.seed({
+		userId: freeUserId,
+		resource: 'execute_calls_per_day',
+		day: utcDayKey(monday),
+		count: 150,
+	})
+	await meter.seed({
+		userId: freeUserId,
+		resource: 'execute_calls_per_day',
+		day: utcDayKey(tuesday),
+		count: 150,
+	})
+	await meter.seed({
+		userId: freeUserId,
+		resource: 'execute_calls_per_day',
+		day: utcDayKey(wednesday),
+		count: 99,
+	})
+	await consumeDailyEntitlement({
+		db,
+		env: meter.env,
+		userId: freeUserId,
+		email: freeEmail,
+		resource: 'execute_calls_per_day',
+		now: wednesday,
+	})
+	expect(
+		await readMeterDailyCount({
+			env: meter.env,
+			userId: freeUserId,
+			resource: 'execute_calls_per_day',
+			now: wednesday,
+		}),
+	).toBe(100)
+	const weeklyDenied = await consumeDailyEntitlement({
+		db,
+		env: meter.env,
+		userId: freeUserId,
+		email: freeEmail,
+		resource: 'execute_calls_per_day',
+		now: wednesday,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(weeklyDenied instanceof EntitlementLimitError)) {
+		throw new Error('Expected weekly EntitlementLimitError.')
+	}
+	expect(weeklyDenied.details).toMatchObject({
+		resource: 'execute_calls_per_day',
+		plan: 'free',
+		limit: 400,
+		current: 400,
+		window: 'week',
+	})
+	expect(weeklyDenied.message).toContain('execute calls this week')
+
+	const dailyUserId = await createStableUserIdFromEmail(
+		'daily-first@example.com',
+	)
+	const { db: dailyDb } = createEntitlementsTestDb({
+		users: [
+			{
+				email: 'daily-first@example.com',
+				plan: 'free',
+				stable_user_id: dailyUserId,
+			},
+		],
+	})
+	await meter.seed({
+		userId: dailyUserId,
+		resource: 'outbound_fetches_per_day',
+		day: utcDayKey(wednesday),
+		count: 1_000,
+	})
+	const dailyDenied = await consumeDailyEntitlement({
+		db: dailyDb,
+		env: meter.env,
+		userId: dailyUserId,
+		email: 'daily-first@example.com',
+		resource: 'outbound_fetches_per_day',
+		now: wednesday,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(dailyDenied instanceof EntitlementLimitError)) {
+		throw new Error('Expected daily EntitlementLimitError.')
+	}
+	expect(dailyDenied.details).toMatchObject({
+		resource: 'outbound_fetches_per_day',
+		plan: 'free',
+		limit: 1_000,
+		current: 1_000,
+	})
+	expect(dailyDenied.details.window).toBeUndefined()
+
+	await meter.seed({
+		userId: legacyUserId,
+		resource: 'execute_calls_per_day',
+		day: utcDayKey(monday),
+		count: 400,
+	})
+	await consumeDailyEntitlement({
+		db,
+		env: meter.env,
+		userId: legacyUserId,
+		email: legacyEmail,
+		resource: 'execute_calls_per_day',
+		now: wednesday,
+	})
+	expect(
+		await readMeterDailyCount({
+			env: meter.env,
+			userId: legacyUserId,
+			resource: 'execute_calls_per_day',
+			now: wednesday,
+		}),
+	).toBe(1)
+
+	await meter.seed({
+		userId: maxUserId,
+		resource: 'outbound_fetches_per_day',
+		day: utcDayKey(monday),
+		count: 10_000,
+	})
+	await consumeDailyEntitlement({
+		db,
+		env: meter.env,
+		userId: maxUserId,
+		email: maxEmail,
+		resource: 'outbound_fetches_per_day',
+		now: wednesday,
+	})
+	expect(
+		await readMeterDailyCount({
+			env: meter.env,
+			userId: maxUserId,
+			resource: 'outbound_fetches_per_day',
+			now: wednesday,
+		}),
+	).toBe(1)
+})
+
+test('refundDailyEntitlement decrements the user/day counter and floors at zero', async () => {
+	const { db } = createEntitlementsTestDb()
+	const { env } = createInMemoryUserMeterEnv()
+	const now = new Date('2026-07-05T15:00:00.000Z')
+	for (let index = 0; index < 2; index += 1) {
+		await consumeDailyEntitlement({
+			db,
+			env,
+			userId: 'user-1',
+			email: null,
+			resource: 'email_receives_per_day',
+			now,
+		})
+	}
+	for (let index = 0; index < 3; index += 1) {
+		await consumeDailyEntitlement({
+			db,
+			env,
+			userId: 'user-2',
+			email: null,
+			resource: 'email_receives_per_day',
+			now,
+		})
+	}
+	await refundDailyEntitlement({
+		env,
+		userId: 'user-1',
+		resource: 'email_receives_per_day',
+		now,
+	})
+	expect(
+		await readMeterDailyCount({
+			env,
+			userId: 'user-1',
+			resource: 'email_receives_per_day',
+			now,
+		}),
+	).toBe(1)
+	expect(
+		await readMeterDailyCount({
+			env,
+			userId: 'user-2',
+			resource: 'email_receives_per_day',
+			now,
+		}),
+	).toBe(3)
+
+	await refundDailyEntitlement({
+		env,
+		userId: 'user-1',
+		resource: 'email_receives_per_day',
+		now,
+	})
+	await refundDailyEntitlement({
+		env,
+		userId: 'user-1',
+		resource: 'email_receives_per_day',
+		now,
+	})
+	expect(
+		await readMeterDailyCount({
+			env,
+			userId: 'user-1',
+			resource: 'email_receives_per_day',
+			now,
+		}),
+	).toBe(0)
+})
+
+test('missing-email lookups fail closed and honor free email caps', async () => {
+	const { db } = createEntitlementsTestDb()
+	const { env } = createInMemoryUserMeterEnv()
+	const sendLimit = planLimits.free.maxEmailSendsPerDay
+	const now = new Date('2026-07-05T15:00:00.000Z')
+	for (let index = 0; index < sendLimit; index += 1) {
+		await consumeDailyEntitlement({
+			db,
+			env,
+			userId: 'user-1',
+			email: null,
+			resource: 'email_sends_per_day',
+			now,
+		})
+	}
+	expect(
+		await readMeterDailyCount({
+			env,
+			userId: 'user-1',
+			resource: 'email_sends_per_day',
+			now,
+		}),
+	).toBe(sendLimit)
+	await expect(
+		consumeDailyEntitlement({
+			db,
+			env,
+			userId: 'user-1',
+			email: null,
+			resource: 'email_sends_per_day',
+			now,
+		}),
+	).rejects.toBeInstanceOf(EntitlementLimitError)
+
+	const receiveLimit = planLimits.free.maxEmailReceivesPerDay
+	for (let index = 0; index < receiveLimit; index += 1) {
+		await consumeDailyEntitlement({
+			db,
+			env,
+			userId: 'user-1',
+			email: null,
+			resource: 'email_receives_per_day',
+			now,
+		})
+	}
+	expect(
+		await readMeterDailyCount({
+			env,
+			userId: 'user-1',
+			resource: 'email_receives_per_day',
+			now,
+		}),
+	).toBe(receiveLimit)
+
+	const denied = await consumeDailyEntitlement({
+		db,
+		env,
+		userId: 'user-1',
+		email: null,
+		resource: 'email_receives_per_day',
+		now,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(denied instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	expect(denied.details).toMatchObject({
+		code: 'entitlement_limit_exceeded',
+		resource: 'email_receives_per_day',
+		plan: 'free',
+		limit: receiveLimit,
+		current: receiveLimit,
+	})
+})
+
+test('requested units and getCurrent overrides are honored', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const { db } = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'standard', stable_user_id: userId }],
+	})
+	const maxBytes = planLimits.standard.maxEmailMessageBytes
+	if (maxBytes === null) throw new Error('Expected a numeric size cap.')
+
+	const oversized = await assertWithinEntitlement({
+		db,
+		userId,
+		email: plannedEmail,
+		resource: 'email_message_bytes',
+		requested: 0,
+		getCurrent: async () => maxBytes + 1,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(oversized instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	expect(oversized.details).toMatchObject({
+		resource: 'email_message_bytes',
+		limit: maxBytes,
+	})
+
+	await assertWithinEntitlement({
+		db,
+		userId,
+		email: plannedEmail,
+		resource: 'email_message_bytes',
+		requested: 0,
+		getCurrent: async () => maxBytes,
+	})
+	await expect(
+		assertWithinEntitlement({
+			db,
+			userId,
+			email: plannedEmail,
+			resource: 'email_message_bytes',
+		}),
+	).rejects.toThrow('pass getCurrent')
+
+	const savedPackageLimit = planLimits.standard.maxSavedPackages
+	const nearSavedPackageLimit = savedPackageLimit - 3
+	const overSavedPackages = await assertWithinEntitlement({
+		db,
+		userId,
+		email: plannedEmail,
+		resource: 'saved_packages',
+		requested: 5,
+		getCurrent: async () => nearSavedPackageLimit,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(overSavedPackages instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	expect(overSavedPackages.details).toMatchObject({
+		resource: 'saved_packages',
+		limit: savedPackageLimit,
+		current: nearSavedPackageLimit,
+	})
+	await assertWithinEntitlement({
+		db,
+		userId,
+		email: plannedEmail,
+		resource: 'saved_packages',
+		requested: 3,
+		getCurrent: async () => nearSavedPackageLimit,
+	})
+})
+
+test('storage bytes enforce for planned users and enforce finite max storage caps', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const proLimit = planLimits.pro.maxStorageBytes
+	const maxLimit = planLimits.max.maxStorageBytes
+
+	// Max plan: already at limit, reserve of 1 should be denied.
+	const { env: maxEnv } = createInMemoryUserMeterEnv()
+	await maxEnv.USER_METER.get(
+		maxEnv.USER_METER.idFromName(userId),
+	).initializeStorageBytes({
+		bytes: maxLimit,
+		updatedAt: new Date().toISOString(),
+	})
+	const maxAt = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'max', stable_user_id: userId }],
+	})
+	const maxDenied = await assertWithinStorageBytesEntitlement({
+		db: maxAt.db,
+		userId,
+		email: plannedEmail,
+		requested: 1,
+		env: maxEnv,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(maxDenied instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError for max storage.')
+	}
+	expect(maxDenied.details).toMatchObject({
+		code: 'entitlement_limit_exceeded',
+		resource: 'storage_bytes',
+		plan: 'max',
+		limit: maxLimit,
+		current: maxLimit,
+	})
+
+	// Pro plan: at limit.
+	const { env: proEnv } = createInMemoryUserMeterEnv()
+	await proEnv.USER_METER.get(
+		proEnv.USER_METER.idFromName(userId),
+	).initializeStorageBytes({
+		bytes: proLimit,
+		updatedAt: new Date().toISOString(),
+	})
+	const atLimit = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+	const denied = await assertWithinStorageBytesEntitlement({
+		db: atLimit.db,
+		userId,
+		email: plannedEmail,
+		requested: 1,
+		env: proEnv,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(denied instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	expect(denied.details).toMatchObject({
+		code: 'entitlement_limit_exceeded',
+		resource: 'storage_bytes',
+		plan: 'pro',
+		limit: proLimit,
+		current: proLimit,
+	})
+
+	// Under limit: reserve succeeds without any D1 write.
+	const { env: underEnv } = createInMemoryUserMeterEnv()
+	await underEnv.USER_METER.get(
+		underEnv.USER_METER.idFromName(userId),
+	).initializeStorageBytes({
+		bytes: proLimit - 1,
+		updatedAt: new Date().toISOString(),
+	})
+	const underLimit = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+	await assertWithinStorageBytesEntitlement({
+		db: underLimit.db,
+		userId,
+		email: plannedEmail,
+		requested: 1,
+		env: underEnv,
+	})
+	// Does not do a payload table SUM scan (no getCurrent path).
+	expect(underLimit.queries.some(({ sql }) => sql.includes('SUM('))).toBe(false)
+})
+
+test('storage byte reserve zero-initializes a cold UserMeter, then retries', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const { env } = createInMemoryUserMeterEnv()
+	// UserMeter has no storage bytes row yet (needs_bootstrap).
+	const coldDb = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+
+	await assertWithinStorageBytesEntitlement({
+		db: coldDb.db,
+		userId,
+		email: plannedEmail,
+		requested: 5,
+		env,
+	})
+
+	// Cold bootstrap zero-initializes; the reserve lands on top: 0 + 5.
+	const meter = userMeterRpc({ env, userId })
+	const result = await meter.readStorageBytes()
+	expect(result).toMatchObject({ outcome: 'ready', bytes: 5 })
+})
+
+test('storage byte reserve denies an over-limit request after cold zero bootstrap', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const proLimit = planLimits.pro.maxStorageBytes
+	const { env } = createInMemoryUserMeterEnv()
+	const db = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+	const denied = await assertWithinStorageBytesEntitlement({
+		db: db.db,
+		userId,
+		email: plannedEmail,
+		requested: proLimit + 1,
+		env,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(denied instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError after cold bootstrap.')
+	}
+	expect(denied.details).toMatchObject({
+		resource: 'storage_bytes',
+		plan: 'pro',
+		limit: proLimit,
+		current: 0,
+	})
+})
+
+test('storage byte reserve handles missing user (synthetic context) with free-plan semantics', async () => {
+	// A userId with no D1 row: synthetic context (e.g. test fixture, non-account).
+	// env.USER_METER is present but the user has no D1 row, so the function must
+	// apply free-plan allow/deny without attempting to create a DO entry.
+	const syntheticUserId = 'a'.repeat(64)
+	const { env } = createInMemoryUserMeterEnv()
+	const freeLimit = planLimits.free.maxStorageBytes
+
+	// No users row in D1 — the users-row probe returns null.
+	const emptyDb = createEntitlementsTestDb({ users: [] })
+
+	// Under free limit: should pass without touching DO.
+	await assertWithinStorageBytesEntitlement({
+		db: emptyDb.db,
+		userId: syntheticUserId,
+		email: null,
+		requested: 1,
+		env,
+	})
+	// No storage bytes row should be created in DO for a non-existent account.
+	const meter = userMeterRpc({ env, userId: syntheticUserId })
+	expect(await meter.readStorageBytes()).toEqual({ outcome: 'needs_bootstrap' })
+
+	// At free limit: should be denied.
+	const { env: env2 } = createInMemoryUserMeterEnv()
+	const emptyDb2 = createEntitlementsTestDb({ users: [] })
+	const denied = await assertWithinStorageBytesEntitlement({
+		db: emptyDb2.db,
+		userId: syntheticUserId,
+		email: null,
+		requested: freeLimit + 1,
+		env: env2,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(denied instanceof EntitlementLimitError)) {
+		throw new Error(
+			'Expected EntitlementLimitError for synthetic over-limit context.',
+		)
+	}
+	expect(denied.details).toMatchObject({
+		resource: 'storage_bytes',
+		plan: 'free',
+	})
+})
+
+test('storage byte reserve without env throws immediately on DO-reserve path', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const { db } = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+	await expect(
+		assertWithinStorageBytesEntitlement({
+			db,
+			userId,
+			email: plannedEmail,
+			requested: 1,
+			// env intentionally omitted
+		}),
+	).rejects.toThrow(
+		'assertWithinStorageBytesEntitlement requires env.USER_METER',
+	)
+})
+
+test('storage byte reserve concurrent bootstraps converge: second needs_bootstrap after initialize succeeds', async () => {
+	// Both callers see needs_bootstrap; the first initializes, the second retries
+	// and succeeds (initializeStorageBytes is INSERT OR IGNORE — idempotent).
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const { env } = createInMemoryUserMeterEnv()
+	const db = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+
+	// Fire two concurrent reserves, both starting before any DO row exists.
+	await Promise.all([
+		assertWithinStorageBytesEntitlement({
+			db: db.db,
+			userId,
+			email: plannedEmail,
+			requested: 5,
+			env,
+		}),
+		assertWithinStorageBytesEntitlement({
+			db: db.db,
+			userId,
+			email: plannedEmail,
+			requested: 5,
+			env,
+		}),
+	])
+	// Both reservations succeeded on the zero-initialized meter: 0 + 5 + 5.
+	const result = await userMeterRpc({ env, userId }).readStorageBytes()
+	expect(result).toMatchObject({ outcome: 'ready', bytes: 10 })
+})
+
+test('readCurrentEntitlementResourceUsage for storage_bytes reads from UserMeter with cold bootstrap', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const { env } = createInMemoryUserMeterEnv()
+	const now = new Date()
+
+	// Cold: no DO row. The read zero-initializes the meter.
+	const coldDb = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+	const coldBytes = await readCurrentEntitlementResourceUsage({
+		db: coldDb.db,
+		env,
+		userId,
+		resource: 'storage_bytes',
+		now,
+	})
+	expect(coldBytes).toBe(0)
+
+	// Warm: DO already has 750.
+	await env.USER_METER.get(env.USER_METER.idFromName(userId)).setStorageBytes({
+		bytes: 750,
+		updatedAt: now.toISOString(),
+	})
+	const warmDb = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'pro', stable_user_id: userId }],
+	})
+	const warmBytes = await readCurrentEntitlementResourceUsage({
+		db: warmDb.db,
+		env,
+		userId,
+		resource: 'storage_bytes',
+		now,
+	})
+	expect(warmBytes).toBe(750)
+})
+
+test('storage usage reads do not materialize UserMeter state for missing users', async () => {
+	const userId = await createStableUserIdFromEmail('missing@example.com')
+	const { env } = createInMemoryUserMeterEnv()
+	const db = createEntitlementsTestDb({ users: [] })
+
+	await expect(
+		readCurrentEntitlementResourceUsage({
+			db: db.db,
+			env,
+			userId,
+			resource: 'storage_bytes',
+			now: new Date(),
+		}),
+	).resolves.toBe(0)
+
+	await expect(
+		userMeterRpc({ env, userId }).readStorageBytes(),
+	).resolves.toEqual({ outcome: 'needs_bootstrap' })
+})
+
+test('entitlement enforcement stops when a stored plan violates the schema contract', async () => {
+	for (const [index, plan] of [
+		null,
+		'enterprise-2099',
+		'unlimited',
+	].entries()) {
+		const email = `invalid-stored-plan-${index}@example.com`
+		const userId = await createStableUserIdFromEmail(email)
+		const { db, queries } = createEntitlementsTestDb({
+			users: [{ email, plan, stable_user_id: userId }],
+			counts: { jobs: planLimits.max.maxScheduledJobs },
+		})
+		await expect(
+			assertWithinEntitlement({
+				db,
+				userId,
+				email,
+				resource: 'scheduled_jobs',
+			}),
+		).rejects.toThrow('Stored plan is not a registered plan name.')
+		expect(queries.some((query) => query.sql.includes('FROM jobs'))).toBe(false)
+	}
+})
+
+test('getUserPlan resolves effective plan from manual plan and stripe_plan', async () => {
+	const freePlusStandardEmail = 'manual-free-stripe-standard@example.com'
+	const standardPlusProEmail = 'manual-standard-stripe-pro@example.com'
+	const unlimitedPlusProEmail = 'manual-unlimited-stripe-pro@example.com'
+	const giftEmail = 'second-agent-gift@example.com'
+	const freePlusStandardUserId = await createStableUserIdFromEmail(
+		freePlusStandardEmail,
+	)
+	const standardPlusProUserId =
+		await createStableUserIdFromEmail(standardPlusProEmail)
+	const unlimitedPlusProUserId = await createStableUserIdFromEmail(
+		unlimitedPlusProEmail,
+	)
+	const giftUserId = await createStableUserIdFromEmail(giftEmail)
+	const { db } = createEntitlementsTestDb({
+		users: [
+			{
+				email: freePlusStandardEmail,
+				plan: 'free',
+				stripe_plan: 'standard',
+				stable_user_id: freePlusStandardUserId,
+			},
+			{
+				email: standardPlusProEmail,
+				plan: 'standard',
+				stripe_plan: 'pro',
+				stable_user_id: standardPlusProUserId,
+			},
+			{
+				email: unlimitedPlusProEmail,
+				plan: 'max',
+				stripe_plan: 'pro',
+				stable_user_id: unlimitedPlusProUserId,
+			},
+			{
+				email: giftEmail,
+				plan: 'free',
+				stripe_plan: null,
+				second_agent_standard_gift_expires_at: '2099-01-01T00:00:00.000Z',
+				stable_user_id: giftUserId,
+			},
+		],
+	})
+
+	expect(
+		await getUserPlan(db, {
+			userId: freePlusStandardUserId,
+			email: freePlusStandardEmail,
+		}),
+	).toBe('standard')
+	expect(
+		await getUserPlan(db, {
+			userId: standardPlusProUserId,
+			email: standardPlusProEmail,
+		}),
+	).toBe('pro')
+	expect(
+		await getUserPlan(db, {
+			userId: unlimitedPlusProUserId,
+			email: unlimitedPlusProEmail,
+		}),
+	).toBe('max')
+	expect(
+		await getUserPlan(db, {
+			userId: giftUserId,
+			email: giftEmail,
+		}),
+	).toBe('pro')
+
+	expect(parseStripePlanName('standard')).toBe('standard')
+	expect(parseStripePlanName('pro')).toBe('pro')
+	expect(parseStripePlanName('partner')).toBeNull()
+	expect(parseStripePlanName('max')).toBeNull()
+})
+
+test('continuous legacy Standard keeps old execute ceiling; new and resubscribed get the public cap', async () => {
+	const legacyEmail = 'legacy-standard@example.com'
+	const publicEmail = 'public-standard@example.com'
+	const resubEmail = 'resub-standard@example.com'
+	const legacyUserId = await createStableUserIdFromEmail(legacyEmail)
+	const publicUserId = await createStableUserIdFromEmail(publicEmail)
+	const resubUserId = await createStableUserIdFromEmail(resubEmail)
+	const { db } = createEntitlementsTestDb({
+		users: [
+			{
+				email: legacyEmail,
+				plan: 'free',
+				stripe_plan: 'standard',
+				entitlement_ladder: 'legacy',
+				stable_user_id: legacyUserId,
+			},
+			{
+				email: publicEmail,
+				plan: 'free',
+				stripe_plan: 'standard',
+				entitlement_ladder: 'public',
+				stable_user_id: publicUserId,
+			},
+			{
+				email: resubEmail,
+				plan: 'free',
+				stripe_plan: 'standard',
+				entitlement_ladder: 'public',
+				stable_user_id: resubUserId,
+			},
+		],
+	})
+
+	expect(
+		await getUserEntitlement(db, { userId: legacyUserId, email: legacyEmail }),
+	).toEqual({ plan: 'standard', ladder: 'legacy', creditWallet: 'none' })
+	expect(
+		await getCachedUserEntitlement(db, {
+			userId: publicUserId,
+			email: publicEmail,
+		}),
+	).toEqual({ plan: 'standard', ladder: 'public', creditWallet: 'none' })
+
+	const legacyLimit = legacyPlanLimits.standard.maxExecuteCallsPerDay
+	const publicLimit = planLimits.standard.maxExecuteCallsPerDay
+	await expect(
+		assertWithinEntitlement({
+			db,
+			userId: legacyUserId,
+			email: legacyEmail,
+			resource: 'execute_calls_per_day',
+			requested: 0,
+			getCurrent: async () => publicLimit,
+		}),
+	).resolves.toBeUndefined()
+	await expect(
+		assertWithinEntitlement({
+			db,
+			userId: publicUserId,
+			email: publicEmail,
+			resource: 'execute_calls_per_day',
+			requested: 1,
+			getCurrent: async () => publicLimit,
+		}),
+	).rejects.toMatchObject({
+		details: {
+			code: 'entitlement_limit_exceeded',
+			plan: 'standard',
+			limit: publicLimit,
+			current: publicLimit,
+		},
+	})
+	await expect(
+		assertWithinEntitlement({
+			db,
+			userId: resubUserId,
+			email: resubEmail,
+			resource: 'execute_calls_per_day',
+			requested: 1,
+			getCurrent: async () => publicLimit,
+		}),
+	).rejects.toMatchObject({
+		details: { limit: publicLimit },
+	})
+	await expect(
+		assertWithinEntitlement({
+			db,
+			userId: legacyUserId,
+			email: legacyEmail,
+			resource: 'execute_calls_per_day',
+			requested: 1,
+			getCurrent: async () => legacyLimit,
+		}),
+	).rejects.toMatchObject({
+		details: { limit: legacyLimit },
+	})
+})
+
+test('legacy Pro and manual Pro grants keep pre-cut scheduled-job ceilings', async () => {
+	const stripeProEmail = 'legacy-stripe-pro@example.com'
+	const manualProEmail = 'legacy-manual-pro@example.com'
+	const stripeProUserId = await createStableUserIdFromEmail(stripeProEmail)
+	const manualProUserId = await createStableUserIdFromEmail(manualProEmail)
+	const { db } = createEntitlementsTestDb({
+		users: [
+			{
+				email: stripeProEmail,
+				plan: 'free',
+				stripe_plan: 'pro',
+				entitlement_ladder: 'legacy',
+				stable_user_id: stripeProUserId,
+			},
+			{
+				email: manualProEmail,
+				plan: 'pro',
+				stripe_plan: null,
+				entitlement_ladder: 'legacy',
+				stable_user_id: manualProUserId,
+			},
+		],
+	})
+	const legacyLimit = legacyPlanLimits.pro.maxScheduledJobs
+	const publicLimit = planLimits.pro.maxScheduledJobs
+	expect(legacyLimit).toBeGreaterThan(publicLimit)
+
+	for (const [userId, email] of [
+		[stripeProUserId, stripeProEmail],
+		[manualProUserId, manualProEmail],
+	] as const) {
+		await expect(
+			assertWithinEntitlement({
+				db,
+				userId,
+				email,
+				resource: 'scheduled_jobs',
+				requested: 1,
+				getCurrent: async () => publicLimit,
+			}),
+		).resolves.toBeUndefined()
+		await expect(
+			assertWithinEntitlement({
+				db,
+				userId,
+				email,
+				resource: 'scheduled_jobs',
+				requested: 1,
+				getCurrent: async () => legacyLimit,
+			}),
+		).rejects.toMatchObject({
+			details: { plan: 'pro', limit: legacyLimit },
+		})
+	}
+})
+
+test('past-include stop message leads with credits, reads in customer units, and round-trips', () => {
+	const workerCompute = new ComputeOverageLimitError({
+		resource: 'unique_worker_days',
+		plan: 'pro',
+		limit: 350,
+		current: 412,
+		creditsStatus: 'add_credits',
+	})
+	expect(workerCompute.message).toMatch(
+		/^Worker compute include used up: your "pro" plan includes 350 worker-compute days this UTC month and you have used 412\. With no credits left, usage past the include stops\. Add credits at \/account\/usage#credits to keep going; usage past the include is charged at \$0\.004 per worker-compute day\. Keep package code stable/,
+	)
+	expect(parseComputeOverageLimitMessage(workerCompute.message)).toEqual(
+		workerCompute.details,
+	)
+
+	const rowsRead = new ComputeOverageLimitError({
+		resource: 'durable_object_rows_read',
+		plan: 'pro',
+		limit: 5_000_000_000,
+		current: 5_000_000_001,
+		creditsStatus: 'add_credits',
+	})
+	expect(rowsRead.message).toContain(
+		'Rows read include used up: your "pro" plan includes 5,000,000,000 rows read this UTC month and you have used 5,000,000,001.',
+	)
+	expect(parseComputeOverageLimitMessage(rowsRead.message)).toEqual(
+		rowsRead.details,
+	)
+	expect(parseComputeOverageLimitMessage('Plan limit reached: nope')).toBeNull()
+})

@@ -1,0 +1,1430 @@
+import { expect, test, vi } from 'vitest'
+import {
+	consoleError,
+	consoleWarn,
+	silenceExpectedConsoleErrors,
+} from '#worker/test-support/console-spies.ts'
+import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
+import { planLimits } from '#universal/plans.ts'
+import { createStableUserIdFromEmail } from '#worker/user-id.ts'
+import {
+	createInMemoryUserMeterEnv,
+	createPermissiveAccountWriteLeaseDbHooks,
+} from '#worker/test-support/user-meter.ts'
+
+const mockModule = vi.hoisted(() => ({
+	buildPackageSearchProjection: vi.fn(),
+	buildSavedPackageEmbedText: vi.fn(),
+	buildPublishedPackageArtifacts: vi.fn(),
+	refreshPackageRetrieverManifestCache: vi.fn(),
+	removePackageRetrieverManifestCacheEntries: vi.fn(),
+	deleteJobRow: vi.fn(),
+	deleteEntitySource: vi.fn(),
+	deleteSavedPackage: vi.fn(),
+	deleteSavedPackageVector: vi.fn(),
+	getSavedPackageById: vi.fn(),
+	insertSavedPackage: vi.fn(),
+	listJobRowsByUserId: vi.fn(),
+	loadPackageManifestBySourceId: vi.fn(),
+	loadPackageSourceBySourceId: vi.fn(),
+	loadPackageSourceFromFiles: vi.fn(),
+	syncJobManagerAlarm: vi.fn(),
+	syncPackageJobsForPackage: vi.fn(),
+	updateSavedPackage: vi.fn(),
+	upsertSavedPackageVector: vi.fn(),
+	scheduleSavedPackageSearchIndexUpsert: vi.fn(),
+	cleanupArtifactReposForPackage: vi.fn(),
+	deleteAllPackageScopedSecrets: vi.fn(),
+	removeAllSecretApprovalsForPackage: vi.fn(),
+	deleteAllAppScopedValues: vi.fn(),
+	clearStorage: vi.fn(async () => ({ ok: true as const })),
+	storageRunnerRpc: vi.fn(),
+	getCommunityListingByOwnerAndPackage: vi.fn(),
+	deleteCommunityForksForPackage: vi.fn(),
+	unpublishCommunityListing: vi.fn(),
+	invalidateCommunityPublicCache: vi.fn(),
+}))
+
+vi.mock('./manifest.ts', () => ({
+	buildPackageSearchProjection: (...args: Array<unknown>) =>
+		mockModule.buildPackageSearchProjection(...args),
+}))
+
+vi.mock('./embed.ts', () => ({
+	buildSavedPackageEmbedText: (...args: Array<unknown>) =>
+		mockModule.buildSavedPackageEmbedText(...args),
+}))
+
+vi.mock('#worker/package-runtime/published-bundle-artifacts.ts', () => ({
+	rebuildPublishedPackageArtifacts: (...args: Array<unknown>) =>
+		mockModule.buildPublishedPackageArtifacts(...args),
+}))
+
+vi.mock('#worker/package-runtime/module-graph.ts', () => ({
+	buildKodyAppBundle: vi.fn(),
+	buildKodyModuleBundle: vi.fn(),
+}))
+
+vi.mock('#worker/storage-runner.ts', async (importOriginal) => {
+	const actual = (await importOriginal()) as Record<string, unknown>
+	return {
+		...actual,
+		storageRunnerRpc: (...args: Array<unknown>) => {
+			mockModule.storageRunnerRpc(...args)
+			return {
+				clearStorage: (...clearArgs: Array<unknown>) =>
+					mockModule.clearStorage(...clearArgs),
+			}
+		},
+	}
+})
+
+vi.mock('#worker/package-config-cleanup.ts', () => ({
+	deleteAllAppScopedValues: (...args: Array<unknown>) =>
+		mockModule.deleteAllAppScopedValues(...args),
+	deleteAllPackageScopedSecrets: (...args: Array<unknown>) =>
+		mockModule.deleteAllPackageScopedSecrets(...args),
+	removeAllSecretApprovalsForPackage: (...args: Array<unknown>) =>
+		mockModule.removeAllSecretApprovalsForPackage(...args),
+}))
+
+vi.mock('#worker/package-retrievers/manifest-cache.ts', () => ({
+	refreshPackageRetrieverManifestCache: (...args: Array<unknown>) =>
+		mockModule.refreshPackageRetrieverManifestCache(...args),
+	removePackageRetrieverManifestCacheEntries: (...args: Array<unknown>) =>
+		mockModule.removePackageRetrieverManifestCacheEntries(...args),
+}))
+
+vi.mock('./repo.ts', () => ({
+	deleteSavedPackage: (...args: Array<unknown>) =>
+		mockModule.deleteSavedPackage(...args),
+	getSavedPackageById: (...args: Array<unknown>) =>
+		mockModule.getSavedPackageById(...args),
+	insertSavedPackage: (...args: Array<unknown>) =>
+		mockModule.insertSavedPackage(...args),
+	updateSavedPackage: (...args: Array<unknown>) =>
+		mockModule.updateSavedPackage(...args),
+}))
+
+vi.mock('./source.ts', () => ({
+	loadPackageManifestBySourceId: (...args: Array<unknown>) =>
+		mockModule.loadPackageManifestBySourceId(...args),
+	loadPackageSourceBySourceId: (...args: Array<unknown>) =>
+		mockModule.loadPackageSourceBySourceId(...args),
+	loadPackageSourceFromFiles: (...args: Array<unknown>) =>
+		mockModule.loadPackageSourceFromFiles(...args),
+}))
+
+vi.mock('./vectorize.ts', () => ({
+	deleteSavedPackageVector: (...args: Array<unknown>) =>
+		mockModule.deleteSavedPackageVector(...args),
+	upsertSavedPackageVector: (...args: Array<unknown>) =>
+		mockModule.upsertSavedPackageVector(...args),
+}))
+
+vi.mock('./search-index-debt.ts', () => ({
+	scheduleSavedPackageSearchIndexUpsert: (...args: Array<unknown>) =>
+		mockModule.scheduleSavedPackageSearchIndexUpsert(...args),
+}))
+
+vi.mock('#worker/jobs/jobs-data.ts', () => ({
+	jobsData: () => ({
+		deleteJob: (...args: Array<unknown>) => mockModule.deleteJobRow(...args),
+		listJobsForUser: (...args: Array<unknown>) =>
+			mockModule.listJobRowsByUserId(...args),
+	}),
+}))
+
+vi.mock('#worker/jobs/manager-client.ts', () => ({
+	syncJobManagerAlarm: (...args: Array<unknown>) =>
+		mockModule.syncJobManagerAlarm(...args),
+}))
+
+vi.mock('#worker/jobs/service.ts', () => ({
+	syncPackageJobsForPackage: (...args: Array<unknown>) =>
+		mockModule.syncPackageJobsForPackage(...args),
+}))
+
+vi.mock('#worker/repo/artifact-repo-cleanup.ts', () => ({
+	cleanupArtifactReposForPackage: (...args: Array<unknown>) =>
+		mockModule.cleanupArtifactReposForPackage(...args),
+}))
+
+vi.mock('#worker/repo/entity-sources.ts', () => ({
+	deleteEntitySource: (...args: Array<unknown>) =>
+		mockModule.deleteEntitySource(...args),
+}))
+
+vi.mock('#worker/community/repo.ts', () => ({
+	getCommunityListingByOwnerAndPackage: (...args: Array<unknown>) =>
+		mockModule.getCommunityListingByOwnerAndPackage(...args),
+	deleteCommunityForksForPackage: (...args: Array<unknown>) =>
+		mockModule.deleteCommunityForksForPackage(...args),
+}))
+
+vi.mock('#app/data-cache.ts', () => ({
+	invalidateCommunityPublicCache: (...args: Array<unknown>) =>
+		mockModule.invalidateCommunityPublicCache(...args),
+}))
+
+vi.mock('#worker/community/service.ts', () => ({
+	unpublishCommunityListing: (...args: Array<unknown>) =>
+		mockModule.unpublishCommunityListing(...args),
+}))
+
+const {
+	deleteSavedPackageProjection,
+	filterPackageOwnedStorageIdsFromInventory,
+	refreshSavedPackageProjection,
+} = await import('./service.ts')
+
+function createEnv(
+	userId = 'user-1',
+	options?: {
+		storageBuckets?: Array<{ userId: string; storageId: string }>
+		meter?: ReturnType<typeof createInMemoryUserMeterEnv>
+		users?: Array<{ email: string; plan: string | null }>
+		savedPackageCount?: number
+	},
+) {
+	// Projection refresh asserts finite storage bytes (default/missing plan →
+	// `max`). Stub DB answers storage SUM queries with 0 so unplanned unit
+	// fixtures keep focusing on job/artifact side effects.
+	const meter = options?.meter ?? createInMemoryUserMeterEnv()
+	return {
+		APP_DB: createEntitlementsDatabase({
+			users: options?.users ?? [],
+			userId,
+			storageBuckets: options?.storageBuckets,
+			savedPackageCount: options?.savedPackageCount,
+		}),
+		USER_METER: meter.env.USER_METER,
+	} as Env
+}
+
+function createProjection() {
+	return {
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Shade automation package',
+		tags: ['home', 'shades'],
+		searchText: 'shade automation',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+	}
+}
+
+function setupDefaultMocks() {
+	mockModule.buildPackageSearchProjection.mockReturnValue(createProjection())
+	mockModule.buildSavedPackageEmbedText.mockReturnValue('saved package embed')
+	mockModule.upsertSavedPackageVector.mockResolvedValue(undefined)
+	mockModule.scheduleSavedPackageSearchIndexUpsert.mockResolvedValue(undefined)
+	mockModule.buildPublishedPackageArtifacts.mockResolvedValue(undefined)
+	mockModule.syncPackageJobsForPackage.mockResolvedValue(false)
+	mockModule.syncJobManagerAlarm.mockResolvedValue(undefined)
+	mockModule.refreshPackageRetrieverManifestCache.mockResolvedValue(undefined)
+	mockModule.removePackageRetrieverManifestCacheEntries.mockResolvedValue(
+		undefined,
+	)
+	mockModule.updateSavedPackage.mockResolvedValue(undefined)
+	mockModule.insertSavedPackage.mockResolvedValue(undefined)
+	mockModule.deleteEntitySource.mockResolvedValue(undefined)
+	mockModule.deleteSavedPackage.mockResolvedValue(undefined)
+	mockModule.deleteSavedPackageVector.mockResolvedValue(undefined)
+	mockModule.deleteJobRow.mockResolvedValue(undefined)
+	mockModule.cleanupArtifactReposForPackage.mockResolvedValue(0)
+	mockModule.deleteAllAppScopedValues.mockResolvedValue(undefined)
+	mockModule.storageRunnerRpc.mockClear()
+	mockModule.clearStorage.mockReset()
+	mockModule.clearStorage.mockResolvedValue({ ok: true as const })
+	mockModule.listJobRowsByUserId.mockResolvedValue([])
+	mockModule.loadPackageSourceFromFiles.mockReset()
+	mockModule.getCommunityListingByOwnerAndPackage.mockReset()
+	mockModule.getCommunityListingByOwnerAndPackage.mockResolvedValue(null)
+	mockModule.unpublishCommunityListing.mockReset()
+	mockModule.unpublishCommunityListing.mockResolvedValue(undefined)
+	mockModule.deleteCommunityForksForPackage.mockReset()
+	mockModule.deleteCommunityForksForPackage.mockResolvedValue(0)
+	mockModule.invalidateCommunityPublicCache.mockReset()
+}
+
+test('refreshSavedPackageProjection defers search-index upsert and retriever cache via waitUntil', async () => {
+	setupDefaultMocks()
+	const env = createEnv()
+	const waitUntilPromises: Array<Promise<unknown>> = []
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		manifest: {
+			name: '@kentcdodds/shade-automation',
+			kody: {
+				id: 'shade-automation',
+				description: 'Shade automation package',
+				tags: ['home'],
+			},
+		},
+		files: { 'package.json': '{}' },
+		source: { id: 'source-1' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Old description',
+		tags: ['home'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		createdAt: '2026-04-20T00:00:00.000Z',
+		updatedAt: '2026-04-20T00:00:00.000Z',
+	})
+
+	await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+		waitUntil: (promise) => {
+			waitUntilPromises.push(promise)
+		},
+	})
+
+	expect(mockModule.scheduleSavedPackageSearchIndexUpsert).toHaveBeenCalledWith(
+		expect.objectContaining({
+			packageId: 'package-1',
+			userId: 'user-1',
+			waitUntil: expect.any(Function),
+		}),
+	)
+	expect(waitUntilPromises.length).toBeGreaterThanOrEqual(1)
+	await Promise.all(waitUntilPromises)
+	expect(mockModule.refreshPackageRetrieverManifestCache).toHaveBeenCalled()
+})
+
+test('refreshSavedPackageProjection uses caller-supplied source files instead of reloading KV', async () => {
+	setupDefaultMocks()
+	const env = createEnv()
+	const sourceFiles = {
+		'package.json': '{"name":"@kentcdodds/shade-automation"}',
+		'src/index.ts': 'export default async function main() {}',
+	}
+	mockModule.loadPackageSourceFromFiles.mockResolvedValue({
+		manifest: {
+			name: '@kentcdodds/shade-automation',
+			kody: {
+				id: 'shade-automation',
+				description: 'Shade automation package',
+				tags: ['home'],
+			},
+		},
+		files: sourceFiles,
+		source: { id: 'source-1' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Old description',
+		tags: ['home'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		createdAt: '2026-04-20T00:00:00.000Z',
+		updatedAt: '2026-04-20T00:00:00.000Z',
+	})
+
+	await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+		sourceFiles,
+	})
+
+	expect(mockModule.loadPackageSourceFromFiles).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		sourceId: 'source-1',
+		files: sourceFiles,
+	})
+	expect(mockModule.loadPackageSourceBySourceId).not.toHaveBeenCalled()
+	expect(mockModule.buildPublishedPackageArtifacts).toHaveBeenCalled()
+})
+
+test('refreshSavedPackageProjection syncs the job manager only when package jobs change', async () => {
+	setupDefaultMocks()
+	mockModule.syncPackageJobsForPackage.mockResolvedValue(true)
+	const env = createEnv()
+	const manifest = {
+		name: '@kentcdodds/shade-automation',
+		kody: {
+			id: 'shade-automation',
+			description: 'Shade automation package',
+			tags: ['home', 'shades'],
+			searchText: 'shade automation',
+			jobs: {
+				'event-runner': {
+					entry: './src/jobs/event-runner.ts',
+					schedule: { type: 'interval', every: '1m' },
+					timezone: 'America/Denver',
+					enabled: true,
+				},
+			},
+		},
+	}
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		manifest,
+		files: { 'package.json': '{}' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Old description',
+		tags: ['home'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		createdAt: '2026-04-20T00:00:00.000Z',
+		updatedAt: '2026-04-20T00:00:00.000Z',
+	})
+
+	await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+	})
+
+	expect(mockModule.syncPackageJobsForPackage).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		baseUrl: 'https://heykody.dev',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+		manifest,
+	})
+	expect(mockModule.buildPublishedPackageArtifacts).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		source: undefined,
+		savedPackage: expect.objectContaining({
+			id: 'package-1',
+			userId: 'user-1',
+			name: '@kentcdodds/shade-automation',
+			kodyId: 'shade-automation',
+			description: 'Shade automation package',
+			tags: ['home', 'shades'],
+			searchText: 'shade automation',
+			sourceId: 'source-1',
+			hasApp: false,
+			hidden: false,
+			isPrivate: false,
+			createdAt: '2026-04-20T00:00:00.000Z',
+		}),
+		manifest,
+		buildAppBundle: expect.any(Function),
+		buildAppClientBundle: expect.any(Function),
+		buildModuleBundle: expect.any(Function),
+		buildImportableModuleBundle: expect.any(Function),
+	})
+	expect(mockModule.refreshPackageRetrieverManifestCache).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		source: undefined,
+		savedPackage: expect.objectContaining({
+			id: 'package-1',
+			kodyId: 'shade-automation',
+			sourceId: 'source-1',
+		}),
+		manifest,
+	})
+	const savedPackageArg = mockModule.buildPublishedPackageArtifacts.mock
+		.calls[0]?.[0]?.savedPackage as { updatedAt: string } | undefined
+	expect(savedPackageArg?.updatedAt).toMatch(
+		/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+	)
+	expect(savedPackageArg?.updatedAt).not.toBe('2026-04-20T00:00:00.000Z')
+	expect(mockModule.syncJobManagerAlarm).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+	})
+	expect(mockModule.getSavedPackageById).toHaveBeenCalledTimes(1)
+	expect(
+		mockModule.syncJobManagerAlarm.mock.invocationCallOrder[0],
+	).toBeGreaterThan(
+		mockModule.syncPackageJobsForPackage.mock.invocationCallOrder[0],
+	)
+
+	setupDefaultMocks()
+	mockModule.syncPackageJobsForPackage.mockResolvedValue(false)
+	mockModule.syncJobManagerAlarm.mockClear()
+	const joblessManifest = {
+		name: '@kentcdodds/cloudflare',
+		kody: {
+			id: 'cloudflare',
+			description: 'Inert community fork',
+		},
+	}
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		manifest: joblessManifest,
+		files: { 'package.json': '{}' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue(null)
+	await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+	})
+	expect(mockModule.syncJobManagerAlarm).not.toHaveBeenCalled()
+})
+
+test('refreshSavedPackageProjection omits files when artifact rebuild is skipped', async () => {
+	setupDefaultMocks()
+	const env = createEnv()
+	const manifest = {
+		name: '@kentcdodds/shade-automation',
+		kody: {
+			id: 'shade-automation',
+			description: 'Shade automation package',
+		},
+	}
+	mockModule.loadPackageManifestBySourceId.mockResolvedValue({
+		source: {
+			id: 'source-1',
+			entity_id: 'package-1',
+			entity_kind: 'package',
+		},
+		manifest,
+	})
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Shade automation package',
+		tags: [],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		createdAt: '2026-04-20T00:00:00.000Z',
+		updatedAt: '2026-04-20T00:00:00.000Z',
+	})
+
+	const refreshed = await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+		rebuildArtifacts: false,
+	})
+
+	expect(refreshed).not.toHaveProperty('files')
+	expect(mockModule.loadPackageSourceBySourceId).not.toHaveBeenCalled()
+	expect(mockModule.buildPublishedPackageArtifacts).not.toHaveBeenCalled()
+})
+
+test('refreshSavedPackageProjection continues best-effort cleanup when dependent steps fail', async () => {
+	consoleError.mockImplementation(() => {})
+	setupDefaultMocks()
+	const manifest = {
+		name: '@kentcdodds/shade-automation',
+		kody: {
+			id: 'shade-automation',
+			description: 'Shade automation package',
+			tags: ['home', 'shades'],
+			searchText: 'shade automation',
+		},
+	}
+	const savedPackage = {
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Old description',
+		tags: ['home'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		createdAt: '2026-04-20T00:00:00.000Z',
+		updatedAt: '2026-04-20T00:00:00.000Z',
+	}
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		manifest,
+		files: { 'package.json': '{}' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue(savedPackage)
+
+	mockModule.refreshPackageRetrieverManifestCache.mockRejectedValue(
+		new Error('kv unavailable'),
+	)
+	const envAfterRetrieverFailure = createEnv()
+	await refreshSavedPackageProjection({
+		env: envAfterRetrieverFailure,
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+	})
+	expect(mockModule.syncPackageJobsForPackage).toHaveBeenCalledWith({
+		env: envAfterRetrieverFailure,
+		userId: 'user-1',
+		baseUrl: 'https://heykody.dev',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+		manifest,
+	})
+	expect(mockModule.syncJobManagerAlarm).not.toHaveBeenCalled()
+	// The swallowed retriever-cache failure is still logged for operators.
+	expect(consoleError).toHaveBeenCalledTimes(1)
+})
+
+test('deleteSavedPackageProjection resyncs the job manager after removing package jobs', async () => {
+	setupDefaultMocks()
+	const env = createEnv()
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		kodyId: 'shade-automation',
+		sourceId: 'source-1',
+	})
+	mockModule.listJobRowsByUserId.mockResolvedValue([
+		{ id: 'job-1', source_id: 'source-1' },
+		{ id: 'job-2', source_id: 'source-other' },
+	])
+	mockModule.deleteCommunityForksForPackage.mockResolvedValue(1)
+
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+
+	expect(mockModule.cleanupArtifactReposForPackage).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		sourceId: 'source-1',
+	})
+	expect(mockModule.deleteEntitySource).toHaveBeenCalledWith(env, {
+		id: 'source-1',
+		userId: 'user-1',
+	})
+	expect(
+		mockModule.deleteEntitySource.mock.invocationCallOrder[0],
+	).toBeGreaterThan(
+		mockModule.cleanupArtifactReposForPackage.mock.invocationCallOrder[0],
+	)
+	expect(mockModule.deleteJobRow).toHaveBeenCalledTimes(1)
+	expect(mockModule.deleteJobRow).toHaveBeenCalledWith({
+		userId: 'user-1',
+		jobId: 'job-1',
+	})
+	expect(mockModule.deleteAllPackageScopedSecrets).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(mockModule.removeAllSecretApprovalsForPackage).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(mockModule.deleteSavedPackage).toHaveBeenCalledWith(env.APP_DB, {
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(mockModule.deleteCommunityForksForPackage).toHaveBeenCalledWith(
+		env.APP_DB,
+		{
+			userId: 'user-1',
+			packageId: 'package-1',
+			sourceId: 'source-1',
+		},
+	)
+	expect(mockModule.invalidateCommunityPublicCache).toHaveBeenCalledTimes(1)
+	expect(
+		mockModule.removePackageRetrieverManifestCacheEntries,
+	).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(mockModule.deleteSavedPackageVector).toHaveBeenCalledWith(
+		env,
+		'package-1',
+	)
+	expect(mockModule.syncJobManagerAlarm).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+	})
+	expect(
+		mockModule.syncJobManagerAlarm.mock.invocationCallOrder[0],
+	).toBeGreaterThan(mockModule.deleteSavedPackage.mock.invocationCallOrder[0])
+	expect(mockModule.unpublishCommunityListing).not.toHaveBeenCalled()
+})
+
+test('deleteSavedPackageProjection unpublishes an active listing before removing the package', async () => {
+	setupDefaultMocks()
+	const env = createEnv()
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		kodyId: 'shade-automation',
+		sourceId: 'source-1',
+	})
+	mockModule.getCommunityListingByOwnerAndPackage.mockResolvedValue({
+		id: 'listing-1',
+		status: 'active',
+	})
+
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		actorUserId: 'actor-1',
+		packageId: 'package-1',
+	})
+
+	expect(mockModule.getCommunityListingByOwnerAndPackage).toHaveBeenCalledWith(
+		env.APP_DB,
+		{
+			ownerUserId: 'user-1',
+			packageId: 'package-1',
+		},
+	)
+	expect(mockModule.unpublishCommunityListing).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		actorUserId: 'actor-1',
+		listingId: 'listing-1',
+	})
+	expect(
+		mockModule.unpublishCommunityListing.mock.invocationCallOrder[0],
+	).toBeLessThan(mockModule.deleteSavedPackage.mock.invocationCallOrder[0])
+
+	mockModule.unpublishCommunityListing.mockClear()
+	mockModule.getCommunityListingByOwnerAndPackage.mockResolvedValue({
+		id: 'listing-2',
+		status: 'delisted',
+	})
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(mockModule.unpublishCommunityListing).not.toHaveBeenCalled()
+	expect(mockModule.deleteSavedPackage).toHaveBeenCalled()
+})
+
+test('deleteSavedPackageProjection continues best-effort cleanup when dependent steps fail', async () => {
+	silenceExpectedConsoleErrors([
+		/"message":"package retriever projection update failed"/,
+	])
+	consoleWarn.mockImplementation(() => {})
+	setupDefaultMocks()
+	const env = createEnv()
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		kodyId: 'shade-automation',
+		sourceId: 'source-1',
+	})
+	mockModule.listJobRowsByUserId.mockResolvedValue([])
+	mockModule.deleteEntitySource.mockRejectedValueOnce(
+		new Error('d1 unavailable'),
+	)
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(mockModule.deleteSavedPackage).toHaveBeenCalledWith(env.APP_DB, {
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(mockModule.deleteSavedPackageVector).toHaveBeenCalledWith(
+		env,
+		'package-1',
+	)
+	expect(mockModule.syncJobManagerAlarm).not.toHaveBeenCalled()
+	// The swallowed entity source cleanup failure is still logged.
+	expect(consoleWarn).toHaveBeenCalledTimes(1)
+
+	setupDefaultMocks()
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		kodyId: 'shade-automation',
+		sourceId: 'source-1',
+	})
+	mockModule.listJobRowsByUserId.mockResolvedValue([])
+	mockModule.removePackageRetrieverManifestCacheEntries.mockRejectedValue(
+		new Error('kv unavailable'),
+	)
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(mockModule.deleteSavedPackageVector).toHaveBeenCalledWith(
+		env,
+		'package-1',
+	)
+	expect(mockModule.syncJobManagerAlarm).not.toHaveBeenCalled()
+})
+
+test('deleteSavedPackageProjection cleans secrets when package projection is missing', async () => {
+	setupDefaultMocks()
+	const env = createEnv()
+	mockModule.getSavedPackageById.mockResolvedValue(null)
+
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId: 'missing-package',
+	})
+
+	expect(mockModule.deleteAllPackageScopedSecrets).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		packageId: 'missing-package',
+	})
+	expect(mockModule.removeAllSecretApprovalsForPackage).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		packageId: 'missing-package',
+	})
+	expect(mockModule.deleteAllAppScopedValues).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		appId: 'missing-package',
+	})
+	expect(mockModule.clearStorage).toHaveBeenCalled()
+})
+
+test('deleteSavedPackageProjection clears package-owned storage buckets and inventory rows', async () => {
+	setupDefaultMocks()
+	const packageId = 'b2fda105-005a-4e2b-9f22-1513b6752da2'
+	const jobStorageId = `job:package-job:${packageId}:event-runner`
+	const packageStorageId = `package:${encodeURIComponent(packageId)}`
+	const facetStorageId = `${packageId}:facet:main`
+	const otherPackageId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+	const otherUserBucket = {
+		userId: 'user-2',
+		storageId: packageStorageId,
+	}
+	const otherPackageBucket = {
+		userId: 'user-1',
+		storageId: `package:${encodeURIComponent(otherPackageId)}`,
+	}
+	const storageBuckets = [
+		{ userId: 'user-1', storageId: packageStorageId },
+		{ userId: 'user-1', storageId: packageId },
+		{ userId: 'user-1', storageId: jobStorageId },
+		{ userId: 'user-1', storageId: facetStorageId },
+		otherUserBucket,
+		otherPackageBucket,
+		{
+			userId: 'user-1',
+			storageId: `job:package-job:${otherPackageId}:nightly`,
+		},
+	]
+	const env = createEnv('user-1', { storageBuckets })
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: packageId,
+		kodyId: 'shade-automation',
+		sourceId: 'source-1',
+	})
+	mockModule.listJobRowsByUserId.mockResolvedValue([
+		{
+			id: `package-job:${packageId}:event-runner`,
+			source_id: 'source-1',
+			storage_id: jobStorageId,
+		},
+	])
+
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId,
+	})
+
+	const clearedStorageIds = mockModule.storageRunnerRpc.mock.calls.map(
+		(call) => (call[0] as { storageId: string }).storageId,
+	)
+	expect(clearedStorageIds).toEqual(
+		expect.arrayContaining([
+			packageStorageId,
+			packageId,
+			jobStorageId,
+			facetStorageId,
+		]),
+	)
+	expect(clearedStorageIds).not.toContain(otherPackageBucket.storageId)
+	expect(clearedStorageIds).not.toContain(
+		`job:package-job:${otherPackageId}:nightly`,
+	)
+	for (const call of mockModule.storageRunnerRpc.mock.calls) {
+		expect(call[0]).toMatchObject({ userId: 'user-1' })
+	}
+	expect(storageBuckets).toEqual(
+		expect.arrayContaining([
+			otherUserBucket,
+			otherPackageBucket,
+			{
+				userId: 'user-1',
+				storageId: `job:package-job:${otherPackageId}:nightly`,
+			},
+		]),
+	)
+	const remainingKeys = new Set(
+		storageBuckets.map((row) => `${row.userId}:${row.storageId}`),
+	)
+	for (const storageId of [
+		packageStorageId,
+		packageId,
+		jobStorageId,
+		facetStorageId,
+	]) {
+		expect(remainingKeys.has(`user-1:${storageId}`)).toBe(false)
+	}
+	expect(mockModule.deleteAllAppScopedValues).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		appId: packageId,
+	})
+})
+
+test('deleteSavedPackageProjection keeps inventory when clearStorage fails and continues delete', async () => {
+	consoleWarn.mockImplementation(() => {})
+	setupDefaultMocks()
+	const packageId = 'b2fda105-005a-4e2b-9f22-1513b6752da2'
+	const packageStorageId = `package:${encodeURIComponent(packageId)}`
+	const failingStorageId = `${packageId}:facet:main`
+	const storageBuckets = [
+		{ userId: 'user-1', storageId: packageStorageId },
+		{ userId: 'user-1', storageId: failingStorageId },
+		{ userId: 'user-1', storageId: packageId },
+	]
+	const env = createEnv('user-1', { storageBuckets })
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: packageId,
+		kodyId: 'shade-automation',
+		sourceId: 'source-1',
+	})
+	mockModule.listJobRowsByUserId.mockResolvedValue([])
+	mockModule.clearStorage.mockImplementation(async () => {
+		const call = mockModule.storageRunnerRpc.mock.calls.at(-1)?.[0] as
+			| { storageId: string }
+			| undefined
+		if (call?.storageId === failingStorageId) {
+			throw new Error('do unavailable')
+		}
+		return { ok: true as const }
+	})
+
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId,
+	})
+
+	expect(mockModule.deleteSavedPackage).toHaveBeenCalledWith(env.APP_DB, {
+		userId: 'user-1',
+		packageId,
+	})
+	expect(mockModule.deleteAllAppScopedValues).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		appId: packageId,
+	})
+	expect(storageBuckets.map((row) => row.storageId)).toContain(failingStorageId)
+	expect(storageBuckets.map((row) => row.storageId)).not.toContain(
+		packageStorageId,
+	)
+	expect(storageBuckets.map((row) => row.storageId)).not.toContain(packageId)
+	expect(consoleWarn).toHaveBeenCalledWith(
+		expect.stringContaining('"message":"package storage clear failed"'),
+	)
+})
+
+test('deleteSavedPackageProjection clears deterministic storage when projection is missing', async () => {
+	setupDefaultMocks()
+	const packageId = 'b2fda105-005a-4e2b-9f22-1513b6752da2'
+	const packageStorageId = `package:${encodeURIComponent(packageId)}`
+	const facetStorageId = `${packageId}:facet:main`
+	const storageBuckets = [
+		{ userId: 'user-1', storageId: packageStorageId },
+		{ userId: 'user-1', storageId: packageId },
+		{ userId: 'user-1', storageId: facetStorageId },
+	]
+	const env = createEnv('user-1', { storageBuckets })
+	mockModule.getSavedPackageById.mockResolvedValue(null)
+
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId,
+	})
+
+	const clearedStorageIds = mockModule.storageRunnerRpc.mock.calls.map(
+		(call) => (call[0] as { storageId: string }).storageId,
+	)
+	expect(clearedStorageIds).toEqual(
+		expect.arrayContaining([packageStorageId, packageId, facetStorageId]),
+	)
+	expect(storageBuckets).toEqual([])
+	expect(mockModule.deleteAllAppScopedValues).toHaveBeenCalledWith({
+		env,
+		userId: 'user-1',
+		appId: packageId,
+	})
+})
+
+test('filterPackageOwnedStorageIdsFromInventory exact-matches non-UUIDs and UUID-gates prefixes', () => {
+	const otherPackageId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+	const inventory = [
+		'job',
+		'package:job',
+		'job:ad-hoc-1',
+		`job:package-job:${otherPackageId}:nightly`,
+		'job:facet:main',
+		'%',
+		'package:%25',
+		'exec:scratch-1',
+		`${otherPackageId}:facet:main`,
+	]
+
+	expect(
+		filterPackageOwnedStorageIdsFromInventory({
+			packageId: 'job',
+			storageIds: inventory,
+		}).toSorted(),
+	).toEqual(['job', 'package:job'].toSorted())
+
+	expect(
+		filterPackageOwnedStorageIdsFromInventory({
+			packageId: '%',
+			storageIds: inventory,
+		}).toSorted(),
+	).toEqual(['%', 'package:%25'].toSorted())
+
+	expect(
+		filterPackageOwnedStorageIdsFromInventory({
+			packageId: 'exec',
+			storageIds: [...inventory, 'exec', 'package:exec'],
+		}).toSorted(),
+	).toEqual(['exec', 'package:exec'].toSorted())
+
+	const packageId = 'b2fda105-005a-4e2b-9f22-1513b6752da2'
+	const packageStorageId = `package:${encodeURIComponent(packageId)}`
+	const facetStorageId = `${packageId}:facet:main`
+	const jobStorageId = `job:package-job:${packageId}:event-runner`
+	expect(
+		filterPackageOwnedStorageIdsFromInventory({
+			packageId,
+			storageIds: [
+				packageId,
+				packageStorageId,
+				facetStorageId,
+				jobStorageId,
+				'job:ad-hoc-1',
+				`job:package-job:${otherPackageId}:nightly`,
+				`${otherPackageId}:facet:main`,
+				'exec:scratch-1',
+			],
+		}).toSorted(),
+	).toEqual(
+		[packageId, packageStorageId, facetStorageId, jobStorageId].toSorted(),
+	)
+})
+
+test('deleteSavedPackageProjection does not clear unrelated buckets for exact-match package ids', async () => {
+	setupDefaultMocks()
+	const otherPackageId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+	const storageBuckets = [
+		{ userId: 'user-1', storageId: 'job' },
+		{ userId: 'user-1', storageId: 'package:job' },
+		{ userId: 'user-1', storageId: 'job:ad-hoc-1' },
+		{
+			userId: 'user-1',
+			storageId: `job:package-job:${otherPackageId}:nightly`,
+		},
+		{ userId: 'user-1', storageId: 'job:facet:main' },
+	]
+	const env = createEnv('user-1', { storageBuckets })
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'job',
+		kodyId: 'job-pkg',
+		sourceId: 'source-job',
+	})
+	mockModule.listJobRowsByUserId.mockResolvedValue([])
+
+	await deleteSavedPackageProjection({
+		env,
+		userId: 'user-1',
+		packageId: 'job',
+	})
+
+	const clearedStorageIds = mockModule.storageRunnerRpc.mock.calls.map(
+		(call) => (call[0] as { storageId: string }).storageId,
+	)
+	expect(clearedStorageIds.toSorted()).toEqual(
+		['job', 'package:job'].toSorted(),
+	)
+	expect(storageBuckets.map((row) => row.storageId).toSorted()).toEqual(
+		[
+			'job:ad-hoc-1',
+			`job:package-job:${otherPackageId}:nightly`,
+			'job:facet:main',
+		].toSorted(),
+	)
+})
+
+function createEntitlementsDatabase(input: {
+	users?: Array<{ email: string; plan: string | null }>
+	savedPackageCount?: number
+	userId: string
+	storageBuckets?: Array<{ userId: string; storageId: string }>
+}) {
+	const users = input.users ?? []
+	const savedPackageCount = input.savedPackageCount ?? 0
+	const storageBuckets = input.storageBuckets ?? []
+	const writeLeaseDb = createPermissiveAccountWriteLeaseDbHooks()
+
+	return {
+		async batch(statements: Array<{ run: () => Promise<unknown> }>) {
+			const results = []
+			for (const statement of statements) {
+				results.push(await statement.run())
+			}
+			return results
+		},
+		prepare(query: string) {
+			return {
+				bind(...params: Array<unknown>) {
+					return {
+						async run() {
+							if (
+								query.includes(
+									'DELETE FROM user_storage_buckets WHERE user_id = ? AND storage_id = ?',
+								)
+							) {
+								const userId = String(params[0])
+								const storageId = String(params[1])
+								const before = storageBuckets.length
+								for (
+									let index = storageBuckets.length - 1;
+									index >= 0;
+									index--
+								) {
+									const row = storageBuckets[index]
+									if (
+										row &&
+										row.userId === userId &&
+										row.storageId === storageId
+									) {
+										storageBuckets.splice(index, 1)
+									}
+								}
+								return { meta: { changes: before - storageBuckets.length } }
+							}
+							// Deleting a package releases the `kody.id`s it retired.
+							if (query.includes('DELETE FROM package_kody_id_redirects')) {
+								return { meta: { changes: 0 } }
+							}
+							if (query.includes('DELETE FROM package_invocation_tokens')) {
+								return { meta: { changes: 0 } }
+							}
+							throw new Error(`Unsupported run query: ${query}`)
+						},
+						async first<T>() {
+							if (writeLeaseDb.supportsDeletingAtQuery(query)) {
+								return writeLeaseDb.deletingAtFirstResult() as T
+							}
+							if (query.includes('SELECT plan, stripe_plan')) {
+								const user = users.find((row) => row.email === params[0])
+								return (user ? { plan: user.plan } : null) as T | null
+							}
+							if (query.includes('SELECT first_saved_package_at FROM users')) {
+								return { first_saved_package_at: null } as T
+							}
+							// Synthetic-context probe: no users row in this mock, so the
+							// storage reserve path applies free-plan semantics without a DO.
+							if (query.includes('SELECT 1 AS present FROM users')) {
+								return null
+							}
+							if (
+								query.includes('SELECT COUNT(*) AS count FROM saved_packages')
+							) {
+								return { count: savedPackageCount } as T
+							}
+							const storageByteTables = [
+								'email_attachments',
+								'email_messages',
+								'value_entries',
+								'secret_entries',
+								'mcp_memories',
+								'saved_packages',
+								'entity_sources',
+								'jobs',
+								'published_bundle_artifacts',
+							]
+							if (
+								storageByteTables.some((table) =>
+									query.includes(`FROM ${table}`),
+								)
+							) {
+								return { count: 0 } as T
+							}
+							throw new Error(`Unsupported first query: ${query}`)
+						},
+						async all<T>() {
+							if (
+								query.includes('FROM user_storage_buckets') &&
+								query.includes('SELECT storage_id AS storageId') &&
+								query.includes('WHERE user_id = ?')
+							) {
+								const userId = String(params[0])
+								const results = storageBuckets
+									.filter((row) => row.userId === userId)
+									.map((row) => ({ storageId: row.storageId }))
+									.sort((left, right) =>
+										left.storageId.localeCompare(right.storageId),
+									)
+								return { results: results as Array<T> }
+							}
+							throw new Error(`Unsupported all query: ${query}`)
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database
+}
+
+test('refreshSavedPackageProjection enforces the saved packages entitlement on insert', async () => {
+	setupDefaultMocks()
+	const email = 'planned@example.com'
+	const userId = await createStableUserIdFromEmail(email)
+	const limit = planLimits.pro.maxSavedPackages
+	if (limit === null) throw new Error('Expected a numeric pro package limit.')
+	const env = createEnv(userId, {
+		users: [{ email, plan: 'pro' }],
+		savedPackageCount: limit,
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		manifest: {
+			name: '@kentcdodds/shade-automation',
+			kody: {
+				id: 'shade-automation',
+				description: 'Shade automation package',
+			},
+		},
+		files: { 'package.json': '{}' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue(null)
+
+	const error = await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId,
+		userEmail: email,
+		packageId: 'package-new',
+		sourceId: 'source-new',
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+
+	if (!isEntitlementLimitError(error)) {
+		throw new Error(
+			'Expected an EntitlementLimitError from refreshSavedPackageProjection.',
+		)
+	}
+	expect(error.details).toMatchObject({
+		code: 'entitlement_limit_exceeded',
+		resource: 'saved_packages',
+		plan: 'pro',
+		limit,
+		current: limit,
+	})
+	expect(mockModule.insertSavedPackage).not.toHaveBeenCalled()
+})
+
+test('refreshSavedPackageProjection preserves hidden across projection refresh', async () => {
+	setupDefaultMocks()
+	const env = createEnv()
+	mockModule.buildPackageSearchProjection.mockReturnValue({
+		...createProjection(),
+		description: 'Updated description',
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		manifest: {
+			name: '@kentcdodds/shade-automation',
+			kody: {
+				id: 'shade-automation',
+				description: 'Updated description',
+				tags: ['home'],
+			},
+		},
+		files: { 'package.json': '{}' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Old description',
+		tags: ['home'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: true,
+		isPrivate: false,
+		createdAt: '2026-04-20T00:00:00.000Z',
+		updatedAt: '2026-04-20T00:00:00.000Z',
+	})
+
+	const refreshed = await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+	})
+
+	expect(mockModule.updateSavedPackage).toHaveBeenCalled()
+	const updateArg = mockModule.updateSavedPackage.mock.calls[0]?.[1] as Record<
+		string,
+		unknown
+	>
+	expect(updateArg).not.toHaveProperty('hidden')
+	expect(updateArg).toMatchObject({
+		userId: 'user-1',
+		packageId: 'package-1',
+		description: 'Updated description',
+	})
+	expect(refreshed.record.hidden).toBe(true)
+	expect(refreshed.record.description).toBe('Updated description')
+})
+
+test('refreshSavedPackageProjection does not overwrite isPrivate from the manifest', async () => {
+	setupDefaultMocks()
+	const env = createEnv()
+	mockModule.buildPackageSearchProjection.mockReturnValue({
+		...createProjection(),
+		isPrivate: true,
+		description: 'Updated description',
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		manifest: {
+			name: '@kentcdodds/shade-automation',
+			private: true,
+			kody: {
+				id: 'shade-automation',
+				description: 'Updated description',
+				tags: ['home'],
+			},
+		},
+		files: { 'package.json': '{}' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		userId: 'user-1',
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Old description',
+		tags: ['home'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		createdAt: '2026-04-20T00:00:00.000Z',
+		updatedAt: '2026-04-20T00:00:00.000Z',
+	})
+
+	const refreshed = await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId: 'user-1',
+		packageId: 'package-1',
+		sourceId: 'source-1',
+	})
+
+	expect(mockModule.updateSavedPackage).toHaveBeenCalled()
+	const updateArg = mockModule.updateSavedPackage.mock.calls[0]?.[1] as Record<
+		string,
+		unknown
+	>
+	expect(updateArg).not.toHaveProperty('isPrivate')
+	expect(updateArg).toMatchObject({
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
+	expect(refreshed.record.isPrivate).toBe(false)
+	expect(refreshed.record.hidden).toBe(false)
+})
+
+test('refreshSavedPackageProjection does not gate the update branch at the limit', async () => {
+	setupDefaultMocks()
+	const email = 'planned@example.com'
+	const userId = await createStableUserIdFromEmail(email)
+	const limit = planLimits.pro.maxSavedPackages
+	if (limit === null) throw new Error('Expected a numeric pro package limit.')
+	const env = createEnv(userId, {
+		users: [{ email, plan: 'pro' }],
+		savedPackageCount: limit,
+	})
+	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
+		manifest: {
+			name: '@kentcdodds/shade-automation',
+			kody: {
+				id: 'shade-automation',
+				description: 'Shade automation package',
+			},
+		},
+		files: { 'package.json': '{}' },
+	})
+	mockModule.getSavedPackageById.mockResolvedValue({
+		id: 'package-1',
+		userId,
+		name: '@kentcdodds/shade-automation',
+		kodyId: 'shade-automation',
+		description: 'Shade automation package',
+		tags: ['home'],
+		searchText: null,
+		sourceId: 'source-1',
+		hasApp: false,
+		hidden: false,
+		isPrivate: false,
+		createdAt: '2026-04-20T00:00:00.000Z',
+		updatedAt: '2026-04-20T00:00:00.000Z',
+	})
+
+	await refreshSavedPackageProjection({
+		env,
+		baseUrl: 'https://heykody.dev',
+		userId,
+		userEmail: email,
+		packageId: 'package-1',
+		sourceId: 'source-1',
+	})
+
+	expect(mockModule.updateSavedPackage).toHaveBeenCalled()
+	expect(mockModule.insertSavedPackage).not.toHaveBeenCalled()
+})

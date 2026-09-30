@@ -1,0 +1,166 @@
+import { expect, test, vi } from 'vitest'
+import { McpCallerError } from '#mcp/caller-error.ts'
+import { type McpServerSettingMetadata } from '#worker/mcp-client/settings-types.ts'
+
+const mockModule = vi.hoisted(() => ({
+	getMcpServerSettingById: vi.fn(),
+	listMcpServerSettings: vi.fn(),
+}))
+
+vi.mock('#worker/mcp-client/settings-service.ts', () => ({
+	getMcpServerSettingById: (...args: Array<unknown>) =>
+		mockModule.getMcpServerSettingById(...args),
+	listMcpServerSettings: (...args: Array<unknown>) =>
+		mockModule.listMcpServerSettings(...args),
+}))
+
+const { buildMcpServerStatusView, resolveMcpServerSetting } =
+	await import('./shared.ts')
+
+function setting(
+	overrides: Partial<McpServerSettingMetadata> = {},
+): McpServerSettingMetadata {
+	return {
+		id: 'server-1',
+		name: 'ha',
+		url: 'https://example.com/mcp',
+		enabled: true,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z',
+		logoKey: null,
+		logoContentType: null,
+		logoSource: null,
+		faviconSourceHost: null,
+		usageMode: 'any',
+		allowedPackageIds: [],
+		lastError: null,
+		...overrides,
+	}
+}
+
+test('resolveMcpServerSetting resolves by id/name and rejects blank or unknown servers', async () => {
+	mockModule.getMcpServerSettingById.mockReset()
+	mockModule.listMcpServerSettings.mockReset()
+
+	const blank = resolveMcpServerSetting({
+		env: { APP_DB: {} as D1Database },
+		userId: 'user-1',
+		server: '   ',
+	})
+	await expect(blank).rejects.toThrow(McpCallerError)
+	expect(mockModule.getMcpServerSettingById).not.toHaveBeenCalled()
+	expect(mockModule.listMcpServerSettings).not.toHaveBeenCalled()
+
+	const byId = setting({ id: 'server-by-id', name: 'ha' })
+	mockModule.getMcpServerSettingById.mockResolvedValueOnce(byId)
+	await expect(
+		resolveMcpServerSetting({
+			env: { APP_DB: {} as D1Database },
+			userId: 'user-1',
+			server: 'server-by-id',
+		}),
+	).resolves.toEqual(byId)
+
+	mockModule.getMcpServerSettingById.mockResolvedValueOnce(null)
+	mockModule.listMcpServerSettings.mockResolvedValueOnce([
+		setting({ id: 'server-by-name', name: 'ha' }),
+	])
+	await expect(
+		resolveMcpServerSetting({
+			env: { APP_DB: {} as D1Database },
+			userId: 'user-1',
+			server: 'HA',
+		}),
+	).resolves.toMatchObject({ id: 'server-by-name', name: 'ha' })
+
+	mockModule.getMcpServerSettingById.mockResolvedValueOnce(null)
+	mockModule.listMcpServerSettings.mockResolvedValueOnce([setting()])
+	const missing = resolveMcpServerSetting({
+		env: { APP_DB: {} as D1Database },
+		userId: 'user-1',
+		server: 'recipe-keeper',
+	})
+	await expect(missing).rejects.toThrow(McpCallerError)
+})
+
+test('buildMcpServerStatusView defaults missing usage to any context', () => {
+	const view = buildMcpServerStatusView({
+		setting: {
+			...setting(),
+			usageMode: undefined as never,
+			allowedPackageIds: undefined as never,
+		},
+		snapshot: null,
+	})
+	expect(view.usageMode).toBe('any')
+	expect(view.allowedPackageIds).toEqual([])
+	expect(view.connected).toBe(false)
+})
+
+test('buildMcpServerStatusView surfaces durable lastError when live connection error is missing', () => {
+	const lastError =
+		"Authorization completed at the identity provider, but tool discovery didn't finish (phase server/discover, id attempt-1)."
+	const hung = buildMcpServerStatusView({
+		setting: setting({ lastError }),
+		snapshot: {
+			serverId: 'server-1',
+			name: 'ha',
+			url: 'https://example.com/mcp',
+			state: 'connected',
+			authUrl: null,
+			error: null,
+			instructions: null,
+			tools: [],
+		},
+	})
+	expect(hung.connected).toBe(false)
+	expect(hung.error).toBe(lastError)
+	expect(hung.hasRefreshToken).toBe(false)
+
+	const ready = buildMcpServerStatusView({
+		setting: setting({ lastError }),
+		snapshot: {
+			serverId: 'server-1',
+			name: 'ha',
+			url: 'https://example.com/mcp',
+			state: 'ready',
+			authUrl: null,
+			error: null,
+			instructions: null,
+			tools: [{ name: 'ping', inputSchema: { type: 'object' } }],
+		},
+	})
+	expect(ready.connected).toBe(true)
+	expect(ready.error).toBeNull()
+
+	const omittedRefresh =
+		"This MCP server's authorization server advertised refresh tokens, but the token response did not include a refresh token. The access token will expire and Kody cannot renew it (phase token exchange, id attempt-omit)."
+	const warned = buildMcpServerStatusView({
+		setting: setting(),
+		snapshot: {
+			serverId: 'server-1',
+			name: 'ha',
+			url: 'https://example.com/mcp',
+			state: 'ready',
+			authUrl: null,
+			error: null,
+			lastError: {
+				message: omittedRefresh,
+				phase: 'token exchange',
+				httpStatus: null,
+				httpBodySnippet: null,
+				mcpEndpoint: 'https://example.com/mcp',
+				resource: null,
+				authServer: null,
+				attemptId: 'attempt-omit',
+				at: '2026-09-16T00:00:00.000Z',
+			},
+			hasRefreshToken: false,
+			instructions: null,
+			tools: [{ name: 'ping', inputSchema: { type: 'object' } }],
+		},
+	})
+	expect(warned.connected).toBe(true)
+	expect(warned.error).toBeTruthy()
+	expect(warned.hasRefreshToken).toBe(false)
+})

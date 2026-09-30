@@ -1,0 +1,8 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"extends": [
+		"./node_modules/@epic-web/config/oxlint-config.json",
+		"./tools/oxlint/oxlint-rules.json"
+	],
+	"plugins": ["import", "jsx-a11y", "react", "typescript", "vitest"]
+}

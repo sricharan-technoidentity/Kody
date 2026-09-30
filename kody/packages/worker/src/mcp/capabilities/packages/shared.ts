@@ -1,0 +1,279 @@
+import { z } from 'zod'
+import { secretMetadataSchema } from '#mcp/capabilities/secrets/shared.ts'
+import {
+	type SavedPackageRecord,
+	type SavedPackageWithCommunityProvenanceRecord,
+} from '#worker/package-registry/types.ts'
+
+export const packageFileSchema = z.object({
+	path: z
+		.string()
+		.min(1)
+		.describe(
+			'Package-relative file path to write into the saved package repo.',
+		),
+	content: z
+		.string()
+		.describe(
+			'Full file contents for this package file. Publish requires non-empty root README.md (human-focused, including a concise Intent section) and AGENTS.md (agent-focused: imports, smoke tests, edge cases).',
+		),
+})
+
+export const packageSummarySchema = z.object({
+	package_id: z.string(),
+	kody_id: z.string(),
+	name: z.string(),
+	description: z.string(),
+	tags: z.array(z.string()),
+	has_app: z.boolean(),
+	hidden: z.boolean(),
+	visibility: z
+		.enum(['public', 'private'])
+		.describe(
+			'Repo visibility. Public means default-branch HEAD is world-readable and forkable and the package appears on /community. Private is owner-only.',
+		),
+	locked_at: z
+		.string()
+		.nullable()
+		.describe(
+			'When set, publishes require a website click at /@{username}/{kodyId}/approve-publish. Agents may lock via packageUpdate (`changes.locked: true`). Unlocking is website-only at /@{username}/{kodyId}/settings.',
+		),
+	source_id: z.string(),
+	created_at: z.string(),
+	updated_at: z.string(),
+})
+
+export const packageSummaryWithCommunityProvenanceSchema =
+	packageSummarySchema.extend({
+		source_listing_id: z
+			.string()
+			.nullable()
+			.describe(
+				'Community listing id this package was forked from, or null for a self-authored package.',
+			),
+		listing_current: z
+			.boolean()
+			.nullable()
+			.describe(
+				'Whether the source catalog entry currently resolves to an active public package, or null for a self-authored package.',
+			),
+		listing_kody_id: z
+			.string()
+			.nullable()
+			.describe(
+				'Original public package name leaf recorded when this package was forked, or null for a self-authored package.',
+			),
+		listing_name: z
+			.string()
+			.nullable()
+			.describe(
+				'Current source listing package name when the listing is active, or null when this package is self-authored or the listing is gone.',
+			),
+		origin_commit: z
+			.string()
+			.nullable()
+			.describe(
+				'Listing pinned commit this fork last absorbed. Starts as the fork-time snapshot and moves when a later publish passes absorbed_upstream_commit.',
+			),
+		listing_pinned_commit: z
+			.string()
+			.nullable()
+			.describe(
+				'Current pinned commit of the source listing, or null when this package is self-authored or the listing is gone.',
+			),
+		listing_published_at: z
+			.string()
+			.nullable()
+			.describe(
+				'Last community publish time of the source listing, or null when this package is self-authored or the listing is gone.',
+			),
+		listing_ahead: z
+			.boolean()
+			.nullable()
+			.describe(
+				'True only when this community fork is outdated: the listing pin is not an ancestor of the fork tip. Null for a self-authored package. Otherwise false.',
+			),
+	})
+
+export const pendingPackageSecretApprovalsSchema = z
+	.object({
+		package_id: z.string().describe('Saved package id that needs approvals.'),
+		kody_id: z.string().describe('Package name leaf that needs approvals.'),
+		secrets: z
+			.array(
+				z.object({
+					secret_name: z.string(),
+					approval_url: z
+						.string()
+						.describe('Per-secret package approval URL in the account UI.'),
+				}),
+			)
+			.describe('User secrets that still need package approval.'),
+		bulk_approval_url: z
+			.string()
+			.nullable()
+			.describe(
+				'One-click bulk approval URL when two or more secrets still need package approval; prefer this over individual links.',
+			),
+	})
+	.nullable()
+	.describe(
+		'Pending user-secret package approvals detected from secretMounts and secret placeholders. Null when none are pending. Do not treat the package as ready to run until the user approves these and a static-import smoke test from execute succeeds against a read-only export or dry-run input that actually uses the approved secret.',
+	)
+
+export function toPackageSummary(savedPackage: SavedPackageRecord) {
+	return {
+		package_id: savedPackage.id,
+		kody_id: savedPackage.kodyId,
+		name: savedPackage.name,
+		description: savedPackage.description,
+		tags: savedPackage.tags,
+		has_app: savedPackage.hasApp,
+		hidden: savedPackage.hidden,
+		visibility: savedPackage.isPrivate
+			? ('private' as const)
+			: ('public' as const),
+		locked_at: savedPackage.lockedAt ?? null,
+		source_id: savedPackage.sourceId,
+		created_at: savedPackage.createdAt,
+		updated_at: savedPackage.updatedAt,
+	}
+}
+
+export function toPackageSummaryWithCommunityProvenance(
+	savedPackage: SavedPackageWithCommunityProvenanceRecord,
+) {
+	return {
+		...toPackageSummary(savedPackage),
+		source_listing_id: savedPackage.sourceListingId,
+		listing_current: savedPackage.listingCurrent,
+		listing_kody_id: savedPackage.listingKodyId,
+		listing_name: savedPackage.listingName,
+		origin_commit: savedPackage.originCommit,
+		listing_pinned_commit: savedPackage.listingPinnedCommit,
+		listing_published_at: savedPackage.listingPublishedAt,
+		listing_ahead: savedPackage.listingAhead,
+	}
+}
+
+export const packageExportSurfaceSchema = z.object({
+	subpath: z
+		.string()
+		.describe('Package export subpath from package.json exports.'),
+	import_specifier: z
+		.string()
+		.describe('Ready-to-use kody: import specifier for this export.'),
+	runtime_target: z
+		.string()
+		.nullable()
+		.describe('Package-relative runtime source path for this export.'),
+	types_path: z
+		.string()
+		.nullable()
+		.describe(
+			'Package-relative types source path for this export, when declared.',
+		),
+	description: z
+		.string()
+		.nullable()
+		.describe('Export description parsed from JSDoc when available.'),
+	type_definition: z
+		.string()
+		.nullable()
+		.describe(
+			'Primary export type signature parsed from source when available. Null when the export has more than one callable function; use `functions` in that case.',
+		),
+	functions: z
+		.array(
+			z.object({
+				name: z
+					.string()
+					.describe(
+						'Exported function name. Default exports use the name "default".',
+					),
+				description: z
+					.string()
+					.nullable()
+					.describe('Function JSDoc description when available.'),
+				type_definition: z
+					.string()
+					.nullable()
+					.describe(
+						'Function type signature parsed from source when available.',
+					),
+			}),
+		)
+		.describe(
+			'Callable functions extracted from this export. Namespace modules that export several helpers list each one here.',
+		),
+	referenced_types: z
+		.array(
+			z.object({
+				name: z.string(),
+				kind: z.enum(['type', 'interface', 'enum']),
+				definition: z
+					.string()
+					.describe('Source text of the referenced type, interface, or enum.'),
+			}),
+		)
+		.describe(
+			"Type, interface, and enum definitions referenced by this export's callable functions.",
+		),
+})
+
+export const packageInvocationTokenMetadataSchema = z.object({
+	token_id: z
+		.string()
+		.describe(
+			'Package invocation token record id. This is not a bearer token.',
+		),
+	name: z.string().describe('Human-readable token record name.'),
+	package_id: z.string().describe('Saved package id this token belongs to.'),
+	export_names: z
+		.array(z.string())
+		.describe(
+			'Normalized package export scopes allowed by this token record, including * when all exports on this package are allowed.',
+		),
+	created_at: z.string(),
+	updated_at: z.string(),
+	last_used_at: z
+		.string()
+		.nullable()
+		.describe('Most recent successful bearer-token use, when tracked.'),
+	revoked_at: z
+		.string()
+		.nullable()
+		.describe('Revocation timestamp, or null when the token record is active.'),
+})
+
+export const packageDetailSchema =
+	packageSummaryWithCommunityProvenanceSchema.extend({
+		exports: z.array(packageExportSurfaceSchema),
+		package_secrets: z
+			.array(secretMetadataSchema)
+			.describe(
+				'FYI metadata for package-scoped secrets owned by this package, including package_id. Never plaintext values. These are not execute-usable via search; using them still requires package context.',
+			),
+	})
+
+export function toPackageInvocationTokenMetadata(token: {
+	id: string
+	name: string
+	package_id: string
+	exportNames: Array<string>
+	created_at: string
+	updated_at: string
+	last_used_at: string | null
+	revoked_at: string | null
+}) {
+	return {
+		token_id: token.id,
+		name: token.name,
+		package_id: token.package_id,
+		export_names: token.exportNames,
+		created_at: token.created_at,
+		updated_at: token.updated_at,
+		last_used_at: token.last_used_at,
+		revoked_at: token.revoked_at,
+	}
+}

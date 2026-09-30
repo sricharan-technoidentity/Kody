@@ -1,0 +1,522 @@
+# Request lifecycle
+
+This document explains how an incoming request moves through the system.
+
+## Entry points
+
+Production has two public HTTP entrypoints:
+
+- **App origin** (`kody.codes`) — `packages/worker/src/index.ts`. Remix, MCP
+  HTTP (`/mcp`), OAuth, inbound email, and queue consumers. Runtime-owned paths
+  (`/@{username}/packages/…`, package-invocation API, inline `/apps`) forward
+  over the `RUNTIME_WORKER` service binding to `kody-runtime`.
+- **Package-app origin** (`kody.run`) — `packages/worker/src/runtime-worker.ts`.
+  Zone routes on that script; the origin handler does not see this host in
+  production.
+
+The routing order below is the **app-origin** handler.
+
+The default `fetch` handler delegates to `OAuthProvider` from
+`@cloudflare/workers-oauth-provider`, which means OAuth endpoints and token
+infrastructure are available alongside normal app routes.
+
+Before that, `GET`/`HEAD`/`OPTIONS` on `/.well-known/oauth-protected-resource`
+are handled in `packages/worker/src/index.ts` itself. The OAuth provider
+library’s built-in handler for that path advertises `resource` as the request
+**origin** only; this app’s MCP server is identified by `<origin>/mcp`. Serving
+our own metadata on that URL keeps the RFC 8707 `resource` value consistent for
+clients (e.g. some MCP stacks) that discover metadata from the 401
+`resource_metadata` URL and would otherwise get `invalid_target` at the token
+endpoint. Protected-resource metadata and MCP auth challenges resolve the origin
+from the inbound request URL (via `getAppBaseUrl`) so clients connecting through
+`kody.codes` or a preview/local `workers.dev` host get matching resource values.
+Production refuses non-canonical hosts (see
+[Non-canonical hosts](../security.md#non-canonical-hosts)), so MCP is not served
+on the production `workers.dev` trigger. `APP_BASE_URL` is only the fallback for
+background work with no request URL.
+
+## Routing order
+
+Requests are handled in this order:
+
+0. Production canonical-host check
+   (`packages/worker/src/app/canonical-host.ts`): if the runtime is production
+   and the request host is not the `APP_BASE_URL` host, not a package-app
+   apex/subdomain (`parsePackageAppRequestHost`), and not an `APP_LEGACY_HOSTS`
+   entry, the Worker returns `404` `{ error: 'not_found' }` with
+   `Cache-Control: no-store`. `GET /health` is exempt so deploy health checks
+   and the status worker can probe the script on the `workers.dev` trigger.
+   Preview and local skip this check. Platform and runtime workers apply the
+   same rule with `/__platform/health` and `/__runtime/health` as their probe
+   exemptions.
+1. Package-app host isolation (see
+   [Hosted package app origin isolation](../security.md#hosted-package-app-origin-isolation)):
+   - On the **package-app apex**, no package code runs: `/` redirects to the app
+     origin; legacy `/@{username}/packages/*` redirects to the owning user's
+     subdomain; everything else is `404`.
+   - On a **per-user package-app subdomain** (`{username}.<package-app host>`),
+     only `/packages/{kodyId}/*` for that hostname's username is served (plus
+     the handoff-token exchange on those same paths). `/` redirects to the app
+     origin; every other path is `404`.
+   - On the **app origin**, `/@{username}/packages/*` never executes package
+     code: safe methods redirect to the owner's package-app subdomain with a
+     handoff token, other methods get a `307` to that subdomain.
+   - Production package-app requests fail with `500` when `PACKAGE_APP_BASE_URL`
+     is missing or is not on a separate registrable domain from `APP_BASE_URL`;
+     package code never executes inline.
+   - In confirmed local, preview, and test runtimes, an unset package-app origin
+     is a no-op and package apps are served inline at step 10 below.
+2. Public OAuth metadata (before `OAuthProvider`):
+   - OpenID Connect discovery: `/.well-known/openid-configuration` (`GET` /
+     `HEAD` / `OPTIONS`) — includes `revocation_endpoint` at `/oauth/token`
+     (same URL RFC 8414 authorization-server metadata advertises) plus matching
+     `revocation_endpoint_auth_methods_supported`.
+   - JWKS: `/.well-known/jwks.json` (`GET` / `HEAD` / `OPTIONS`)
+   - Protected resource metadata (base path only):
+     `/.well-known/oauth-protected-resource` (`GET` / `HEAD` / `OPTIONS`)
+   - Client ID Metadata Document: `/oauth/client-metadata.json` (`GET` / `HEAD`
+     / `OPTIONS`) — Kody-as-client CIMD. Served from the request origin so
+     `client_id` matches the fetch URL.
+   - Official CLI CIMD: `/oauth/cli-client-metadata.json` (`GET` / `HEAD` /
+     `OPTIONS`) — `@kodycodes/cli` presents this URL as `client_id`. Loopback
+     redirect is `http://127.0.0.1:43742/callback`.
+3. OAuth authorization endpoints:
+   - `/oauth/authorize`
+   - `/oauth/authorize-info`
+   - `/oauth/callback`
+4. Browser noise endpoint:
+   - `/.well-known/appspecific/com.chrome.devtools.json` (returns 204)
+5. OAuth protected resource metadata endpoint (inside the default handler, for
+   the `/mcp` suffix path only):
+   - `/.well-known/oauth-protected-resource/mcp`
+6. MCP endpoint:
+   - `/mcp` (requires OAuth bearer token). After authentication,
+     `packages/worker/src/mcp-auth.ts` routes by protocol era: 2025-era requests
+     go to the sessionful `MCP` Durable Object (`McpAgent`, MCP SDK v1) hosted
+     on `kody-platform` and reached through the `MCP_OBJECT` binding, and
+     `2026-07-28` envelope requests are served statelessly per request by
+     `packages/worker/src/mcp/stateless-lane.ts` (MCP SDK v2, no Durable
+     Object). Both lanes share one tool registration; every authenticated
+     request records a lane data point to the `MCP_PROTOCOL_EVENTS` Analytics
+     Engine dataset for dual-lane traffic measurement (see
+     [decision 0005](../decisions/0005-mcp-dual-lane-stateless-migration.md)).
+     The origin script owns no Durable Object classes
+     ([ADR 0034](../decisions/0034-origin-owns-no-durable-objects.md)). MCP
+     `execute` looks up `KodyFetchGateway` on `ctx.exports` of the script that
+     **owns** `MCP` — that is `kody-platform`. Origin
+     `POST /__maintenance/execute-smoke` is **origin-only**: it uses origin
+     `ctx.exports` and returns `scope: "origin-only"`,
+     `proves: "origin-kody-fetch-gateway"`, and `notMcpExecute: true`. A passing
+     smoke does not prove MCP execute health. Authenticated execute evidence is
+     the traffic-backed heartbeat plus the hourly
+     `POST /__maintenance/mcp-execute-health` fallback (legacy `/mcp` execute
+     with a dedicated canary token). The public card is recent for one hour
+     after organic or synthetic success; organic traffic alone is enough. Public
+     health and status GETs do not run that probe. A status-page snapshot older
+     than the one-minute skip window may re-read origin `GET /health/components`
+     `executeEvidence` (never execute) so organic last-success is not one cron
+     tick behind the live heartbeat. Persist merges with any newer timestamp
+     written while that fetch was in flight.
+7. Public `@username` ingress handled in `packages/worker/src/index.ts` before
+   the OAuth provider / app router (needs `ExecutionContext` for background
+   work). Production forwards package-invocation and package-app paths to
+   `kody-runtime` via `RUNTIME_WORKER`; webhook ingress stays on origin:
+   - `POST /@{username}/api/package-invocations/:kodyId/:exportName` —
+     unadvertised bearer-token drain (see
+     [package invocation API](../package-invocation-api.md))
+   - `POST /@{username}/webhooks/:packageKodyId/:webhookName/:urlSecret` —
+     inbound package webhooks (see [Inbound webhooks](./webhooks.md))
+   - Retired `/@{username}/connectors/...` paths return `404`. Use outbound MCP
+     servers (`kody.mcp[...]`) for home automation and similar tools.
+
+8. Static assets:
+   - Served from `ASSETS` for `GET` and `HEAD` when available
+   - Matching files under `packages/worker/public/` are asset-first at the edge
+     (they do not enter this Worker list) unless listed in
+     `assets.run_worker_first`
+9. Hosted package apps served inline on the app origin
+   (`/@{username}/packages/*`), only in confirmed non-production runtimes when
+   `PACKAGE_APP_BASE_URL` is unset.
+10. App server routes:
+
+- Everything else is handled by `packages/worker/src/app/handler.ts`
+- Public agent-discovery documents (Worker-first, origin-aware) include
+  `/robots.txt`, `/sitemap.xml`, `/auth.md`,
+  `/.well-known/mcp/server-card.json`, `/.well-known/api-catalog`,
+  `/.well-known/agent-skills/index.json`, skill markdown under
+  `/.well-known/agent-skills/:skillId/SKILL.md`, `/.well-known/security.txt`,
+  and OpenAI Apps domain verification at `/.well-known/openai-apps-challenge`
+  (unauthenticated `text/plain` token). The homepage adds RFC 8288 `Link`
+  headers to those documents and serves markdown when `Accept` prefers
+  `text/markdown`. DNS-AID (`_mcp._agents.<apex>` SVCB/HTTPS) is zone DNS, not a
+  Worker route.
+
+## Workflow runtime
+
+All server-side Kody runtime contexts expose `workflows` from `kody:runtime`.
+The helper routes every call to the shared `DynamicCallableWorkflow` binding;
+there is no separate context-specific Workflow class.
+
+- `workflows.create({ code, workflowName?, runAt, idempotencyKey, params })`
+  queues an inline ESM module and later executes it through the same module
+  loader used by `execute`. Omitted `workflowName` falls back to `inline-code`.
+- `workflows.create({ exportName, packageId?, workflowName?, runAt, idempotencyKey, params })`
+  queues a saved-package export invocation. Package runtime contexts resolve
+  `packageId` from `packageContext`; ad hoc contexts must pass it explicitly.
+  Omitted `workflowName` falls back to the export path.
+- The hub verifies saved-package ownership before queuing export-backed
+  workflows and records recent workflow rows for `workflowRunList`.
+
+## App server flow
+
+`packages/worker/src/app/handler.ts` validates environment variables and
+configures session cookie signing (`COOKIE_SECRET`) before creating the app
+router.
+
+Authenticated HTML requests resolve the user row and RBAC roles in one D1
+`batch`, start feature-flag evaluation (global flags + per-user overrides in a
+second `batch`) as soon as the user id is known, and `renderAppPage` awaits that
+already-started promise after page data instead of opening a new D1 wave.
+Anonymous callers still receive registry flag defaults without touching D1.
+
+`packages/worker/src/app/router.ts` maps route patterns from
+`packages/worker/universal/routes.ts` to handler modules (home, auth, account,
+session, logout, password reset, health).
+
+## Anonymous marketing HTML cache
+
+`renderAppPage` sets
+`Cache-Control: public, max-age=60, stale-while-revalidate=300` and
+`Vary: Cookie` for anonymous `/`, `/pricing`, `/blog`, `/community`,
+`/onboarding`, `/docs`, and `/docs/:slug`. Origin `fetch` stores those
+cookie-less `GET`/`HEAD` responses in the Cache API (`caches.default`), keyed on
+the canonical origin + pathname + search and a `__accept=html` marker. Requests
+whose `Accept` prefers `text/markdown` (`prefersMarkdown`) skip the store. A
+matching HTML request with no `kody_session` cookie and no `Authorization`
+header is served from that store (`X-Kody-Cache: HIT`) without running the app
+handler. A miss runs the handler and, when the response is `200` `text/html`
+with no `Set-Cookie` and already carries that Cache-Control, `ctx.waitUntil`
+buffers a clone and stores it only once the body has reached `</html>`
+(`isCompleteHtmlDocument`); a streamed document that stopped early (render
+failure, client abort) is never shared. The stored copy drops `Vary: Cookie`
+because Cloudflare's Cache API does not use `Vary` as a key (the lookup already
+excludes cookie-bearing requests). Hits restore the browser-facing `Vary` from
+the miss (`Cookie`, plus `Accept` on negotiated routes). Browser-facing
+`Cache-Control` is unchanged. `Cache-Control: no-cache` on the request skips the
+lookup so e2e can assert fresh HTML. Under `WRANGLER_IS_LOCAL_DEV=true`
+(`npm run dev`, the Playwright web server) the store is bypassed entirely:
+workerd honors `stale-while-revalidate` and persists `caches.default` under
+`.wrangler/state`, so a stored page would keep replaying for minutes after the
+edit that changed it. The `workers-unit` suite still exercises the store.
+
+The public package surfaces (`/@:username/:kodyId`,
+`/@:username/:kodyId/tree/:ref/*`, `/@:username/:kodyId/raw/:ref/*`,
+`/community/:id`, `/community/:id/files/*`, `/community/:id/raw/*`) and their
+JSON companions (`/profiles/:username/packages/:kodyId.json`,
+`/community/:id.json`, `.../files.json`) are shared too, but with
+`public, max-age=60` and no stale-while-revalidate: an owner can unpublish or
+make a package private and nothing purges shared caches, so a stale public
+response is bounded to one minute. They are shared only when the document is a
+`200` (a `401` or `404` to a stranger stays `no-store` so making a package
+public takes effect at once) and, for JSON, when the request has no session
+cookie and the payload carries no viewer state. JSON companions are not stored
+in the Cache API (the store is HTML-only). Anonymous `/onboarding.json` and
+`/landing-hero-videos.json` use the marketing policy (the playlist payload is
+also KV-cached with SWR). `/docs/:slug.json` is publicly cacheable without a
+cookie vary (the payload is identical for every visitor). The response stays
+`no-store` when the request carries a `kody_session` cookie, `loadSessionInfo`
+resolves a session, or the response sets a cookie. Auth, OAuth, account, and
+every other HTML path stay `no-store`.
+
+## Request context
+
+`handleRequest` wraps the router in `runWithRequestContext`
+(`packages/worker/src/request-context.ts`): an `AsyncLocalStorage` store, also
+keyed by `Request`, holding a per-request memo and the Server-Timing entries.
+`memoizePerRequest` dedupes lookups a page needs more than once — the package
+handler, the streaming `community-detail` frame, and the files loader all
+resolve the same `loadPackagePage`, and the tree page resolves the same
+Artifacts HEAD from two loaders. Callers that hold the `Request` pass it, since
+SSR frames render after the async scope has exited; repo-layer code without a
+request falls back to the store. Without any context the helpers just run the
+load, so unit tests and jobs are unaffected.
+
+## Page Server-Timing
+
+`renderAppPage` and page JSON companions emit an HTTP `Server-Timing` header
+with request-scoped phases (`{ name, durationMs, desc? }`, same helper as
+execute). Cloudflare may append `cfEdge` / `cfOrigin` / `cfWorker`. App phases
+are:
+
+- `session` — `loadSessionInfo`
+- `ssr` — route preload, stylesheet, and starting the HTML stream
+- `highlight` — token batch (`desc` is `hit`, `worker`, `miss`, or `fallback`)
+- `listings` — onboarding featured/chooser load
+- `package-page` — `loadPackagePage` (URL resolution, viewer, listing and owner
+  detail), recorded once per request thanks to the memo; nested inside it:
+  `resolve-url`, `auth`, `listing` (public listing + source row on a data-cache
+  miss), `artifacts-head` (cached default-branch HEAD), `owner-package`
+- `owner-readme` — README read from the owner's published source snapshot
+- `files-route` — tree URL canonicalization for `/tree/:ref` and `/files`
+- `files` — tree snapshot read (KV, then the listing pin snapshot)
+
+Loader phases recorded through `recordServerTiming` land on the request context
+and are merged into the header by `renderAppPage`, the package JSON companions,
+and frame responses.
+
+Signed-in `/onboarding` derives the setup checklist from verification, inbound
+MCP OAuth grants (first and second host), a Step 2 access win (memory, execute,
+or saved package), and the saved-package meter. The payload also includes
+featured community listings so persist-prompt copy can name an already-installed
+example, plus a known memory subject or saved-package name when one exists so
+Step 3 can show that artifact. The optional first-win email loop is not a
+checklist item and does not run Mailbox probes on this page. See
+[onboarding process](./onboarding.md).
+
+Durations use `Date.now()`, which Workers only advance across I/O. The weekly
+site-perf collector records these phases; it does not budget them.
+
+## Syntax highlighting
+
+Browser pages that show code — markdown bodies on guides, blog posts, and
+community READMEs, onboarding MCP config snippets, and JSON dumps on account
+jobs/activity — highlight with [Shiki](https://shiki.style/) on the
+`kody-highlight` worker. Origin loaders POST snippets over the `HIGHLIGHT`
+service binding (`POST /highlight`) and attach serializable token trees to
+loader/API data. The browser only paints those tokens as Remix JSX text and
+inline styles — never `innerHTML` — so untrusted README fences stay inside the
+markdown safety model. Light and dark tokens follow `prefers-color-scheme` via
+CSS variables in `packages/worker/public/styles.css`. Shiki grammars are not
+part of the browser bundle; missing tokens render as escaped plaintext in the
+same wrapper. Both origin and the highlight worker cache token batches keyed by
+highlighter version.
+
+## Client-side navigation flow
+
+The browser app intercepts same-origin `<a>` clicks and same-origin form
+submissions (`GET`/`POST`) and routes them in-place through the client router.
+Normal app navigations stay in-place through the client router instead of
+requiring a full document refresh.
+
+### Preload-then-commit
+
+SPA navigations use a **preload-then-commit** model (similar to React Router
+data routers): before `history.pushState` and the route swap, the client router
+runs a registered **route loader** for the destination URL, fetches JSON API
+data, and stores it in a single-slot preloaded navigation store. Only after the
+loader finishes (or is skipped when no loader matches) does the router commit
+the URL change and notify subscribers. Route components consume that payload
+synchronously on first render via `tryConsumeRouteLoaderData`, so the UI updates
+once with data already present instead of swapping routes into a loading state.
+Because consumption mutates route closure state mid-render, a successful consume
+also schedules one follow-up render of the consuming component (flushed in the
+same microtask, before paint); values a route derived before the consume call
+therefore cannot persist stale. Routes should still consume before deriving
+list/detail state — the follow-up render is a safety net, not the primary
+ordering contract.
+
+Route loaders are registered in `packages/worker/client/routes/index.tsx` under
+`clientRouteLoaders`, keyed by `routePattern(routes.<name>)`. The same keying
+scheme is used by `clientRoutes` and `document-head.ts`, so pathname renames
+flow from `packages/worker/universal/routes.ts` instead of duplicated literal
+strings. OAuth authorize/callback are the exception: those shells use
+`oauthPaths.authorize` and `oauthPaths.callback` because the Cloudflare OAuth
+provider wrapper, not `routes.ts`, owns those pathnames. Loaders still match
+with the same Remix route-pattern specificity as `clientRoutes`. They return a
+`RouteLoaderRedirect` (via `routeLoaderRedirect`) to abort the SPA navigation
+with a full-document redirect (for example, `401` → login). The router performs
+the redirect, never the loader itself, so speculative loader runs stay side-
+effect free. Loader errors still commit the navigation so the destination route
+can fall back to its own fetch; the router marks the destination stale
+(`markNavigationDataStale`) so same-path refreshes — where no href change would
+otherwise trigger a refetch — still reload. Hash-only changes commit immediately
+without a loader. Back/forward (`popstate`) and same-path refreshes after form
+POST also run loaders before notifying, keeping the previous UI visible until
+data is ready.
+
+### Intent prefetch
+
+Like React Router's `prefetch="intent"`, the client router speculatively runs
+the destination's route loader when the user shows intent to navigate —
+`mouseover`, `focusin`, or `touchstart` on a same-origin link with a registered
+loader (`intent-prefetch.ts`). A single latest-wins slot holds the speculative
+run; hovering a different link aborts the previous prefetch. When the click
+lands, the navigation adopts the in-flight or freshly settled prefetch instead
+of starting the loader from scratch; results expire after a short TTL and
+failures fall back to a normal loader run. Form POSTs abort any pending prefetch
+so pre-mutation data is never shown. Opt a link out with `data-prefetch="none"`.
+Rendered lists can also warm many destinations at once (`prefetchRouteHrefs`).
+Onboarding chips share one `/onboarding.json` payload; docs sidebar slugs do
+not, so they pass `{ independent: true }` and run one loader per href.
+
+A thin top-of-viewport **navigation progress bar** listens for `navigationstart`
+/ `navigationend` on `routerEvents` and appears only when a navigation is still
+pending after a short delay.
+
+The app shell also mounts **scroll restoration**. Each history entry's
+`window.scrollY` is stored in `sessionStorage` keyed by `history.state.key` (the
+same `{ [key]: y }` map React Router uses). A blocking inline script in the SSR
+document body restores that Y before first paint on a full document load, so a
+refresh does not flash the top of the page. After hydration the restorer keeps
+applying the same saved Y until the document is tall enough to reach it, then
+keeps pinning that Y through a short settle window so late layout (images,
+fonts, scroll anchoring) cannot persist a drifted position. User input ends the
+pin early. A persist of the current `scrollY` does not replace a taller saved Y
+while that Y is still unreachable, so a clamped early `scrollTo` cannot
+overwrite the intended position. `history.scrollRestoration` is `manual` so the
+browser does not fight the restorer. SPA back/forward still restores the saved
+position, hash targets scroll into view, and new navigations go to the top after
+the destination route commits. Same-document hash links are intercepted like
+other same-origin links so restoration can scroll to the target. Preserve the
+current scroll for a specific intercepted link or form with
+`data-prevent-scroll-reset`, or for programmatic navigation with
+`navigate(to, { preventScrollReset: true })`.
+
+Full page navigations occur for:
+
+- Explicit browser reloads/new tab loads
+- Cross-origin links/forms
+- Non-`_self` form targets (for example, `_blank`)
+- Explicit code paths that intentionally call `window.location.assign(...)`
+
+## CORS behavior
+
+`packages/worker/src/index.ts` wraps the handler with `withCors`
+(`getCorsHeaders`):
+
+- For `/mcp`, any `Origin` is reflected so browser-hosted remote MCP clients can
+  connect: allowed methods are `GET, HEAD, POST, DELETE, OPTIONS`, allowed
+  headers include the MCP protocol headers, and `WWW-Authenticate` /
+  `Mcp-Session-Id` are exposed so clients can read the OAuth challenge.
+- For every other path, CORS headers are only added when `Origin` exactly
+  matches the request origin; allowed methods are `GET, POST, OPTIONS` and
+  allowed headers include `content-type` and `authorization`.
+
+This keeps cross-origin behavior narrow while allowing same-origin browser and
+API requests, plus the deliberate `/mcp` exception.
+
+## Observability (Sentry and Workers tracing)
+
+The Worker default export is wrapped with `Sentry.withSentry` from
+`@sentry/cloudflare` (see `packages/worker/src/index.ts`) so incoming `fetch`
+requests are traced and uncaught errors can be reported when `SENTRY_DSN` is
+configured.
+
+The **MCP** (`MCP` / `MCP_OBJECT`) Durable Object is wrapped with
+`Sentry.instrumentDurableObjectWithSentry` (see
+`packages/worker/src/mcp/index.ts`) because it runs in a separate isolate from
+the top-level Worker.
+
+The MCP server flow adds one more Durable Object:
+
+- The MCP client hub Durable Object terminates outbound websocket connections to
+  user-configured MCP servers and proxies JSON-RPC/MCP requests over those
+  sockets.
+
+The runtime capability registry **merges** synthesized domains from enabled
+**MCP client servers**. See [MCP client servers](./mcp-client-servers.md).
+
+Shared options are built in `packages/worker/src/sentry-options.ts`: **release**
+comes from `APP_COMMIT_SHA` when set (deploy workflows pass it as a var), and
+**environment** defaults from `SENTRY_ENVIRONMENT` in
+`packages/worker/wrangler.jsonc` per deploy target.
+
+MCP tools emit structured `mcp-event` logs via
+`packages/worker/src/mcp/observability.ts`. On failures, the same module sends
+Sentry events at **error** severity (with MCP tags and context). Failures the
+caller can clear from the message alone — `McpCallerError`,
+`failurePhase: 'parse_input'`, or an explicit `callerError` payload flag,
+including sandbox user-code failures — stay on the structured `mcp-event` log
+line and never reach Sentry; genuine platform failures still do. New "not found
+/ bad argument" throw sites in `packages/worker/src/mcp/**` should use
+`McpCallerError`.
+
+`search` also publishes exclusive wall-clock tiles (`rateLimitMs`,
+`usernameLookupMs`, `identityResolutionMs`, `loadAndRankMs`, suffix stamps,
+`waitingItemsMs`, `formattingMs`) plus `exclusiveMs` / `unaccountedMs` so named
+phases reconcile against `timing.durationMs`. Overlapping detail (memory,
+retrievers, candidate plugins) stays beside those tiles and is not summed. Each
+call writes one privacy-safe point to `MCP_SEARCH_EVENTS` (see
+[Usage metering — MCP search duration](./usage-metering.md#mcp-search-duration)).
+Operators asking "is search slow this hour?" query that dataset; UWD `retriever`
+surface attribution is unchanged and does not measure search latency.
+`/admin/insights` has no search-latency chart. The same page does show the
+onboarding funnel (`ONBOARDING_FUNNEL_EVENTS`): unique users per stage for the
+last 7 and 28 days. See
+[Usage metering — Onboarding funnel](./usage-metering.md#onboarding-funnel).
+
+Authentication and authorization denials are deliberately **not**
+`McpCallerError`. `/mcp` rejects anonymous callers at the transport before any
+capability runs, so a denial reaching a handler means an internal caller built a
+context without a user — a defect worth an issue. Attack visibility for these
+lives in the audit log rather than the error stream; see
+[Security](../security.md).
+
+### Workers native tracing (OpenTelemetry)
+
+`packages/worker/wrangler.jsonc` also enables
+[Workers automatic tracing](https://developers.cloudflare.com/workers/observability/traces/)
+(`observability.traces.enabled`, beta). The runtime emits OTel-standard spans
+for handler invocations, outbound fetches, and binding calls (D1, KV, R2,
+Durable Objects, queues) with no SDK in the bundle; traces appear in the Workers
+Observability dashboard next to Workers Logs, and `console.*` output inside a
+span is attributed to that span. Custom spans are available via
+`tracing.enterSpan()` from `cloudflare:workers` when application-level spans are
+worth adding. App-level context rides on two hooks: every metered usage event
+emits a `kody.usage.{eventType}` child span with `kody.user_id` and entity
+attributes (see [usage-metering.md](./usage-metering.md)), and Sentry error
+events carry the signed-in user id (id only, no PII) via `Sentry.setUser` in the
+app auth resolver and the MCP failure reporter.
+
+Production deploys additionally export these traces to Sentry through the
+account-level `sentry-otlp-traces` destination; preview and test deploys inherit
+the top-level block without a destination, so their spans stay in the Cloudflare
+dashboard. The destination itself (endpoint, auth header, fork provisioning) is
+documented in [setup-manifest.md](../setup-manifest.md), and the
+`SENTRY_TRACES_SAMPLE_RATE` handling (production pins it to `0` to avoid
+duplicate SDK traces) in
+[environment-variables.md](../environment-variables.md).
+
+Billing note: each span is one observability event sharing the Workers Logs
+quota (10M events/month included on Workers Paid). Sampling is controlled by
+`observability.traces.head_sampling_rate` (defaults to full sampling, fine at
+current traffic).
+
+### Browser errors and session replay
+
+The client bundle initializes `@sentry/browser` from a `kody:sentry` meta tag
+that `ssr-document.tsx` renders when `SENTRY_DSN` is configured (the DSN is a
+publishable client key), except under `WRANGLER_IS_LOCAL_DEV` so Vite HMR noise
+does not report as production. Capture is errors plus **error-only Session
+Replay**: `replaysSessionSampleRate` is `0` and `replaysOnErrorSampleRate` is
+`1`, so nothing is recorded to Sentry unless an error occurs, and replays mask
+all text and block all media (`packages/worker/client/sentry-client.ts`) because
+Kody sessions contain personal content. Envelopes are sent through the
+same-origin `POST /sentry-tunnel` route
+(`packages/worker/src/app/handlers/sentry-tunnel.ts`), which only forwards
+envelopes whose DSN matches the Worker's own `SENTRY_DSN` — this keeps the
+first-party CSP at `connect-src 'self'`. Because that DSN is public, the route
+is also rate limited per IP before it buffers a body (see
+[security.md](../security.md)). The CSP allows `worker-src blob:` for the replay
+compression Web Worker.
+
+### Source maps
+
+`packages/worker/wrangler.jsonc` sets
+[`upload_source_maps`](https://developers.cloudflare.com/workers/wrangler/configuration/#source-maps),
+and production deploys pass
+`--outdir .wrangler/sentry-bundle --upload-source-maps` so the bundle + maps are
+generated consistently. Wrangler resolves that `--outdir` against the config
+file's directory, so platform and runtime maps land under
+`packages/platform-worker/.wrangler/sentry-bundle` and
+`packages/runtime-worker/.wrangler/sentry-bundle`. Origin maps come from
+`vite build` (`dist/ssr` plus `dist/client`). `npm run deploy` from a laptop is
+origin-only.
+
+To symbolicate stack traces in **Sentry** (not only in Cloudflare), configure
+[Cloudflare source maps in Sentry](https://docs.sentry.io/platforms/javascript/guides/cloudflare/sourcemaps/):
+add GitHub **repository variables** `SENTRY_ORG` and `SENTRY_PROJECT`, a
+`SENTRY_AUTH_TOKEN` **secret** with release upload scopes, then CI runs
+`npm run sentry:upload-sourcemaps` after deploy using the same **release** as
+`APP_COMMIT_SHA`. Sibling-only deploys upload the worker bundles that exist and
+skip client maps when origin Vite did not run.

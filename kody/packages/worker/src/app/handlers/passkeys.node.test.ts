@@ -1,0 +1,369 @@
+import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
+import { DatabaseSync } from 'node:sqlite'
+import { expect, test } from 'vitest'
+import {
+	createAuthCookie,
+	setAuthSessionSecret,
+	type AuthSession,
+} from '#app/auth-session.ts'
+import { createAccountPasskeysApiHandler } from '#app/handlers/account-passkeys.ts'
+import {
+	createWebauthnAuthenticationHandler,
+	createWebauthnRegistrationHandler,
+} from '#app/handlers/webauthn.ts'
+import { createStableUserIdFromEmail } from '#worker/user-id.ts'
+import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
+import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
+
+const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
+
+function applyMigrations(db: DatabaseSync) {
+	const migrationsDir = new URL('../../../migrations/', import.meta.url)
+	applyAllMigrations(db, migrationsDir)
+}
+
+function createMigratedDb() {
+	const sqlite = new DatabaseSync(':memory:')
+	applyMigrations(sqlite)
+	return {
+		sqlite,
+		db: createD1FromSqlite(sqlite),
+	}
+}
+
+async function seedUser(
+	sqlite: DatabaseSync,
+	input: {
+		id: number
+		email: string
+		username: string
+	},
+) {
+	const passwordHash = await createPasswordHash('test-password')
+	const stableUserId = await createStableUserIdFromEmail(input.email)
+	sqlite.exec(`
+		INSERT INTO users (
+			id,
+			username,
+			email,
+			stable_user_id,
+			password_hash,
+			email_verified_at
+		) VALUES (
+			${input.id},
+			${quoteSqlString(input.username)},
+			${quoteSqlString(input.email)},
+			${quoteSqlString(stableUserId)},
+			${quoteSqlString(passwordHash)},
+			CURRENT_TIMESTAMP
+		);
+	`)
+}
+
+function seedPasskey(
+	sqlite: DatabaseSync,
+	input: {
+		id: string
+		userId: number
+		name?: string
+		aaguid?: string
+		lastUsedAt?: string | null
+	},
+) {
+	const name = input.name ?? ''
+	const aaguid = input.aaguid ?? '00000000-0000-0000-0000-000000000000'
+	const lastUsedAt =
+		input.lastUsedAt === undefined
+			? 'NULL'
+			: input.lastUsedAt === null
+				? 'NULL'
+				: quoteSqlString(input.lastUsedAt)
+	sqlite.exec(`
+		INSERT INTO passkeys (
+			id, aaguid, public_key, user_id, webauthn_user_handle, counter,
+			device_type, backed_up, transports, name, last_used_at
+		) VALUES (
+			${quoteSqlString(input.id)},
+			${quoteSqlString(aaguid)},
+			'cHVibGljLWtleQ',
+			${input.userId},
+			'd2ViYXV0aG4tdXNlcg',
+			0,
+			'multiDevice',
+			1,
+			'internal',
+			${quoteSqlString(name)},
+			${lastUsedAt}
+		);
+	`)
+}
+
+function createAppEnv(db: D1Database) {
+	return {
+		APP_DB: db,
+		APP_BASE_URL: 'http://example.com',
+		COOKIE_SECRET: testCookieSecret,
+		SENTRY_ENVIRONMENT: 'test',
+	} as unknown as Parameters<typeof createAccountPasskeysApiHandler>[0]
+}
+
+type Handler = {
+	handler(context: never): Promise<Response>
+}
+
+async function runHandler(
+	handler: Handler,
+	request: Request,
+): Promise<Response> {
+	return handler.handler({
+		request,
+		url: new URL(request.url),
+		params: {},
+	} as never)
+}
+
+function initTestSecrets() {
+	setAuthSessionSecret(testCookieSecret)
+}
+
+const userOneSession: AuthSession = {
+	stableUserId: testStableUserIdFromEmail('one@example.com'),
+	email: 'one@example.com',
+	rememberMe: false,
+}
+
+test('account passkeys API lists labels/dates, renames owned keys, and deletes while ignoring other users', async () => {
+	initTestSecrets()
+	const { sqlite, db } = createMigratedDb()
+	await seedUser(sqlite, { id: 1, email: 'one@example.com', username: 'one' })
+	await seedUser(sqlite, { id: 2, email: 'two@example.com', username: 'two' })
+	seedPasskey(sqlite, {
+		id: 'passkey-user-1',
+		userId: 1,
+		aaguid: 'ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4',
+		lastUsedAt: '2026-07-01 12:00:00',
+	})
+	seedPasskey(sqlite, {
+		id: 'passkey-user-1b',
+		userId: 1,
+		name: 'Work laptop',
+	})
+	seedPasskey(sqlite, { id: 'passkey-user-2', userId: 2, name: 'Other user' })
+
+	const handler = createAccountPasskeysApiHandler(createAppEnv(db))
+	const listResponse = await runHandler(
+		handler,
+		new Request('http://example.com/account/passkeys.json', {
+			headers: { Cookie: await createAuthCookie(userOneSession, false) },
+		}),
+	)
+	expect(listResponse.status).toBe(200)
+	const listPayload = (await listResponse.json()) as {
+		ok: boolean
+		passkeys: Array<{
+			id: string
+			name: string
+			createdAt: string
+			lastUsedAt: string | null
+		}>
+	}
+	expect(listPayload.ok).toBe(true)
+	expect(listPayload.passkeys.map((passkey) => passkey.id)).toEqual([
+		'passkey-user-1b',
+		'passkey-user-1',
+	])
+	expect(listPayload.passkeys).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				id: 'passkey-user-1',
+				name: 'Google Password Manager',
+				lastUsedAt: '2026-07-01 12:00:00',
+			}),
+			expect.objectContaining({
+				id: 'passkey-user-1b',
+				name: 'Work laptop',
+				lastUsedAt: null,
+			}),
+		]),
+	)
+
+	const crossUserRename = await runHandler(
+		handler,
+		new Request('http://example.com/account/passkeys.json', {
+			method: 'POST',
+			headers: {
+				Cookie: await createAuthCookie(userOneSession, false),
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				intent: 'rename',
+				passkeyId: 'passkey-user-2',
+				name: 'Stolen name',
+			}),
+		}),
+	)
+	expect(crossUserRename.status).toBe(404)
+	expect(
+		sqlite
+			.prepare(`SELECT name FROM passkeys WHERE id = 'passkey-user-2'`)
+			.get(),
+	).toEqual({ name: 'Other user' })
+
+	const ownRename = await runHandler(
+		handler,
+		new Request('http://example.com/account/passkeys.json', {
+			method: 'POST',
+			headers: {
+				Cookie: await createAuthCookie(userOneSession, false),
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				intent: 'rename',
+				passkeyId: 'passkey-user-1',
+				name: '  Phone · Google  ',
+			}),
+		}),
+	)
+	expect(ownRename.status).toBe(200)
+	const renamePayload = (await ownRename.json()) as {
+		ok: boolean
+		passkeys: Array<{ id: string; name: string }>
+	}
+	expect(renamePayload.ok).toBe(true)
+	expect(
+		renamePayload.passkeys.find((passkey) => passkey.id === 'passkey-user-1')
+			?.name,
+	).toBe('Phone · Google')
+
+	const invalidRename = await runHandler(
+		handler,
+		new Request('http://example.com/account/passkeys.json', {
+			method: 'POST',
+			headers: {
+				Cookie: await createAuthCookie(userOneSession, false),
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				intent: 'rename',
+				passkeyId: 'passkey-user-1',
+				name: '   ',
+			}),
+		}),
+	)
+	expect(invalidRename.status).toBe(400)
+
+	const crossUserDelete = await runHandler(
+		handler,
+		new Request('http://example.com/account/passkeys.json', {
+			method: 'POST',
+			headers: {
+				Cookie: await createAuthCookie(userOneSession, false),
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ intent: 'delete', passkeyId: 'passkey-user-2' }),
+		}),
+	)
+	expect(crossUserDelete.status).toBe(404)
+	expect(
+		sqlite.prepare(`SELECT COUNT(*) AS count FROM passkeys`).get(),
+	).toEqual({ count: 3 })
+
+	const ownDelete = await runHandler(
+		handler,
+		new Request('http://example.com/account/passkeys.json', {
+			method: 'POST',
+			headers: {
+				Cookie: await createAuthCookie(userOneSession, false),
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ intent: 'delete', passkeyId: 'passkey-user-1' }),
+		}),
+	)
+	expect(ownDelete.status).toBe(200)
+	const deletePayload = (await ownDelete.json()) as {
+		ok: boolean
+		passkeys: Array<{ id: string }>
+	}
+	expect(deletePayload.ok).toBe(true)
+	expect(deletePayload.passkeys.map((passkey) => passkey.id)).toEqual([
+		'passkey-user-1b',
+	])
+})
+
+test('registration options require authentication and exclude existing credentials', async () => {
+	initTestSecrets()
+	const { sqlite, db } = createMigratedDb()
+	const handler = createWebauthnRegistrationHandler(createAppEnv(db))
+
+	const unauthenticated = await runHandler(
+		handler,
+		new Request('http://example.com/webauthn/registration'),
+	)
+	expect(unauthenticated.status).toBe(401)
+
+	await seedUser(sqlite, { id: 1, email: 'one@example.com', username: 'one' })
+	seedPasskey(sqlite, { id: 'passkey-user-1', userId: 1 })
+
+	const response = await runHandler(
+		handler,
+		new Request('http://example.com/webauthn/registration', {
+			headers: { Cookie: await createAuthCookie(userOneSession, false) },
+		}),
+	)
+	expect(response.status).toBe(200)
+	const payload = (await response.json()) as {
+		ok: boolean
+		options: {
+			challenge: string
+			rp: { id: string }
+			excludeCredentials: Array<{ id: string }>
+		}
+	}
+	expect(payload.ok).toBe(true)
+	expect(payload.options.rp.id).toBe('example.com')
+	expect(payload.options.challenge.length).toBeGreaterThan(0)
+	expect(payload.options.excludeCredentials).toEqual([
+		expect.objectContaining({ id: 'passkey-user-1' }),
+	])
+	expect(response.headers.get('Set-Cookie')).toContain(
+		'kody_webauthn_challenge=',
+	)
+})
+
+test('authentication issues challenge options and rejects unknown passkeys', async () => {
+	initTestSecrets()
+	const { db } = createMigratedDb()
+	const handler = createWebauthnAuthenticationHandler(createAppEnv(db))
+	const optionsResponse = await runHandler(
+		handler,
+		new Request('http://example.com/webauthn/authentication'),
+	)
+	expect(optionsResponse.status).toBe(200)
+	const optionsPayload = (await optionsResponse.json()) as {
+		ok: boolean
+		options: { challenge: string }
+	}
+	expect(optionsPayload.ok).toBe(true)
+	expect(optionsPayload.options.challenge.length).toBeGreaterThan(0)
+	const challengeCookie =
+		optionsResponse.headers.get('Set-Cookie')?.split(';')[0] ?? ''
+	expect(challengeCookie).toContain('kody_webauthn_challenge=')
+
+	const response = await runHandler(
+		handler,
+		new Request('http://example.com/webauthn/authentication', {
+			method: 'POST',
+			headers: {
+				Cookie: challengeCookie,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				response: { id: 'unknown-passkey', rawId: 'unknown-passkey' },
+			}),
+		}),
+	)
+	expect(response.status).toBe(401)
+	expect(await response.json()).toMatchObject({ ok: false })
+})
