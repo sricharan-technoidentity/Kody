@@ -39,6 +39,7 @@ import {
 	claimAccountEmail,
 } from '#worker/identity/email-claims.ts'
 import { resolveUserStableId } from '#worker/user-id.ts'
+import { userExistsByUsername } from '#worker/identity/generated-username.ts'
 import { recordOnboardingFunnelEvent } from '#worker/identity/onboarding-funnel.ts'
 import {
 	createPasswordHash,
@@ -58,6 +59,12 @@ import {
 } from '#universal/referral-cookie.ts'
 import { touchLastActiveAt } from '#worker/identity/activation-stamps.ts'
 import { scheduleUserCreatedEvent } from '#worker/identity/schedule-user-lifecycle-event.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import {
+	getAccountWriterFactory,
+	getNewAccountDb,
+	resolveTokenOwnerDb,
+} from '#worker/identity/token-owner-db.ts'
 import { attributeReferralAtSignup } from '#worker/entitlements/referral-program.ts'
 
 const authModes = ['login', 'signup'] as const
@@ -233,10 +240,7 @@ export function createAuthHandler(env: Env) {
 			}
 
 			if (normalizedMode === 'signup') {
-				const existingUsername = await db.findOne(usersTable, {
-					where: { username: normalizedUsername },
-				})
-				if (existingUsername) {
+				if (await userExistsByUsername(env.APP_DB, normalizedUsername)) {
 					void logAuditEvent({
 						db: auditDatabaseFromEnv(env),
 						category: 'auth',
@@ -318,11 +322,14 @@ export function createAuthHandler(env: Env) {
 					)
 				}
 
+				// The new account's own writer: RLS lets it create and see only itself.
+				const accountDb = getNewAccountDb(env, allocated.stableUserId)
+				const accountEnv = { ...env, APP_DB: accountDb } as Env
 				let record: { id: number; stableUserId: string } | null = null
 				try {
 					const stableUserId = allocated.stableUserId
 					const createdAt = new Date().toISOString()
-					const createdUser = await db.create(
+					const createdUser = await createDb(accountDb).create(
 						usersTable,
 						{
 							username: normalizedUsername,
@@ -390,13 +397,13 @@ export function createAuthHandler(env: Env) {
 					)
 				}
 
-				// INSERT OR IGNORE affects zero rows when the seeded `user` role is
+				// Role assignment affects zero rows when the seeded `user` role is
 				// missing (partial migration). Fail loudly rather than creating an
 				// account with no roles or permissions.
 				let assigned = false
 				try {
 					;({ assigned } = await assignUserRole({
-						db: env.APP_DB,
+						db: accountDb,
 						userId: record.id,
 						roleName: 'user',
 					}))
@@ -408,7 +415,8 @@ export function createAuthHandler(env: Env) {
 					// otherwise the email/username would be stuck as "already
 					// registered" on an account that has no roles.
 					try {
-						await env.APP_DB.prepare(`DELETE FROM users WHERE id = ?`)
+						await accountDb
+							.prepare(`DELETE FROM users WHERE id = ?`)
 							.bind(record.id)
 							.run()
 					} catch (error) {
@@ -434,14 +442,15 @@ export function createAuthHandler(env: Env) {
 				}
 
 				try {
-					await claimAccountEmail(env.APP_DB, {
+					await claimAccountEmail(accountDb, {
 						userId: record.id,
 						email: normalizedEmail,
 					})
 				} catch (error) {
 					console.error('Failed to claim signup email:', error)
 					try {
-						await env.APP_DB.prepare(`DELETE FROM users WHERE id = ?`)
+						await accountDb
+							.prepare(`DELETE FROM users WHERE id = ?`)
 							.bind(record.id)
 							.run()
 					} catch (deleteError) {
@@ -468,7 +477,7 @@ export function createAuthHandler(env: Env) {
 
 				try {
 					await createEmailVerification({
-						env,
+						env: accountEnv,
 						userId: record.id,
 						email: normalizedEmail,
 						requestUrl: url,
@@ -477,7 +486,8 @@ export function createAuthHandler(env: Env) {
 				} catch (error) {
 					console.error('Failed to create email verification at signup:', error)
 					try {
-						await env.APP_DB.prepare(`DELETE FROM users WHERE id = ?`)
+						await accountDb
+							.prepare(`DELETE FROM users WHERE id = ?`)
 							.bind(record.id)
 							.run()
 					} catch (deleteError) {
@@ -512,7 +522,8 @@ export function createAuthHandler(env: Env) {
 				if (platformEmailDomain) {
 					try {
 						await ensureDefaultEmailInbox({
-							db: env.APP_DB,
+							// ponytail: D1-typed until P6 moves mailboxes; it reclaims stale address rows cross-user.
+							db: accountDb as D1Database,
 							userId: record.stableUserId,
 							username: normalizedUsername,
 							domain: platformEmailDomain,
@@ -548,7 +559,8 @@ export function createAuthHandler(env: Env) {
 				})
 				try {
 					await attributeReferralAtSignup({
-						db: env.APP_DB,
+						// ponytail: the referrer lookup is cross-user; P4 `entitlements` gives it a definer.
+						db: accountDb as D1Database,
 						refereeStableUserId: record.stableUserId,
 						refereeUsername: normalizedUsername,
 						referralCode: resolveReferralCodeForSignup({
@@ -592,9 +604,19 @@ export function createAuthHandler(env: Env) {
 				return Response.json(signupAcceptedBody(normalizedMode), { headers })
 			}
 
-			const userRecord = await db.findOne(usersTable, {
-				where: { email: normalizedEmail },
+			// Only the address is known before sign-in; continue on its owner's writer.
+			const accountDb = await resolveTokenOwnerDb<D1Database | PgDatabase>({
+				db: env.APP_DB,
+				forUser: getAccountWriterFactory(env),
+				kind: 'account_email',
+				key: normalizedEmail,
 			})
+			const accountUsers = accountDb ? createDb(accountDb) : null
+			const userRecord = accountUsers
+				? await accountUsers.findOne(usersTable, {
+						where: { email: normalizedEmail },
+					})
+				: null
 			let passwordValid = false
 			if (userRecord) {
 				passwordValid = await verifyPassword(
@@ -604,7 +626,7 @@ export function createAuthHandler(env: Env) {
 			} else {
 				await verifyPassword(normalizedPassword, dummyPasswordHash)
 			}
-			if (!userRecord || !passwordValid) {
+			if (!accountDb || !accountUsers || !userRecord || !passwordValid) {
 				void logAuditEvent({
 					db: auditDatabaseFromEnv(env),
 					category: 'auth',
@@ -623,7 +645,7 @@ export function createAuthHandler(env: Env) {
 
 			try {
 				await upgradePasswordHashIfNeeded(
-					db,
+					accountUsers,
 					userRecord.id,
 					normalizedPassword,
 					userRecord.password_hash,
@@ -635,7 +657,7 @@ export function createAuthHandler(env: Env) {
 			// Two-factor accounts get a short-lived pending cookie instead of a
 			// session; the real session cookie is only issued once the TOTP code
 			// passes at POST /verify/2fa.json.
-			if (await isTwoFactorEnabled(env.APP_DB, userRecord.id)) {
+			if (await isTwoFactorEnabled(accountDb, userRecord.id)) {
 				setVerifySessionSecret(env.COOKIE_SECRET)
 				const secure = isSecureRequest(request)
 				const verifyCookie = await createVerifySessionCookie(
@@ -674,7 +696,7 @@ export function createAuthHandler(env: Env) {
 				},
 				isSecureRequest(request),
 			)
-			await touchLastActiveAt(env.APP_DB, {
+			await touchLastActiveAt(accountDb, {
 				stableUserId: resolveUserStableId(userRecord),
 			})
 			void logAuditEvent({

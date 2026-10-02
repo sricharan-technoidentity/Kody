@@ -168,11 +168,11 @@ INSERT INTO usage_rollups (
 	updated_at
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 ON CONFLICT (user_id, metric, month) DO UPDATE SET
-	event_count = event_count + excluded.event_count,
-	error_count = error_count + excluded.error_count,
-	total_duration_ms = total_duration_ms + excluded.total_duration_ms,
-	total_cpu_ms = total_cpu_ms + excluded.total_cpu_ms,
-	total_bytes = total_bytes + excluded.total_bytes,
+	event_count = usage_rollups.event_count + excluded.event_count,
+	error_count = usage_rollups.error_count + excluded.error_count,
+	total_duration_ms = usage_rollups.total_duration_ms + excluded.total_duration_ms,
+	total_cpu_ms = usage_rollups.total_cpu_ms + excluded.total_cpu_ms,
+	total_bytes = usage_rollups.total_bytes + excluded.total_bytes,
 	updated_at = excluded.updated_at
 `.trim()
 

@@ -379,7 +379,7 @@ export async function registerExecuteTool(agent: McpRegistrationAgent) {
 					})
 					if (!claim) {
 						throw new Error(
-							'Unable to claim execute idempotency key; RUN_LOG is unavailable.',
+							'Unable to claim execute idempotency key; RUN_RECORDS is unavailable.',
 						)
 					}
 					if (!claim.claimed) {

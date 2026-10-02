@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
@@ -28,7 +29,7 @@ function createHarness() {
 	const env = {
 		APP_DB: createD1FromSqlite(sqlite),
 		AUDIT_DB: createD1FromSqlite(auditSqlite),
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 	} as Env
 	const ctx = {
 		env,

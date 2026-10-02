@@ -198,7 +198,7 @@ function createEnv(
 			storageBuckets: options?.storageBuckets,
 			savedPackageCount: options?.savedPackageCount,
 		}),
-		USER_METER: meter.env.USER_METER,
+		USER_METERS: meter.env.USER_METERS,
 	} as Env
 }
 
@@ -1195,7 +1195,7 @@ function createEntitlementsDatabase(input: {
 						async all<T>() {
 							if (
 								query.includes('FROM user_storage_buckets') &&
-								query.includes('SELECT storage_id AS storageId') &&
+								query.includes('SELECT storage_id AS "storageId"') &&
 								query.includes('WHERE user_id = ?')
 							) {
 								const userId = String(params[0])

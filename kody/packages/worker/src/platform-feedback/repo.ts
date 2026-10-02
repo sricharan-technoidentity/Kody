@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	type PlatformFeedbackCategory,
 	type PlatformFeedbackListItem,
@@ -5,6 +6,9 @@ import {
 	type PlatformFeedbackRow,
 	type PlatformFeedbackStatus,
 } from './types.ts'
+
+/** Submitters use their scoped writer; review uses the restricted admin role. */
+export type FeedbackDatabase = Pick<SqlDatabase, 'prepare'>
 
 const platformFeedbackFullColumns = `id, submitter_user_id, submitter_username,
 	submitter_email, category, summary, details, status, reviewed_by_user_id,
@@ -57,7 +61,7 @@ function mapPlatformFeedbackListRow(
 }
 
 export async function insertPlatformFeedback(
-	db: D1Database,
+	db: FeedbackDatabase,
 	row: PlatformFeedbackRow,
 	limits: {
 		activeQueueLimit: number
@@ -111,7 +115,7 @@ export async function insertPlatformFeedback(
 }
 
 export async function getPlatformFeedbackSubmissionLimitCounts(
-	db: D1Database,
+	db: FeedbackDatabase,
 	input: {
 		submitterUserId: string
 		rollingWindowStart: string
@@ -158,7 +162,7 @@ export async function getPlatformFeedbackSubmissionLimitCounts(
 }
 
 export async function getPlatformFeedbackByIdForAdmin(
-	db: D1Database,
+	db: FeedbackDatabase,
 	feedbackId: string,
 ): Promise<PlatformFeedbackRecordWithRevision | null> {
 	const row = await db
@@ -173,7 +177,7 @@ export async function getPlatformFeedbackByIdForAdmin(
 }
 
 export async function listPlatformFeedbackRowsForAdmin(
-	db: D1Database,
+	db: FeedbackDatabase,
 	input: {
 		page: number
 		pageSize: number
@@ -204,7 +208,7 @@ export async function listPlatformFeedbackRowsForAdmin(
 }
 
 export async function listPlatformFeedbackPageRowsForAdmin(
-	db: D1Database,
+	db: FeedbackDatabase,
 	input: {
 		page: number
 		pageSize: number
@@ -237,7 +241,7 @@ export async function listPlatformFeedbackPageRowsForAdmin(
 }
 
 export async function updatePlatformFeedbackStatusForAdmin(
-	db: D1Database,
+	db: FeedbackDatabase,
 	input: {
 		feedbackId: string
 		expectedStatus: PlatformFeedbackStatus

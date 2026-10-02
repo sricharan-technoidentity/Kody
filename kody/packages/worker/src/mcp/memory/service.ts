@@ -4,7 +4,7 @@ import { type StorageContext } from '#mcp/storage.ts'
 import {
 	isCapabilitySearchOffline,
 	type EmbedTextFn,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import {
 	acknowledgeSurfacedMemoryWrites,
 	deleteMemory as deleteMemoryRow,

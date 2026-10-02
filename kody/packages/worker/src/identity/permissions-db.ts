@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { type PermissionString, type RoleName } from '#universal/permissions.ts'
 
 export type PermissionRow = {
@@ -37,7 +38,7 @@ export function parseUserRolesAndPermissionRows(
 }
 
 export async function getUserRolesAndPermissions(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<{ roles: Array<RoleName>; permissions: Array<PermissionString> }> {
 	// LEFT JOIN permissions so role membership still resolves when a role has
@@ -72,7 +73,7 @@ function isMissingRbacTableError(error: unknown) {
  * list on pre-RBAC databases so callers can treat "no RBAC tables" as "no admins".
  */
 export async function listAdminStableUserIds(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<Array<string>> {
 	try {
 		const result = await db
@@ -92,14 +93,15 @@ export async function listAdminStableUserIds(
 }
 
 export async function assignUserRole(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	roleName: RoleName
 }): Promise<{ assigned: boolean }> {
 	const result = await input.db
 		.prepare(
-			`INSERT OR IGNORE INTO user_roles (user_id, role_id)
-			 SELECT ?, id FROM roles WHERE name = ?`,
+			`INSERT INTO user_roles (user_id, role_id)
+			 SELECT ?, id FROM roles WHERE name = ?
+			 ON CONFLICT (user_id, role_id) DO NOTHING`,
 		)
 		.bind(input.userId, input.roleName)
 		.run()
@@ -107,7 +109,7 @@ export async function assignUserRole(input: {
 }
 
 export async function removeUserRole(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	roleName: RoleName
 }) {
@@ -123,14 +125,26 @@ export async function removeUserRole(input: {
 
 /**
  * Removes the admin role from a user only while at least one other admin
- * remains. The count check lives inside the DELETE statement so concurrent
- * removals cannot both pass a stale pre-check and leave zero admins.
+ * remains. PostgreSQL callers lock the admin role before counting in a fresh statement
+ * snapshot. Legacy SQLite callers retain their single-writer DELETE check.
  */
 export async function removeAdminRolePreservingLastAdmin(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 }): Promise<{ removed: boolean }> {
-	const result = await input.db
+	if (input.db.transaction) {
+		return input.db.transaction(async (db) => {
+			await db
+				.prepare("SELECT id FROM roles WHERE name = 'admin' FOR UPDATE")
+				.first()
+			return deleteAdminRole(db, input.userId)
+		})
+	}
+	return deleteAdminRole(input.db, input.userId)
+}
+
+async function deleteAdminRole(db: SqlDatabase, userId: number) {
+	const result = await db
 		.prepare(
 			`DELETE FROM user_roles
 			 WHERE user_id = ?
@@ -140,7 +154,7 @@ export async function removeAdminRolePreservingLastAdmin(input: {
 			        INNER JOIN roles r ON r.id = ur.role_id
 			        WHERE r.name = 'admin') > 1`,
 		)
-		.bind(input.userId)
+		.bind(userId)
 		.run()
 	return { removed: (result.meta?.changes ?? 0) > 0 }
 }

@@ -1,8 +1,9 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { d1ContainsLikePattern } from '#worker/d1-like-pattern.ts'
 import { chunkArray } from '@kody-internal/shared/chunk.ts'
 import { parseTagsJson } from '@kody-internal/shared/tags-json.ts'
 import { classifyForkListingRelation } from '#universal/community-listing-ahead.ts'
-import { buildLengthSafeVectorId } from '#worker/vectorize/vector-ids.ts'
+import { buildLengthSafeVectorId } from '#worker/search-index/vector-ids.ts'
 import { stampFirstSavedPackage } from '#worker/identity/activation-stamps.ts'
 import { type OnboardingFunnelEnv } from '#worker/identity/onboarding-funnel-event.ts'
 import {
@@ -128,7 +129,7 @@ const emptyCommunityProvenance: SavedPackageCommunityProvenance = {
 	forkListingRelation: null,
 }
 export async function insertSavedPackage(
-	db: D1Database,
+	db: SqlDatabase,
 	row: Omit<SavedPackageRow, 'created_at' | 'updated_at' | 'locked_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -172,7 +173,7 @@ export async function insertSavedPackage(
 }
 
 export async function updateSavedPackage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageId: string
@@ -238,7 +239,7 @@ export async function updateSavedPackage(
 }
 
 export async function getSavedPackageLockedAt(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageId: string
@@ -259,7 +260,7 @@ export async function getSavedPackageLockedAt(
 }
 
 export async function setSavedPackageLockedAt(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageId: string
@@ -283,7 +284,7 @@ export async function setSavedPackageLockedAt(
 }
 
 export async function deleteSavedPackage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageId: string
@@ -297,7 +298,7 @@ export async function deleteSavedPackage(
 }
 
 export async function getSavedPackageById(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageId: string
@@ -316,7 +317,7 @@ export async function getSavedPackageById(
 
 /** Unscoped id lookup for share-grant and stamp-authority paths. */
 export async function getSavedPackageByIdAny(
-	db: D1Database,
+	db: SqlDatabase,
 	packageId: string,
 ): Promise<SavedPackageRecord | null> {
 	const row = await db
@@ -331,7 +332,7 @@ export async function getSavedPackageByIdAny(
 }
 
 export async function getSavedPackageWithCommunityProvenanceById(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageId: string
@@ -350,7 +351,7 @@ export async function getSavedPackageWithCommunityProvenanceById(
 }
 
 export async function getSavedPackageWithCommunityProvenanceByKodyId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		kodyId: string
@@ -369,7 +370,7 @@ export async function getSavedPackageWithCommunityProvenanceByKodyId(
 }
 
 export async function getSavedPackageByKodyId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		kodyId: string
@@ -387,7 +388,7 @@ export async function getSavedPackageByKodyId(
 }
 
 export async function getSavedPackageByName(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		name: string
@@ -405,7 +406,7 @@ export async function getSavedPackageByName(
 }
 
 export async function listSavedPackagesByUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 	},
@@ -423,7 +424,7 @@ export async function listSavedPackagesByUserId(
 }
 
 export async function listSavedPackagesWithCommunityProvenanceByUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 	},
@@ -442,7 +443,7 @@ export async function listSavedPackagesWithCommunityProvenanceByUserId(
 }
 
 export async function listSavedPackagesByKodyIds(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		kodyIds: Array<string>
@@ -469,7 +470,7 @@ export async function listSavedPackagesByKodyIds(
 }
 
 export async function listSavedPackagesByIds(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageIds: Array<string>
@@ -499,7 +500,7 @@ export async function listSavedPackagesByIds(
 }
 
 export async function listSavedPackageCommunityProvenanceByIds(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageIds: Array<string>
@@ -539,7 +540,7 @@ function savedPackageSearchOrderBy(sort: SavedPackageSearchSort) {
 		case 'created':
 			return 'created_at DESC, id ASC'
 		case 'name':
-			return 'name COLLATE NOCASE ASC, id ASC'
+			return 'LOWER(name) ASC, id ASC'
 		default:
 			sort satisfies never
 			throw new Error(`Unknown saved package sort: ${String(sort)}`)
@@ -552,7 +553,7 @@ function savedPackageSearchOrderBy(sort: SavedPackageSearchSort) {
  * matches the filtered result set.
  */
 export async function searchSavedPackagesByUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		query?: string
@@ -609,7 +610,7 @@ export async function searchSavedPackagesByUserId(
 // single query never loads the whole table. Pass the last row id of the
 // previous page (or null for the first page).
 export async function listSavedPackagesPage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		afterId: string | null
 		limit: number

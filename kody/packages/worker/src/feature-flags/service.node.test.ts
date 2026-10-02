@@ -1,3 +1,4 @@
+import { createTestFeatureFlagsDb } from '#worker/test-support/aws/test-feature-flags-db.ts'
 import { expect, test } from 'vitest'
 import {
 	clearFeatureFlagUserOverride,
@@ -12,323 +13,8 @@ import {
 	setFeatureFlagUserOverride,
 } from './service.ts'
 
-type GlobalRow = {
-	key: string
-	enabled: number
-	rollout_percent: number | null
-	audience: string
-	note: string
-	updated_by: number | null
-	updated_at: string
-}
-
-type OverrideRow = {
-	flag_key: string
-	user_id: number
-	enabled: number
-	updated_by: number | null
-	updated_at: string
-}
-
-type UserRow = {
-	id: number
-	username: string
-	stable_user_id?: string
-	experiments_opt_in?: number
-}
-
-function createFeatureFlagsTestDb(
-	input: {
-		globals?: Array<GlobalRow>
-		overrides?: Array<OverrideRow>
-		users?: Array<UserRow>
-	} = {},
-) {
-	const globals = new Map(
-		(input.globals ?? []).map((row) => [row.key, { ...row }]),
-	)
-	const overrides = new Map(
-		(input.overrides ?? []).map((row) => [
-			`${row.flag_key}:${row.user_id}`,
-			{ ...row },
-		]),
-	)
-	const users = new Map(
-		(input.users ?? []).map((row) => [
-			row.id,
-			{
-				...row,
-				stable_user_id: row.stable_user_id ?? `stable-${row.id}`,
-				experiments_opt_in: row.experiments_opt_in ?? 0,
-			},
-		]),
-	)
-	let clock = 0
-
-	function nextTimestamp() {
-		clock += 1
-		return `2026-07-19T00:00:${String(clock).padStart(2, '0')}.000Z`
-	}
-
-	function normalize(query: string) {
-		return query.replace(/\s+/g, ' ').trim().toLowerCase()
-	}
-
-	function createStatement(query: string, params: Array<unknown> = []) {
-		const normalized = normalize(query)
-		return {
-			query,
-			bind(...nextParams: Array<unknown>) {
-				return createStatement(query, nextParams)
-			},
-			async first<T>() {
-				if (
-					normalized.includes('from feature_flag_user_overrides') &&
-					normalized.includes('where flag_key = ? and user_id = ?')
-				) {
-					const row = overrides.get(`${params[0]}:${params[1]}`)
-					return (row ? { enabled: row.enabled } : null) as T | null
-				}
-				if (
-					normalized.includes('from feature_flags') &&
-					normalized.includes('where key = ?')
-				) {
-					const row = globals.get(String(params[0]))
-					return (
-						row
-							? {
-									enabled: row.enabled,
-									rollout_percent: row.rollout_percent,
-									audience: row.audience,
-								}
-							: null
-					) as T | null
-				}
-				if (
-					normalized.includes('from users') &&
-					normalized.includes('experiments_opt_in') &&
-					normalized.includes('where id = ?')
-				) {
-					const row = users.get(Number(params[0]))
-					return (
-						row ? { experiments_opt_in: row.experiments_opt_in } : null
-					) as T | null
-				}
-				throw new Error(`Unsupported first query: ${query}`)
-			},
-			async all<T>() {
-				if (
-					normalized.includes('from feature_flags') &&
-					!normalized.includes('where')
-				) {
-					return {
-						results: [...globals.values()].map((row) => ({
-							...row,
-							updated_by_stable_user_id:
-								users.get(row.updated_by ?? -1)?.stable_user_id ?? null,
-						})),
-						meta: { changes: 0 },
-					} as { results: Array<T>; meta: { changes: number } }
-				}
-				if (
-					normalized.includes('from feature_flag_user_overrides') &&
-					normalized.includes('where user_id = ?')
-				) {
-					const userId = Number(params[0])
-					return {
-						results: [...overrides.values()]
-							.filter((row) => row.user_id === userId)
-							.map((row) => ({
-								flag_key: row.flag_key,
-								enabled: row.enabled,
-							})),
-						meta: { changes: 0 },
-					} as { results: Array<T>; meta: { changes: number } }
-				}
-				if (
-					normalized.includes('from users') &&
-					normalized.includes('experiments_opt_in') &&
-					normalized.includes('where id = ?')
-				) {
-					const row = users.get(Number(params[0]))
-					return {
-						results: row
-							? [{ experiments_opt_in: row.experiments_opt_in }]
-							: [],
-						meta: { changes: 0 },
-					} as { results: Array<T>; meta: { changes: number } }
-				}
-				if (
-					normalized.includes('from feature_flag_user_overrides o') &&
-					normalized.includes('join users u')
-				) {
-					const rows = [...overrides.values()]
-						.map((row) => {
-							const user = users.get(row.user_id)
-							if (!user) return null
-							return {
-								flag_key: row.flag_key,
-								user_id: row.user_id,
-								enabled: row.enabled,
-								updated_at: row.updated_at,
-								username: user.username,
-								stable_user_id: user.stable_user_id,
-							}
-						})
-						.filter((row) => row !== null)
-						.sort((left, right) => {
-							const byKey = left.flag_key.localeCompare(right.flag_key)
-							if (byKey !== 0) return byKey
-							return left.username.localeCompare(right.username)
-						})
-					return {
-						results: rows,
-						meta: { changes: 0 },
-					} as { results: Array<T>; meta: { changes: number } }
-				}
-				throw new Error(`Unsupported all query: ${query}`)
-			},
-			async run() {
-				if (
-					normalized.startsWith('insert into feature_flags') &&
-					normalized.includes('on conflict(key) do update')
-				) {
-					const key = String(params[0])
-					const enabled = Number(params[1])
-					const rolloutPercent =
-						params[2] === null || params[2] === undefined
-							? null
-							: Number(params[2])
-					// Emulates COALESCE(?, '') on insert / COALESCE(?, note) on update.
-					const noteParam =
-						params[3] === null || params[3] === undefined
-							? null
-							: String(params[3])
-					const note = noteParam ?? globals.get(key)?.note ?? ''
-					const exists = globals.has(key)
-					const insertAudience =
-						params[4] === null || params[4] === undefined
-							? 'everyone'
-							: String(params[4])
-					const updateAudienceParam = params[7]
-					const audience = exists
-						? updateAudienceParam === null || updateAudienceParam === undefined
-							? (globals.get(key)?.audience ?? 'everyone')
-							: String(updateAudienceParam)
-						: insertAudience
-					const updatedBy = Number(params[5])
-					const updatedAt = nextTimestamp()
-					globals.set(key, {
-						key,
-						enabled,
-						rollout_percent: rolloutPercent,
-						audience,
-						note,
-						updated_by: updatedBy,
-						updated_at: updatedAt,
-					})
-					return { meta: { changes: 1 } }
-				}
-				if (
-					normalized.startsWith('insert into feature_flag_user_overrides') &&
-					normalized.includes('on conflict(flag_key, user_id) do update')
-				) {
-					const flagKey = String(params[0])
-					const userId = Number(params[1])
-					const enabled = Number(params[2])
-					const updatedBy = Number(params[3])
-					const updatedAt = nextTimestamp()
-					overrides.set(`${flagKey}:${userId}`, {
-						flag_key: flagKey,
-						user_id: userId,
-						enabled,
-						updated_by: updatedBy,
-						updated_at: updatedAt,
-					})
-					return { meta: { changes: 1 } }
-				}
-				if (
-					normalized.startsWith('delete from feature_flag_user_overrides') &&
-					normalized.includes('where flag_key = ? and user_id = ?')
-				) {
-					const mapKey = `${params[0]}:${params[1]}`
-					const existed = overrides.delete(mapKey)
-					return { meta: { changes: existed ? 1 : 0 } }
-				}
-				if (
-					normalized.startsWith('delete from feature_flag_user_overrides') &&
-					normalized.includes('where flag_key = ?')
-				) {
-					const flagKey = String(params[0])
-					let changes = 0
-					// Snapshot keys so deletes during this loop do not skip entries.
-					// oxlint-disable-next-line unicorn/no-useless-spread
-					for (const mapKey of [...overrides.keys()]) {
-						if (mapKey.startsWith(`${flagKey}:`)) {
-							overrides.delete(mapKey)
-							changes += 1
-						}
-					}
-					return { meta: { changes } }
-				}
-				if (
-					normalized.startsWith('delete from feature_flags') &&
-					normalized.includes('where key = ?')
-				) {
-					const existed = globals.delete(String(params[0]))
-					return { meta: { changes: existed ? 1 : 0 } }
-				}
-				throw new Error(`Unsupported run query: ${query}`)
-			},
-		}
-	}
-
-	const db = {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-		async batch(
-			statements: Array<{
-				query?: string
-				all?: () => Promise<unknown>
-				run?: () => Promise<{ meta: { changes: number } }>
-			}>,
-		) {
-			const results = []
-			for (const statement of statements) {
-				const isSelect = /^\s*select\b/i.test(statement.query ?? '')
-				if (isSelect && typeof statement.all === 'function') {
-					results.push(await statement.all())
-				} else if (typeof statement.run === 'function') {
-					results.push(await statement.run())
-				} else {
-					results.push({ meta: { changes: 0 } })
-				}
-			}
-			return results
-		},
-		globals,
-		overrides,
-		users,
-	} as unknown as D1Database & {
-		globals: Map<string, GlobalRow>
-		overrides: Map<string, OverrideRow>
-		users: Map<
-			number,
-			{
-				id: number
-				username: string
-				stable_user_id: string
-				experiments_opt_in: number
-			}
-		>
-	}
-
-	return db
-}
-
 test('isFeatureEnabled falls back to registry default when no DB state exists', async () => {
-	const db = createFeatureFlagsTestDb()
+	await using db = await createTestFeatureFlagsDb()
 	await expect(isFeatureEnabled(db, 'demo-indicator', 1)).resolves.toBe(false)
 	await expect(isFeatureEnabled(db, 'demo-indicator', null)).resolves.toBe(
 		false,
@@ -344,7 +30,7 @@ test('isFeatureEnabled falls back to registry default when no DB state exists', 
 })
 
 test('global on/off and percentage rollout evaluation', async () => {
-	const db = createFeatureFlagsTestDb()
+	await using db = await createTestFeatureFlagsDb()
 
 	await setFeatureFlagGlobalState(db, {
 		key: 'demo-indicator',
@@ -462,7 +148,11 @@ test('global on/off and percentage rollout evaluation', async () => {
 		rolloutPercent: null,
 		updatedBy: 9,
 	})
-	expect(db.globals.get('demo-indicator')?.note).toBe('keep me')
+	expect(
+		await db
+			.prepare("SELECT note FROM feature_flags WHERE key = 'demo-indicator'")
+			.first('note'),
+	).toBe('keep me')
 
 	await setFeatureFlagGlobalState(db, {
 		key: 'demo-indicator',
@@ -471,7 +161,11 @@ test('global on/off and percentage rollout evaluation', async () => {
 		note: '',
 		updatedBy: 9,
 	})
-	expect(db.globals.get('demo-indicator')?.note).toBe('')
+	expect(
+		await db
+			.prepare("SELECT note FROM feature_flags WHERE key = 'demo-indicator'")
+			.first('note'),
+	).toBe('')
 })
 
 test('computeRolloutBucket is deterministic and spreads across 0-99', () => {
@@ -494,7 +188,7 @@ test('computeRolloutBucket is deterministic and spreads across 0-99', () => {
 })
 
 test('user override wins over global off and global on; clear restores evaluation', async () => {
-	const db = createFeatureFlagsTestDb()
+	await using db = await createTestFeatureFlagsDb()
 
 	await setFeatureFlagGlobalState(db, {
 		key: 'demo-indicator',
@@ -544,7 +238,7 @@ test('user override wins over global off and global on; clear restores evaluatio
 })
 
 test('getFeatureFlagEvaluationsForUser reports assignment sources', async () => {
-	const db = createFeatureFlagsTestDb()
+	await using db = await createTestFeatureFlagsDb()
 
 	await expect(getFeatureFlagEvaluationsForUser(db, 7)).resolves.toEqual({
 		'demo-indicator': { enabled: false, source: 'default' },
@@ -596,7 +290,7 @@ test('getFeatureFlagEvaluationsForUser reports assignment sources', async () => 
 })
 
 test('listFeatureFlagsForAdmin includes registry flags and stale DB-only keys', async () => {
-	const db = createFeatureFlagsTestDb({
+	await using db = await createTestFeatureFlagsDb({
 		users: [
 			{ id: 3, username: 'alice' },
 			{ id: 4, username: 'bob' },
@@ -699,7 +393,7 @@ test('listFeatureFlagsForAdmin includes registry flags and stale DB-only keys', 
 			rolloutPercent: 25,
 			audience: 'everyone',
 			note: 'rolling out',
-			updatedByStableUserId: null,
+			updatedByStableUserId: 'stable-1',
 		},
 		overrides: [
 			{
@@ -749,7 +443,7 @@ test('listFeatureFlagsForAdmin includes registry flags and stale DB-only keys', 
 })
 
 test('deleteStaleFeatureFlag refuses registry keys and removes stale rows', async () => {
-	const db = createFeatureFlagsTestDb({
+	await using db = await createTestFeatureFlagsDb({
 		users: [{ id: 3, username: 'alice' }],
 		globals: [
 			{
@@ -785,16 +479,34 @@ test('deleteStaleFeatureFlag refuses registry keys and removes stale rows', asyn
 	await expect(deleteStaleFeatureFlag(db, 'demo-indicator')).rejects.toThrow(
 		/Cannot delete registry feature flag/,
 	)
-	expect(db.globals.has('demo-indicator')).toBe(true)
+	expect(
+		Boolean(
+			await db
+				.prepare("SELECT key FROM feature_flags WHERE key = 'demo-indicator'")
+				.first(),
+		),
+	).toBe(true)
 
 	await expect(deleteStaleFeatureFlag(db, 'retired-flag')).resolves.toBe(true)
-	expect(db.globals.has('retired-flag')).toBe(false)
-	expect(db.overrides.size).toBe(0)
+	expect(
+		Boolean(
+			await db
+				.prepare("SELECT key FROM feature_flags WHERE key = 'retired-flag'")
+				.first(),
+		),
+	).toBe(false)
+	expect(
+		(
+			await db
+				.prepare('SELECT COUNT(*) AS total FROM feature_flag_user_overrides')
+				.first<{ total: number }>()
+		)?.total,
+	).toBe(0)
 	await expect(deleteStaleFeatureFlag(db, 'retired-flag')).resolves.toBe(false)
 })
 
 test('experiments_opt_in audience requires users.experiments_opt_in; overrides still win', async () => {
-	const db = createFeatureFlagsTestDb({
+	await using db = await createTestFeatureFlagsDb({
 		users: [
 			{ id: 7, username: 'opted', experiments_opt_in: 1 },
 			{ id: 8, username: 'plain', experiments_opt_in: 0 },
@@ -855,7 +567,7 @@ test('experiments_opt_in audience requires users.experiments_opt_in; overrides s
 })
 
 test('execute-invoke first insert without audience uses registry defaultAudience', async () => {
-	const db = createFeatureFlagsTestDb({
+	await using db = await createTestFeatureFlagsDb({
 		users: [
 			{ id: 7, username: 'opted', experiments_opt_in: 1 },
 			{ id: 8, username: 'plain', experiments_opt_in: 0 },
@@ -868,7 +580,58 @@ test('execute-invoke first insert without audience uses registry defaultAudience
 		rolloutPercent: null,
 		updatedBy: 1,
 	})
-	expect(db.globals.get('execute-invoke')?.audience).toBe('experiments_opt_in')
+	expect(
+		await db
+			.prepare(
+				"SELECT audience FROM feature_flags WHERE key = 'execute-invoke'",
+			)
+			.first('audience'),
+	).toBe('experiments_opt_in')
 	await expect(isFeatureEnabled(db, 'execute-invoke', 7)).resolves.toBe(true)
 	await expect(isFeatureEnabled(db, 'execute-invoke', 8)).resolves.toBe(false)
+})
+
+test('Postgres flag overrides stay scoped to the evaluated user and reader refuses changes', async () => {
+	await using db = await createTestFeatureFlagsDb()
+	await setFeatureFlagGlobalState(db, {
+		key: 'demo-indicator',
+		enabled: false,
+		rolloutPercent: null,
+		updatedBy: 1,
+	})
+	await setFeatureFlagUserOverride(db, {
+		key: 'demo-indicator',
+		userId: 7,
+		enabled: true,
+		updatedBy: 1,
+	})
+	const alice = db.forUser('stable-7')
+	const bob = db.forUser('stable-8')
+	expect(await isFeatureEnabled(alice.reader, 'demo-indicator', 7)).toBe(true)
+	expect(await isFeatureEnabled(bob.reader, 'demo-indicator', 8)).toBe(false)
+	expect(
+		await bob.reader.prepare('SELECT * FROM feature_flag_user_overrides').all(),
+	).toMatchObject({ results: [] })
+	await expect(
+		setFeatureFlagUserOverride(bob.db, {
+			key: 'demo-indicator',
+			userId: 7,
+			enabled: false,
+			updatedBy: 8,
+		}),
+	).rejects.toThrow('row-level security')
+	await expect(
+		setFeatureFlagGlobalState(bob.db, {
+			key: 'demo-indicator',
+			enabled: true,
+			rolloutPercent: null,
+			updatedBy: 8,
+		}),
+	).rejects.toThrow('permission denied')
+	await expect(
+		clearFeatureFlagUserOverride(alice.reader, {
+			key: 'demo-indicator',
+			userId: 7,
+		}),
+	).rejects.toThrow('read-only transaction')
 })

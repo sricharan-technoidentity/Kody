@@ -1,8 +1,10 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
+import { createTestCommunityDb } from '#worker/test-support/aws/test-community-db.ts'
 import {
 	countCommunityForksByListingIds,
+	deleteCommunityListing,
 	insertCommunityFork,
+	insertCommunityListing,
 	upsertCommunityRating,
 } from './repo.ts'
 import {
@@ -10,149 +12,38 @@ import {
 	listCommunityActivityForAdmin,
 } from './service.ts'
 
-type TestD1Statement = {
-	bind(...params: Array<unknown>): TestD1Statement
-	all<T>(): Promise<{ results: Array<T> }>
-	first<T>(): Promise<T | null>
-	run(): Promise<{ meta: { changes: number } }>
-}
-
-function createD1FromSqlite(sqlite: DatabaseSync) {
-	function createStatement(
-		query: string,
-		params: Array<unknown> = [],
-	): TestD1Statement {
-		return {
-			bind(...boundParams: Array<unknown>) {
-				return createStatement(query, boundParams)
-			},
-			async all<T>() {
-				return { results: sqlite.prepare(query).all(...params) as Array<T> }
-			},
-			async first<T>() {
-				return (sqlite.prepare(query).get(...params) ?? null) as T | null
-			},
-			async run() {
-				const result = sqlite.prepare(query).run(...params)
-				return { meta: { changes: result.changes } }
-			},
-		}
-	}
-	return {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-	} as unknown as D1Database
-}
-
-function createCommunityDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`CREATE TABLE users (
-		id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-		username TEXT NOT NULL UNIQUE,
-		email TEXT NOT NULL UNIQUE,
-		password_hash TEXT NOT NULL,
-		stable_user_id TEXT
-	)`)
-	// Mirrors the community_listings, community_ratings, and community_forks
-	// schemas in packages/worker/migrations/0001-squashed-init.sql.
-	sqlite.exec(`
-CREATE TABLE community_listings (
-	id TEXT PRIMARY KEY NOT NULL,
-	owner_user_id TEXT NOT NULL,
-	package_id TEXT NOT NULL,
-	source_id TEXT NOT NULL,
-	kody_id TEXT NOT NULL,
-	name TEXT NOT NULL,
-	description TEXT NOT NULL,
-	tags_json TEXT NOT NULL DEFAULT '[]',
-	category TEXT NOT NULL DEFAULT 'other',
-	search_text TEXT,
-	readme_content TEXT,
-	license TEXT NOT NULL,
-	package_version TEXT,
-	pinned_commit TEXT NOT NULL,
-	status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'delisted')),
-	created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-	updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-	published_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-, featured_at TEXT);
-CREATE TABLE community_ratings (
-	id TEXT PRIMARY KEY NOT NULL,
-	listing_id TEXT NOT NULL,
-	user_id TEXT NOT NULL,
-	stars INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
-	adaptation_effort INTEGER NOT NULL CHECK (adaptation_effort BETWEEN 1 AND 5),
-	note TEXT,
-	created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-	updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-);
-CREATE TABLE IF NOT EXISTS "community_forks" (
-	id TEXT PRIMARY KEY NOT NULL,
-	listing_id TEXT NOT NULL,
-	forker_user_id TEXT NOT NULL,
-	origin_commit TEXT NOT NULL,
-	forked_package_id TEXT NOT NULL,
-	forked_source_id TEXT NOT NULL,
-	target_kody_id TEXT NOT NULL,
-	listing_name TEXT,
-	listing_kody_id TEXT,
-	created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-, adopted_at TEXT, adoption_note TEXT, actor TEXT
-CHECK (actor IS NULL OR actor IN ('human', 'agent')));
-CREATE UNIQUE INDEX idx_community_listings_owner_package
-ON community_listings(owner_user_id, package_id);
-CREATE INDEX idx_community_listings_status
-ON community_listings(status);
-CREATE UNIQUE INDEX idx_community_ratings_listing_user
-ON community_ratings(listing_id, user_id);
-CREATE INDEX idx_community_forks_listing_id
-	ON community_forks(listing_id);
-CREATE INDEX idx_community_forks_forker_listing
-	ON community_forks(forker_user_id, listing_id);
-CREATE INDEX idx_community_forks_forked_package_id
-ON community_forks(forked_package_id);
-`)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
 test('admin community activity reads forks and latest ratings newest-first with pagination and filters', async () => {
-	const { sqlite, db } = createCommunityDb()
-	sqlite
-		.prepare(
-			`INSERT INTO users (
-				username, email, password_hash, stable_user_id
-			) VALUES (?, ?, 'hash', ?), (?, ?, 'hash', ?)`,
-		)
-		.run(
-			'forker',
-			'forker@example.com',
-			'user-forker',
-			'rater',
-			'rater@example.com',
-			'user-rater',
-		)
+	await using database = await createTestCommunityDb()
+	// Activity review runs as kody_admin after the permission check.
+	const db = database.admin
+	await database.pg.query(
+		`INSERT INTO users (username, email, password_hash, stable_user_id)
+		VALUES ('forker', 'forker@example.com', 'hash', 'user-forker'),
+			('rater', 'rater@example.com', 'hash', 'user-rater')`,
+	)
 	for (const listing of [
 		{ id: 'listing-1', kodyId: 'alpha', name: '@owner/alpha' },
 		{ id: 'listing-2', kodyId: 'beta', name: '@owner/beta' },
 	]) {
-		sqlite
-			.prepare(
-				`INSERT INTO community_listings (
-					id, owner_user_id, package_id, source_id, kody_id, name,
-					description, tags_json, license, pinned_commit, status,
-					created_at, updated_at, published_at
-				) VALUES (?, 'owner', ?, ?, ?, ?, 'description', '[]', 'MIT',
-					'commit-1', 'active', '2026-07-20T00:00:00.000Z',
-					'2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z')`,
-			)
-			.run(
-				listing.id,
-				`package-${listing.id}`,
-				`source-${listing.id}`,
-				listing.kodyId,
-				listing.name,
-			)
+		await insertCommunityListing(database.owner('owner'), {
+			id: listing.id,
+			owner_user_id: 'owner',
+			package_id: `package-${listing.id}`,
+			source_id: `source-${listing.id}`,
+			kody_id: listing.kodyId,
+			name: listing.name,
+			description: 'description',
+			tags_json: '[]',
+			category: 'other',
+			search_text: null,
+			readme_content: null,
+			license: 'MIT',
+			pinned_commit: 'commit-1',
+			status: 'active',
+			created_at: '2026-07-20T00:00:00.000Z',
+			updated_at: '2026-07-20T00:00:00.000Z',
+			published_at: '2026-07-20T00:00:00.000Z',
+		})
 	}
 
 	for (const fork of [
@@ -172,7 +63,7 @@ test('admin community activity reads forks and latest ratings newest-first with 
 			createdAt: '2026-07-20T00:03:00.000Z',
 		},
 	]) {
-		await insertCommunityFork(db, {
+		await insertCommunityFork(database.owner('user-forker'), {
 			id: fork.id,
 			listing_id: fork.listingId,
 			forker_user_id: 'user-forker',
@@ -187,7 +78,8 @@ test('admin community activity reads forks and latest ratings newest-first with 
 		})
 	}
 
-	const firstRating = await upsertCommunityRating(db, {
+	const rater = database.owner('user-rater')
+	const firstRating = await upsertCommunityRating(rater, {
 		id: 'rating-original',
 		listing_id: 'listing-1',
 		user_id: 'user-rater',
@@ -197,7 +89,7 @@ test('admin community activity reads forks and latest ratings newest-first with 
 		created_at: '2026-07-20T00:04:00.000Z',
 		updated_at: '2026-07-20T00:04:00.000Z',
 	})
-	const updatedRating = await upsertCommunityRating(db, {
+	const updatedRating = await upsertCommunityRating(rater, {
 		id: 'rating-replacement',
 		listing_id: 'listing-1',
 		user_id: 'user-rater',
@@ -263,7 +155,12 @@ test('admin community activity reads forks and latest ratings newest-first with 
 		}),
 	).toEqual(firstPage.items[0])
 
-	sqlite.prepare(`DELETE FROM community_listings WHERE id = 'listing-2'`).run()
+	expect(
+		await deleteCommunityListing(database.owner('owner'), {
+			listingId: 'listing-2',
+			ownerUserId: 'owner',
+		}),
+	).toBe(true)
 	const deletedListingActivity = await listCommunityActivityForAdmin({
 		db,
 		kind: 'fork',
@@ -292,4 +189,11 @@ test('admin community activity reads forks and latest ratings newest-first with 
 		'listing-2': 1,
 		'listing-without-forks': 0,
 	})
+	// Visitors count forks of active listings only.
+	expect(
+		await countCommunityForksByListingIds(database.community, [
+			'listing-1',
+			'listing-2',
+		]),
+	).toEqual({ 'listing-1': 2, 'listing-2': 0 })
 })

@@ -1,97 +1,72 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { platformFeedbackTestSchemaSql } from '#worker/platform-feedback/test-schema.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { loadAdminPlatformFeedbackData } from './admin-platform-feedback-data.ts'
 
-function createAdminPlatformFeedbackFixture() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE users (
-			id INTEGER PRIMARY KEY NOT NULL,
-			username TEXT NOT NULL,
-			email TEXT NOT NULL,
-			stable_user_id TEXT,
-			private_content TEXT
-		);
-		CREATE UNIQUE INDEX idx_users_stable_user_id
-			ON users(stable_user_id)
-			WHERE stable_user_id IS NOT NULL;
-	`)
-	sqlite.exec(platformFeedbackTestSchemaSql)
-	sqlite
-		.prepare(
-			`INSERT INTO users (
-				id, username, email, stable_user_id, private_content
-			) VALUES (?, ?, ?, ?, ?)`,
-		)
-		.run(
-			1,
-			'active-submitter',
-			'active@example.com',
-			'stable-active',
-			'ACTIVE_PRIVATE_CONTENT_MUST_NOT_LEAK',
-		)
-	sqlite
-		.prepare(
-			`INSERT INTO users (
-				id, username, email, stable_user_id, private_content
-			) VALUES (?, ?, ?, ?, ?)`,
-		)
-		.run(
-			2,
-			'other-user',
-			'other@example.com',
-			'stable-other',
-			'OTHER_USER_CONTENT_MUST_NOT_LEAK',
-		)
-	const insertFeedback = sqlite.prepare(
+async function createAdminPlatformFeedbackFixture() {
+	const database = await createTestDb()
+	await database.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash, bio)
+		 VALUES
+			(1, 'active-submitter', 'active@example.com', 'stable-active', 'x', 'ACTIVE_PRIVATE_CONTENT_MUST_NOT_LEAK'),
+			(2, 'other-user', 'other@example.com', 'stable-other', 'x', 'OTHER_USER_CONTENT_MUST_NOT_LEAK')`,
+	)
+	await database.pg.query(
 		`INSERT INTO platform_feedback (
 			id, submitter_user_id, submitter_username, submitter_email,
 			category, summary, details, status, reviewed_by_user_id,
 			reviewed_at, admin_note, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES
+			($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13),
+			($14, $15, $16, $17, $18, $19, $20, $21, NULL, NULL, NULL, $22, $22)`,
+		[
+			'feedback-active',
+			'stable-active',
+			'snapshot-submitter',
+			'snapshot@example.com',
+			'bug',
+			'<script>summary remains text</script>',
+			'Full active feedback details.',
+			'triaged',
+			'stable-reviewer',
+			'2026-07-19T01:30:00.000Z',
+			'Follow up with the submitter.',
+			'2026-07-19T01:00:00.000Z',
+			'2026-07-19T01:30:00.000Z',
+			'feedback-missing',
+			'stable-deleted',
+			'deleted-submitter',
+			'deleted@example.com',
+			'suggestion',
+			'Missing submitter account',
+			'The feedback remains after the submitter identity is unavailable.',
+			'open',
+			'2026-07-19T00:00:00.000Z',
+		],
 	)
-	insertFeedback.run(
-		'feedback-active',
-		'stable-active',
-		'snapshot-submitter',
-		'snapshot@example.com',
-		'bug',
-		'<script>summary remains text</script>',
-		'Full active feedback details.',
-		'triaged',
-		'stable-reviewer',
-		'2026-07-19T01:30:00.000Z',
-		'Follow up with the submitter.',
-		'2026-07-19T01:00:00.000Z',
-		'2026-07-19T01:30:00.000Z',
-	)
-	insertFeedback.run(
-		'feedback-missing',
-		'stable-deleted',
-		'deleted-submitter',
-		'deleted@example.com',
-		'suggestion',
-		'Missing submitter account',
-		'The feedback remains after the submitter identity is unavailable.',
-		'open',
-		null,
-		null,
-		null,
-		'2026-07-19T00:00:00.000Z',
-		'2026-07-19T00:00:00.000Z',
-	)
+	const admin = createPgDatabase({
+		connection: database.pg,
+		role: 'kody_admin',
+	})
 	const queries: Array<string> = []
 	return {
-		sqlite,
+		...database,
 		queries,
-		env: { APP_DB: createD1FromSqlite(sqlite, { queries }) } as Env,
+		env: {
+			APP_DB: {
+				...admin,
+				prepare(sql: string) {
+					queries.push(sql)
+					return admin.prepare(sql)
+				},
+			},
+		} as unknown as Env,
 	}
 }
 
 test('admin platform feedback data lists safely and uses stored submitter snapshots', async () => {
-	const { sqlite, queries, env } = createAdminPlatformFeedbackFixture()
+	await using fixture = await createAdminPlatformFeedbackFixture()
+	const { queries, env } = fixture
 
 	const list = await loadAdminPlatformFeedbackData(
 		env,
@@ -188,5 +163,10 @@ test('admin platform feedback data lists safely and uses stored submitter snapsh
 	)
 	expect(invalidSelection.selectedFeedback).toBeNull()
 
-	sqlite.close()
+	// A submitter's scoped writer cannot use the operator loader for others.
+	const submitterView = await loadAdminPlatformFeedbackData(
+		{ APP_DB: fixture.forUser('stable-other').db } as unknown as Env,
+		'https://example.com/admin/platform-feedback?feedbackId=feedback-active',
+	)
+	expect(submitterView).toMatchObject({ total: 0, selectedFeedback: null })
 })

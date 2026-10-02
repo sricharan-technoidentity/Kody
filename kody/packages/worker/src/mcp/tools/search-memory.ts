@@ -5,7 +5,7 @@ import {
 	loadRelevantMemoriesForTool,
 	type MemoryToolSummary,
 } from '#mcp/tools/memory-tool-context.ts'
-import { type EmbedTextFn } from '#worker/vectorize/embedding.ts'
+import { type EmbedTextFn } from '#worker/search-index/embedding.ts'
 
 import {
 	SEARCH_MEMORY_ENRICHMENT_BUDGET_MS,

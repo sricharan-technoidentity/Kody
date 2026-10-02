@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
 import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testCookieSecret } from '#worker/test-support/auth-provider-harness.ts'
 import {
 	buildTipsUnsubscribeUrl,
@@ -15,12 +16,6 @@ import {
 } from './tips-unsubscribe.ts'
 
 const env = { COOKIE_SECRET: testCookieSecret } as Pick<Env, 'COOKIE_SECRET'>
-
-function createDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
 
 test('tips unsubscribe tokens verify, opt-out is idempotent, and headers are RFC one-click', async () => {
 	const token = await createTipsUnsubscribeToken({ env, userId: 'user-tips' })
@@ -56,13 +51,13 @@ test('tips unsubscribe tokens verify, opt-out is idempotent, and headers are RFC
 		`https://kody.codes/unsubscribe/tips?token=${encodeURIComponent(token)}`,
 	)
 
-	const { db } = createDb()
-	await db
-		.prepare(
-			`INSERT INTO users (username, email, password_hash, stable_user_id, plan, account_type)
-			 VALUES ('tips', 'tips@example.com', 'x', 'user-tips', 'free', 'person')`,
-		)
-		.run()
+	// The token names the account; the opt-out runs on that owner's writer.
+	await using database = await createTestDb({ userId: 'user-tips' })
+	await database.pg.query(
+		`INSERT INTO users (username, email, password_hash, stable_user_id, plan, account_type)
+		 VALUES ('tips', 'tips@example.com', 'x', 'user-tips', 'free', 'person')`,
+	)
+	const db = database.db as unknown as D1Database
 	expect(await isTipsEmailsOptedOut({ db, userId: 'user-tips' })).toBe(false)
 	expect(
 		await optOutTipsEmails({
@@ -80,11 +75,15 @@ test('tips unsubscribe tokens verify, opt-out is idempotent, and headers are RFC
 		}),
 	).toEqual({ optedOut: true, alreadyOptedOut: true })
 	expect(
-		await optOutTipsEmails({ db, userId: 'missing', now: new Date() }),
+		await optOutTipsEmails({
+			db: database.forUser('missing').db as unknown as D1Database,
+			userId: 'missing',
+			now: new Date(),
+		}),
 	).toEqual({ optedOut: false, alreadyOptedOut: false })
 })
 
-test('0053 creates user_tips_email_opt_outs when rewritten 0050 was already applied', async () => {
+test('0053 (legacy D1 migration file) creates user_tips_email_opt_outs when rewritten 0050 was already applied', async () => {
 	const migrations = new URL('../../migrations/', import.meta.url)
 	const sqlite = new DatabaseSync(':memory:')
 	applyAllMigrations(sqlite, migrations)

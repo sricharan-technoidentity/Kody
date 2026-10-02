@@ -13,6 +13,7 @@ import {
 	listPlatformFeedbackPageRowsForAdmin,
 	listPlatformFeedbackRowsForAdmin,
 	updatePlatformFeedbackStatusForAdmin,
+	type FeedbackDatabase,
 } from './repo.ts'
 import {
 	type PlatformFeedbackAction,
@@ -166,7 +167,7 @@ function planTransition(input: {
 }
 
 export async function submitPlatformFeedback(input: {
-	db: D1Database
+	db: FeedbackDatabase
 	submitterUserId: string
 	submitterUsername: string
 	submitterEmail: string
@@ -255,7 +256,7 @@ export async function submitPlatformFeedback(input: {
 }
 
 export async function listPlatformFeedbackForAdmin(input: {
-	db: D1Database
+	db: FeedbackDatabase
 	page?: number
 	pageSize?: number
 	status?: PlatformFeedbackStatus
@@ -282,7 +283,7 @@ export async function listPlatformFeedbackForAdmin(input: {
 }
 
 export async function getPlatformFeedbackForAdmin(input: {
-	db: D1Database
+	db: FeedbackDatabase
 	feedbackId: string
 }) {
 	const feedback = await getPlatformFeedbackByIdForAdmin(
@@ -293,7 +294,7 @@ export async function getPlatformFeedbackForAdmin(input: {
 }
 
 export async function updatePlatformFeedbackForAdmin(input: {
-	db: D1Database
+	db: FeedbackDatabase
 	feedbackId: string
 	reviewerUserId: string
 	action: PlatformFeedbackAction

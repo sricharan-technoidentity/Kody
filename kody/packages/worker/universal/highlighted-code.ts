@@ -1,7 +1,7 @@
 /**
  * Serializable syntax-highlight payload. Origin (and the highlight worker)
  * produce this; the browser only paints it. Keep the wire shape stable —
- * `packages/highlight-worker` and `#app/highlight-code.ts` share it.
+ * `#worker/highlight/tokenize.ts` and `#app/highlight-code.ts` share it.
  */
 
 const highlighterVersion = '1'

@@ -1,14 +1,13 @@
 /**
- * Minimal in-memory RUN_LOG stub for node-unit usage-reader coverage of
+ * Minimal in-memory RUN_STATE stub for node-unit usage-reader coverage of
  * concurrent_workflows (authoritative countActiveWorkflowProjections).
  */
 export function createInMemoryRunLogUsageEnv() {
 	const activeWorkflowCounts = new Map<string, number>()
 	return {
 		env: {
-			RUN_LOG: {
-				idFromName: (name: string) => name as unknown as DurableObjectId,
-				get: (id: DurableObjectId) => ({
+			RUN_STATE: {
+				forUser: (id: string) => ({
 					countActiveWorkflowProjections: async () => ({
 						count: activeWorkflowCounts.get(String(id)) ?? 0,
 					}),

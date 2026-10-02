@@ -10,7 +10,8 @@ import { loadOnboardingData } from '#app/onboarding-data.ts'
 import { hasResolvedRequestFeatureFlags } from '#app/request-feature-flags-cache.ts'
 import { loadSessionInfo } from '#app/session-info.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
@@ -38,95 +39,31 @@ test('authenticated home SSR prefetches flags while loading page data', async ()
 		rememberMe: false,
 	}
 	const cookie = await createAuthCookie(session, false)
-	const counts = { prepare: 0, batch: 0, batchSizes: [] as Array<number> }
-	const userRow = {
-		id: 7,
-		email,
-		username: 'home-user',
-		stable_user_id: stableUserId,
-	}
+	await using store = await createTestDb()
+	await store.pg.query(
+		`INSERT INTO users (id, email, username, password_hash, stable_user_id)
+		 VALUES (7, $1, 'home-user', 'unused', $2)`,
+		[email, stableUserId],
+	)
+	await store.pg.exec(`
+		INSERT INTO user_roles (user_id, role_id) SELECT 7, id FROM roles WHERE name = 'user';
+		INSERT INTO feature_flags (key, enabled) VALUES ('demo-indicator', 1);
+		INSERT INTO feature_flag_user_overrides (flag_key, user_id, enabled)
+		VALUES ('compact-mcp-server-instructions', 7, 1);
+	`)
+	const db = store.forUser(stableUserId).db
+	const counts = { batchSizes: [] as Array<number> }
 	const env = {
 		COOKIE_SECRET: testCookieSecret,
 		FLAG_EXPOSURES: { writeDataPoint() {} },
 		APP_DB: {
-			prepare(query: string) {
-				counts.prepare += 1
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				const statement = {
-					query,
-					bind() {
-						return statement
-					},
-					async all() {
-						if (
-							normalizedQuery.startsWith('select') &&
-							normalizedQuery.includes('from "users"')
-						) {
-							return { results: [userRow], meta: { changes: 0 } }
-						}
-						if (normalizedQuery.includes('from user_roles ur')) {
-							return {
-								results: [
-									{
-										role_name: 'user',
-										action: 'read',
-										entity: 'user',
-										access: 'own',
-									},
-								],
-								meta: { changes: 0 },
-							}
-						}
-						if (
-							normalizedQuery.includes('from feature_flags') &&
-							!normalizedQuery.includes('where')
-						) {
-							return {
-								results: [
-									{
-										key: 'demo-indicator',
-										enabled: 1,
-										rollout_percent: null,
-									},
-								],
-								meta: { changes: 0 },
-							}
-						}
-						if (
-							normalizedQuery.includes('from feature_flag_user_overrides') &&
-							normalizedQuery.includes('where user_id = ?')
-						) {
-							return {
-								results: [
-									{
-										flag_key: 'compact-mcp-server-instructions',
-										enabled: 1,
-									},
-								],
-								meta: { changes: 0 },
-							}
-						}
-						return { results: [], meta: { changes: 0 } }
-					},
-					async first() {
-						return null
-					},
-					async run() {
-						return { meta: { changes: 0 } }
-					},
-				}
-				return statement
-			},
-			async batch(statements: Array<{ query?: string }>) {
-				counts.batch += 1
+			...db,
+			batch(statements) {
 				counts.batchSizes.push(statements.length)
-				return await executePreparedD1Batch(statements)
+				return db.batch(statements)
 			},
-			async exec() {
-				return
-			},
-		} as unknown as D1Database,
-	} as Env
+		} satisfies PgDatabase,
+	} as unknown as Env
 
 	const request = new Request('https://example.com/', {
 		headers: { Cookie: cookie },

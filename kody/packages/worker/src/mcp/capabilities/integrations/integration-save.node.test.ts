@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
@@ -34,7 +35,7 @@ function createEnv() {
 		sqlite,
 		env: {
 			APP_DB: createD1FromSqlite(sqlite),
-			SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+			SECRET_KMS: testSecretKms,
 		} as unknown as Env,
 	}
 }
@@ -455,7 +456,7 @@ test('integrationSave refuses platform (built-in) connections instead of convert
 	const { env } = createEnv()
 	const platformEnv = {
 		...env,
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 	} as Env
 	await upsertPlatformOauthApp({
 		db: platformEnv.APP_DB,

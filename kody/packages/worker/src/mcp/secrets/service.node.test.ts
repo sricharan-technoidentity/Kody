@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
@@ -526,7 +527,7 @@ test('resolveSecret returns the first scope hit in precedence order', async () =
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	const userId = 'user-123'
@@ -584,7 +585,7 @@ test('saveSecret rejects unavailable scoped storage as McpCallerError', async ()
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 	}
 
 	await expect(
@@ -633,7 +634,7 @@ test('listSecrets from execute lists caller-owned package metadata without weake
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	const userId = 'user-123'
@@ -825,7 +826,7 @@ test('listPackageSecretsByPackageIds groups package-owned secrets', async () => 
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	const storageContext = {
@@ -864,7 +865,7 @@ test('updateUserSecretForPackage atomically requires an existing package approva
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	await saveSecret({
@@ -920,7 +921,7 @@ test('setSecretsAtomically persists refresh then access tokens together for pack
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	await saveSecret({
@@ -990,7 +991,7 @@ test('updateUserSecretsForPackageAtomically leaves both secrets unchanged when a
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	await saveSecret({
@@ -1051,7 +1052,7 @@ test('resolveSecret ignores a corrupted lower-precedence entry when a higher sco
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	const userId = 'user-123'
@@ -1109,7 +1110,7 @@ function buildEntitlementTestSecretEnv(input: {
 		env: {
 			APP_DB: testDb.db,
 			COOKIE_SECRET: 'test-cookie-secret',
-			SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+			SECRET_KMS: testSecretKms,
 			...createInMemoryUserMeterEnv().env,
 		},
 	}
@@ -1222,7 +1223,7 @@ test('user secrets persist per-entry expiry, stay listed after expiry, and fail 
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	const userId = 'user-123'
@@ -1303,7 +1304,7 @@ test('createUnresolvedSecretMessage explains a package-scoped secret from ad-hoc
 	const env = {
 		APP_DB: testDb.db,
 		COOKIE_SECRET: 'test-cookie-secret',
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	}
 	const userId = 'user-123'

@@ -1,3 +1,6 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
+
 export type PasskeyRow = {
 	id: string
 	aaguid: string
@@ -16,7 +19,7 @@ export type PasskeyRow = {
 const passkeySelectColumns = `id, aaguid, public_key, user_id, webauthn_user_handle, counter,
 				device_type, backed_up, transports, name, created_at, last_used_at`
 
-export async function listPasskeysForUser(db: D1Database, userId: number) {
+export async function listPasskeysForUser(db: SqlDatabase, userId: number) {
 	const result = await db
 		.prepare(
 			`SELECT ${passkeySelectColumns}
@@ -29,7 +32,7 @@ export async function listPasskeysForUser(db: D1Database, userId: number) {
 	return result.results
 }
 
-export async function findPasskeyById(db: D1Database, id: string) {
+export async function findPasskeyById(db: SqlDatabase, id: string) {
 	return db
 		.prepare(
 			`SELECT ${passkeySelectColumns}
@@ -41,7 +44,7 @@ export async function findPasskeyById(db: D1Database, id: string) {
 }
 
 export async function createPasskey(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		aaguid: string
@@ -78,23 +81,24 @@ export async function createPasskey(
 }
 
 export async function updatePasskeyCounter(
-	db: D1Database,
+	db: SqlDatabase,
 	id: string,
 	counter: number,
 ) {
+	const now = utcSqliteTimestamp()
 	await db
 		.prepare(
 			`UPDATE passkeys
-			 SET counter = ?, last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+			 SET counter = ?, last_used_at = ?, updated_at = ?
 			 WHERE id = ?`,
 		)
-		.bind(counter, id)
+		.bind(counter, now, now, id)
 		.run()
 }
 
 /** Ownership is enforced in the WHERE clause: cross-user renames are no-ops. */
 export async function renamePasskeyForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	id: string,
 	userId: number,
 	name: string,
@@ -102,17 +106,17 @@ export async function renamePasskeyForUser(
 	const result = await db
 		.prepare(
 			`UPDATE passkeys
-			 SET name = ?, updated_at = CURRENT_TIMESTAMP
+			 SET name = ?, updated_at = ?
 			 WHERE id = ? AND user_id = ?`,
 		)
-		.bind(name, id, userId)
+		.bind(name, utcSqliteTimestamp(), id, userId)
 		.run()
 	return (result.meta?.changes ?? 0) > 0
 }
 
 /** Ownership is enforced in the WHERE clause: cross-user deletes are no-ops. */
 export async function deletePasskeyForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	id: string,
 	userId: number,
 ) {
@@ -123,7 +127,7 @@ export async function deletePasskeyForUser(
 	return (result.meta?.changes ?? 0) > 0
 }
 
-export async function deletePasskeysForUser(db: D1Database, userId: number) {
+export async function deletePasskeysForUser(db: SqlDatabase, userId: number) {
 	const result = await db
 		.prepare(`DELETE FROM passkeys WHERE user_id = ?`)
 		.bind(userId)

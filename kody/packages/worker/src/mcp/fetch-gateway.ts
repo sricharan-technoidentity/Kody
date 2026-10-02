@@ -98,7 +98,7 @@ export type { FetchGatewayProps }
 /** Bindings every gateway fetch needs: secrets, quota, and usage metering. */
 export type FetchGatewayEnv = Pick<
 	Env,
-	'APP_DB' | 'SECRET_STORE_KEY' | 'USER_METER'
+	'APP_DB' | 'SECRET_KMS' | 'USER_METERS'
 > &
 	UsageEnv
 
@@ -347,7 +347,7 @@ function readResponseContentLengthBytes(
 export async function expandSecretPlaceholders(input: {
 	request: Request
 	props: FetchGatewayProps
-	env: Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'>
+	env: Pick<Env, 'APP_DB' | 'SECRET_KMS'>
 }) {
 	const headers = new Headers(input.request.headers)
 	// Several APIs (GitHub most prominently) reject requests without a

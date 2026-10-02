@@ -1,8 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { type CommunityListingCategory } from '#universal/community-categories.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { ensureCommunityFlowSchema } from './community-flow-test-schema.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+import { createTestCommunityDb } from '#worker/test-support/aws/test-community-db.ts'
 import {
 	insertCommunityListing,
 	listCommunityIndexOverviewCandidates,
@@ -11,16 +10,8 @@ import {
 import { listCommunityIndexOverview } from './service.ts'
 import { type CommunityListingStatus } from './types.ts'
 
-async function createOverviewDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	await ensureCommunityFlowSchema(createD1FromSqlite(sqlite))
-	const queries: Array<string> = []
-	const db = createD1FromSqlite(sqlite, { queries })
-	return { db, queries }
-}
-
 async function insertOverviewListing(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		category: CommunityListingCategory
@@ -52,8 +43,14 @@ function publishedAtForDay(day: number) {
 }
 
 test('listCommunityIndexOverview loads shelves with one windowed listing query', async () => {
-	const { db, queries } = await createOverviewDb()
-	const env = { APP_DB: db } as Env
+	await using database = await createTestCommunityDb()
+	const { community, queries } = database
+	const db = database.owner('owner-1')
+	// Visitors browse every owner's listings through the public role.
+	const env = {
+		APP_DB: database.owner('visitor'),
+		COMMUNITY_DB: community,
+	} as unknown as Env
 
 	queries.length = 0
 	const empty = await listCommunityIndexOverview({ env, sort: 'newest' })
@@ -96,7 +93,7 @@ test('listCommunityIndexOverview loads shelves with one windowed listing query',
 		category: 'utilities',
 		publishedAt: publishedAtForDay(5),
 	})
-	await upsertCommunityRating(db, {
+	await upsertCommunityRating(database.owner('rater-1'), {
 		id: 'rating-oldest',
 		listing_id: 'integration-1',
 		user_id: 'rater-1',
@@ -106,10 +103,13 @@ test('listCommunityIndexOverview loads shelves with one windowed listing query',
 	})
 
 	queries.length = 0
-	const newestTwoIntegrations = await listCommunityIndexOverviewCandidates(db, {
-		limitPerCategory: 2,
-		categories: ['integrations'],
-	})
+	const newestTwoIntegrations = await listCommunityIndexOverviewCandidates(
+		community,
+		{
+			limitPerCategory: 2,
+			categories: ['integrations'],
+		},
+	)
 	expect(newestTwoIntegrations.map((listing) => listing.id)).toEqual([
 		'integration-8',
 		'integration-7',

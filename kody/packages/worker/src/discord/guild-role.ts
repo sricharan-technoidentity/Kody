@@ -14,6 +14,7 @@
  */
 
 import { parseStripePlanName, type PlanName } from '#universal/plans.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 
 export {
 	readOfficialDiscordGuildMembership,
@@ -449,7 +450,7 @@ export function summarizeDiscordGuildRoleSync(
 }
 
 async function readDiscordConnectionUserId(
-	db: D1Database,
+	db: Pick<SqlDatabase, 'prepare'>,
 	userId: number,
 ): Promise<string | null> {
 	const row = await db
@@ -464,7 +465,7 @@ async function readDiscordConnectionUserId(
 }
 
 async function readUserStripePlan(
-	db: D1Database,
+	db: Pick<SqlDatabase, 'prepare'>,
 	userId: number,
 ): Promise<PlanName | null> {
 	const row = await db
@@ -479,7 +480,7 @@ async function readUserStripePlan(
  * sync member + Standard/Pro roles. Failures are logged and never thrown.
  */
 export async function maybeSyncDiscordGuildRolesForUser(input: {
-	env: DiscordGuildRoleEnv & { APP_DB: D1Database }
+	env: DiscordGuildRoleEnv & { APP_DB: Pick<SqlDatabase, 'prepare'> }
 	userId: number
 	discordUserId?: string
 	stripePlan?: PlanName | null

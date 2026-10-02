@@ -6,6 +6,7 @@ import {
 	type EmailVerificationDeliveryClass,
 	type EmailVerificationDeliveryStatus,
 } from '#universal/email-verification-delivery.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { type EmailDeliveryStatus } from './types.ts'
 
 export const transactionalEmailVerificationKind = 'email_verification'
@@ -71,9 +72,14 @@ export async function registerTransactionalEmailDelivery(input: {
 	const kind = input.kind ?? transactionalEmailVerificationKind
 	await input.db
 		.prepare(
-			`INSERT OR REPLACE INTO transactional_email_delivery_index
+			`INSERT INTO transactional_email_delivery_index
 			 (provider_message_id, user_id, kind, recipient)
-			 VALUES (?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT (provider_message_id) DO UPDATE SET
+			   user_id = excluded.user_id,
+			   kind = excluded.kind,
+			   recipient = excluded.recipient,
+			   created_at = excluded.created_at`,
 		)
 		.bind(input.providerMessageId, input.userId, kind, input.recipient)
 		.run()
@@ -166,7 +172,7 @@ export async function setUserEmailVerificationDelivery(input: {
 }
 
 export async function clearUserEmailVerificationDelivery(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ) {
 	const now = new Date().toISOString()

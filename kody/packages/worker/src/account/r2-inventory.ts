@@ -52,12 +52,11 @@ function bindingFor(
 
 async function listUserCommunityListings(env: Env, userId: string) {
 	const listings: Array<AccountCommunityListingSnapshot> = []
-	let afterRowid = 0
+	let afterId = ''
 	const pageSize = 500
 	while (true) {
 		const rows = await env.APP_DB.prepare(
-			`SELECT community_listings.rowid AS account_r2_rowid,
-				community_listings.id, community_listings.pinned_commit,
+			`SELECT community_listings.id, community_listings.pinned_commit,
 				entity_sources.published_commit AS source_published_commit
 			FROM community_listings
 			LEFT JOIN entity_sources
@@ -66,13 +65,12 @@ async function listUserCommunityListings(env: Env, userId: string) {
 				AND entity_sources.entity_kind = 'package'
 				AND entity_sources.entity_id = community_listings.package_id
 			WHERE community_listings.owner_user_id = ?
-				AND community_listings.rowid > ?
-			ORDER BY community_listings.rowid
+				AND community_listings.id > ?
+			ORDER BY community_listings.id
 			LIMIT ?`,
 		)
-			.bind(userId, afterRowid, pageSize + 1)
+			.bind(userId, afterId, pageSize + 1)
 			.all<{
-				account_r2_rowid: number
 				id: string
 				pinned_commit: string
 				source_published_commit: string | null
@@ -88,30 +86,30 @@ async function listUserCommunityListings(env: Env, userId: string) {
 			})),
 		)
 		if (!truncated) return listings
-		afterRowid = included.at(-1)?.account_r2_rowid ?? afterRowid
+		afterId = included.at(-1)?.id ?? afterId
 	}
 }
 
 async function listUserIdentityIcons(env: Env, userId: string) {
 	const icons: Array<AccountIdentityIconSnapshot> = []
-	let afterRowid = 0
+	let afterId = ''
 	const pageSize = 500
 	while (true) {
 		const rows = await env.APP_DB.prepare(
-			`SELECT entity_sources.rowid AS account_r2_rowid,
+			`SELECT entity_sources.id,
 				entity_sources.repo_id,
 				entity_sources.entity_kind,
 				entity_sources.published_commit,
 				entity_sources.indexed_commit
 			FROM entity_sources
 			WHERE entity_sources.user_id = ?
-				AND entity_sources.rowid > ?
-			ORDER BY entity_sources.rowid
+				AND entity_sources.id > ?
+			ORDER BY entity_sources.id
 			LIMIT ?`,
 		)
-			.bind(userId, afterRowid, pageSize + 1)
+			.bind(userId, afterId, pageSize + 1)
 			.all<{
-				account_r2_rowid: number
+				id: string
 				repo_id: string
 				entity_kind: EntityKind
 				published_commit: string | null
@@ -131,7 +129,7 @@ async function listUserIdentityIcons(env: Env, userId: string) {
 			}
 		}
 		if (!truncated) return icons
-		afterRowid = included.at(-1)?.account_r2_rowid ?? afterRowid
+		afterId = included.at(-1)?.id ?? afterId
 	}
 }
 

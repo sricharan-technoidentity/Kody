@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test, vi } from 'vitest'
 import type * as IntegrationsService from '#worker/integrations/service.ts'
 import type * as IntegrationsRepo from '#worker/integrations/repo.ts'
@@ -381,7 +382,7 @@ function createEnv() {
 				}
 			},
 		} as unknown as D1Database,
-		SECRET_STORE_KEY: 'x'.repeat(32),
+		SECRET_KMS: testSecretKms,
 	} as Env
 }
 

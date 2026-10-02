@@ -1,6 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 vi.mock('#worker/repo/published-source.ts', () => ({
 	loadPublishedEntitySource: vi.fn(),
@@ -22,41 +22,32 @@ const {
 	loadPackageSourceRowsForUser,
 } = await import('./source.ts')
 
-function createEntitySourcesTable(sqlite: DatabaseSync) {
-	sqlite.exec(`
-		CREATE TABLE entity_sources (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			entity_kind TEXT NOT NULL,
-			entity_id TEXT NOT NULL,
-			repo_id TEXT NOT NULL,
-			published_commit TEXT,
-			indexed_commit TEXT,
-			manifest_path TEXT NOT NULL,
-			source_root TEXT NOT NULL,
-			last_external_check_at TEXT,
-			external_check_until TEXT,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-	`)
-}
-
-function insertSource(
-	sqlite: DatabaseSync,
+async function insertSource(
+	store: Awaited<ReturnType<typeof createTestDb>>,
 	input: { id: string; userId: string },
 ) {
-	sqlite
-		.prepare(
-			`INSERT INTO entity_sources VALUES
-				(?, ?, 'package', ?, ?, 'commit-1', NULL,
-				'package.json', '/', NULL, NULL,
-				'2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z')`,
-		)
-		.run(input.id, input.userId, `package-${input.id}`, `repo-${input.id}`)
+	await store.pg.query(
+		`INSERT INTO entity_sources (
+			id, user_id, entity_kind, entity_id, repo_id, published_commit, indexed_commit,
+			manifest_path, source_root, last_external_check_at, external_check_until,
+			created_at, updated_at
+		) VALUES ($1, $2, 'package', $3, $4, 'commit-1', NULL, 'package.json', '/', NULL, NULL,
+			'2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z')`,
+		[input.id, input.userId, `package-${input.id}`, `repo-${input.id}`],
+	)
 }
 
-function createLoadEnv(db: D1Database) {
+function recordQueries(db: PgDatabase, queries: Array<string>): PgDatabase {
+	return {
+		...db,
+		prepare(sql: string) {
+			queries.push(sql.replace(/\s+/g, ' ').trim())
+			return db.prepare(sql)
+		},
+	}
+}
+
+function createLoadEnv(db: PgDatabase) {
 	return {
 		env: {
 			APP_DB: db,
@@ -65,21 +56,21 @@ function createLoadEnv(db: D1Database) {
 				put: vi.fn(async () => undefined),
 				delete: vi.fn(async () => undefined),
 			} as unknown as KVNamespace,
-		} as Env,
+		} as unknown as Env,
 		baseUrl: 'https://heykody.dev',
 	}
 }
 
 test('queue-style concurrent manifest loads issue one entity_sources IN query', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	createEntitySourcesTable(sqlite)
-	insertSource(sqlite, { id: 'source-a', userId: 'user-1' })
-	insertSource(sqlite, { id: 'source-b', userId: 'user-1' })
-	insertSource(sqlite, { id: 'source-c', userId: 'user-1' })
-	insertSource(sqlite, { id: 'source-other', userId: 'user-2' })
+	await using store = await createTestDb()
+	await insertSource(store, { id: 'source-a', userId: 'user-1' })
+	await insertSource(store, { id: 'source-b', userId: 'user-1' })
+	await insertSource(store, { id: 'source-c', userId: 'user-1' })
+	await insertSource(store, { id: 'source-other', userId: 'user-2' })
 
 	const queries: Array<string> = []
-	const db = createD1FromSqlite(sqlite, { queries })
+	// user-1 loads through its own writer; user-2's source is hidden by RLS.
+	const db = recordQueries(store.forUser('user-1').db, queries)
 	const loadEnv = createLoadEnv(db)
 
 	const [first, second, third] = await Promise.all([

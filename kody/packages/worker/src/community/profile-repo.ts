@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { d1ContainsLikePattern } from '#worker/d1-like-pattern.ts'
 import { chunkArray } from '@kody-internal/shared/chunk.ts'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
@@ -18,7 +19,6 @@ const maxSqlBindingsPerChunk = 90
 export type UserSocialRow = {
 	id: number
 	username: string
-	email: string
 	stable_user_id: string
 	display_name: string | null
 	bio: string | null
@@ -27,14 +27,13 @@ export type UserSocialRow = {
 	created_at: string
 }
 
-const userSocialSelectColumns = `id, username, email, stable_user_id, display_name, bio,
+const userSocialSelectColumns = `id, username, stable_user_id, display_name, bio,
 	avatar_key, profile_visibility, created_at`
 
 function mapUserSocialRow(row: Record<string, unknown>): UserSocialRow {
 	return {
 		id: Number(row['id']),
 		username: String(row['username']),
-		email: String(row['email']),
 		stable_user_id: String(row['stable_user_id']),
 		display_name:
 			row['display_name'] == null ? null : String(row['display_name']),
@@ -55,7 +54,7 @@ export function resolveCommunityDisplayName(input: {
 }
 
 export async function getUserSocialRowByUsername(
-	db: D1Database,
+	db: SqlDatabase,
 	username: string,
 ): Promise<UserSocialRow | null> {
 	const row = await db
@@ -70,7 +69,7 @@ export async function getUserSocialRowByUsername(
 }
 
 export async function getUserSocialRowByStableId(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ): Promise<UserSocialRow | null> {
 	const trimmed = normalizeStableUserId(stableUserId)
@@ -87,7 +86,7 @@ export async function getUserSocialRowByStableId(
 }
 
 export async function updateUserProfileFields(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		numericUserId: number
 		displayName?: string | null
@@ -127,7 +126,7 @@ export async function updateUserProfileFields(
 }
 
 export async function insertCommunityActivityEvent(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		actorUserId: string
@@ -153,7 +152,7 @@ export async function insertCommunityActivityEvent(
 }
 
 export async function deleteCommunityActivityEventsByListingId(
-	db: D1Database,
+	db: SqlDatabase,
 	listingId: string,
 ): Promise<void> {
 	await db
@@ -163,7 +162,7 @@ export async function deleteCommunityActivityEventsByListingId(
 }
 
 export async function deleteCommunityActivityEventsByActor(
-	db: D1Database,
+	db: SqlDatabase,
 	actorUserId: string,
 ): Promise<void> {
 	await db
@@ -210,7 +209,7 @@ function compareActivityItems(
 }
 
 export async function listCommunityActivityForActors(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		actorUserIds: Array<string>
 		limit: number
@@ -287,7 +286,7 @@ export async function listCommunityActivityForActors(
 }
 
 export async function countPublicSavedPackagesForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<number> {
 	const row = await db
@@ -302,7 +301,7 @@ export async function countPublicSavedPackagesForUser(
 }
 
 export async function countActiveListingsForOwner(
-	db: D1Database,
+	db: SqlDatabase,
 	ownerUserId: string,
 ): Promise<number> {
 	const row = await db
@@ -324,7 +323,7 @@ const publicPackageSearchColumns = [
 ] as const
 
 export async function listPublicProfilePackages(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		ownerStableUserId: string
 		query?: string
@@ -347,7 +346,7 @@ export async function listPublicProfilePackages(
 			const pattern = d1ContainsLikePattern(token, { escape: false })
 			const columnClauses = publicPackageSearchColumns.map((column) => {
 				bindings.push(pattern)
-				return `saved_packages.${column} LIKE ?`
+				return `lower(saved_packages.${column}) LIKE ?`
 			})
 			return `(${columnClauses.join(' OR ')})`
 		})
@@ -476,7 +475,7 @@ export async function listPublicProfilePackages(
 }
 
 export async function countWebhooksByPackageId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		ownerStableUserId: string
 		packageIds: Array<string>

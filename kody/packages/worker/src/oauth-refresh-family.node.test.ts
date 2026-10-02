@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import * as Sentry from '@sentry/cloudflare'
 import { expect, test, vi } from 'vitest'
 import {
@@ -145,7 +146,7 @@ function mintedTokens(refreshToken: string, accessToken: string) {
 
 function missingKvEnv() {
 	return {
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		BUNDLE_ARTIFACTS_KV: {
 			async get() {
 				return null
@@ -164,7 +165,10 @@ function missingKvEnv() {
 
 test('refresh family persist failures still return provider-minted tokens', async () => {
 	const captureException = vi.spyOn(Sentry, 'captureException')
-	const transientKvError = new Error('KV PUT failed: 500 Internal Server Error')
+	const transientKvError = Object.assign(
+		new Error('Rate of requests exceeds the allowed throughput.'),
+		{ name: 'ThrottlingException' },
+	)
 	const unexpectedPersistError = new Error('kv unavailable')
 	const transientMinted = mintedTokens(
 		'user-persist:grant-kv:rt2',
@@ -183,7 +187,7 @@ test('refresh family persist failures still return provider-minted tokens', asyn
 		return handleMcpOAuthTokenRequest({
 			request: refreshTokenRequest(refreshToken),
 			env: {
-				SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+				SECRET_KMS: testSecretKms,
 				BUNDLE_ARTIFACTS_KV: {
 					async get() {
 						return null

@@ -1,5 +1,5 @@
-import { deterministicEmbedding } from '#worker/vectorize/embedding.ts'
-import { cosineSimilarity, lexicalScore } from '#worker/vectorize/scoring.ts'
+import { deterministicEmbedding } from '#worker/search-index/embedding.ts'
+import { cosineSimilarity, lexicalScore } from '#worker/search-index/scoring.ts'
 
 import { type SearchEntityPlugin } from '../search-entity-plugin.ts'
 import {

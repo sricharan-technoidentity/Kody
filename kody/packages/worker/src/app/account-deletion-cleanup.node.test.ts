@@ -9,6 +9,11 @@ import {
 	AccountDeletionWritersActiveError,
 	assertAccountWritable,
 } from '#worker/account/deletion-state.ts'
+import {
+	createRunRow,
+	createTestRunRecords,
+	logLines,
+} from '#worker/test-support/run-records.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { userMeterRpc } from '#worker/entitlements/user-meter-client.ts'
 import {
@@ -263,12 +268,12 @@ test('account deletion reports missing Durable Object / blob bindings and remain
 	await expect(
 		deleteUserAccount({
 			env: createSuccessfulDeletionEnv(missingMeterDb, {
-				USER_METER: undefined,
+				USER_METERS: undefined,
 			}),
 			dbUserId: 1,
 			mcpUserId: 'user-aaa',
 		}),
-	).rejects.toThrow('USER_METER Durable Object binding is not configured.')
+	).rejects.toThrow('USER_METERS binding is not configured.')
 	expect(missingMeterRows.users).toEqual([
 		expect.objectContaining({
 			id: 1,
@@ -318,7 +323,7 @@ test('deleteUserAccount fails closed when preflight inventory cannot be read', a
 		deleteUserAccount({
 			env: {
 				APP_DB: db,
-				USER_METER: userMeter.env.USER_METER,
+				USER_METERS: userMeter.env.USER_METERS,
 				CAPABILITY_VECTOR_INDEX: { deleteByIds: deleteVectors },
 				STORAGE_RUNNER: {
 					idFromName: (name: string) => name as unknown as DurableObjectId,
@@ -440,7 +445,7 @@ test('account deletion waits for an active writer and resumes on retry', async (
 		acquiredAt: '2000-01-01 00:00:00',
 	})
 	const env = createSuccessfulDeletionEnv(db, {
-		USER_METER: userMeter.env.USER_METER,
+		USER_METERS: userMeter.env.USER_METERS,
 	})
 	await expect(
 		deleteUserAccount({
@@ -466,31 +471,24 @@ test('account deletion waits for an active writer and resumes on retry', async (
 	expect(rows.users).toEqual([])
 })
 
-test('account deletion empties the user RunLog DO and leaves other users untouched', async () => {
+test('account deletion empties the user run records and leaves other users untouched', async () => {
 	const userAaa = 'user-aaa'
 	const userBbb = 'user-bbb'
-	const runLogByUser = new Map<
-		string,
-		{
-			runs: Array<{ id: string; storageId: string | null }>
-			logs: Array<{ runId: string; message: string }>
-		}
-	>([
-		[
-			userAaa,
-			{
-				runs: [{ id: 'run-a', storageId: 'run-only-bucket' }],
-				logs: [{ runId: 'run-a', message: 'aaa console output' }],
-			},
-		],
-		[
-			userBbb,
-			{
-				runs: [{ id: 'run-b', storageId: 'bbb-bucket' }],
-				logs: [{ runId: 'run-b', message: 'bbb console output' }],
-			},
-		],
-	])
+	const runRecords = createTestRunRecords()
+	for (const [userId, id, storageId, message] of [
+		[userAaa, 'run-a', 'run-only-bucket', 'aaa console output'],
+		[userBbb, 'run-b', 'bbb-bucket', 'bbb console output'],
+	] as const) {
+		await runRecords.forUser(userId).finishRun({
+			run: createRunRow({
+				id,
+				storageId,
+				status: 'success',
+				finishedAt: new Date().toISOString(),
+			}),
+			logs: logLines(message),
+		})
+	}
 	const clearedStorageIds: Array<string> = []
 	const { db } = createTestDb({
 		users: [
@@ -508,40 +506,7 @@ test('account deletion empties the user RunLog DO and leaves other users untouch
 				},
 			}),
 		},
-		RUN_LOG: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: (id: DurableObjectId) => {
-				const userId = String(id)
-				return {
-					listStorageIds: async () => {
-						const state = runLogByUser.get(userId)
-						return (state?.runs ?? [])
-							.map((run) => run.storageId)
-							.filter((value): value is string => value != null)
-					},
-					clearAll: async () => {
-						const state = runLogByUser.get(userId)
-						if (state) {
-							state.runs = []
-							state.logs = []
-						}
-						return { ok: true as const }
-					},
-					exportRuns: async () => {
-						const state = runLogByUser.get(userId) ?? {
-							runs: [],
-							logs: [],
-						}
-						return {
-							runs: state.runs,
-							logs: state.logs,
-							nextStartAfter: null,
-							truncated: false,
-						}
-					},
-				}
-			},
-		},
+		RUN_RECORDS: runRecords.records,
 	})
 
 	const result = await deleteUserAccount({
@@ -551,11 +516,21 @@ test('account deletion empties the user RunLog DO and leaves other users untouch
 	})
 
 	expect(result.clearedDurableObjects.runLogs).toBe(1)
-	expect(runLogByUser.get(userAaa)).toEqual({ runs: [], logs: [] })
-	expect(runLogByUser.get(userBbb)).toEqual({
-		runs: [{ id: 'run-b', storageId: 'bbb-bucket' }],
+	expect(
+		runRecords.dynamo
+			.items(runRecords.tableName)
+			.map((item) => item.pk?.S)
+			.filter((pk) => pk === userAaa),
+	).toEqual([])
+	expect(
+		await runRecords.forUser(userBbb).getRun({ runId: 'run-b' }),
+	).toMatchObject({
+		run: { id: 'run-b', storageId: 'bbb-bucket' },
 		logs: [{ runId: 'run-b', message: 'bbb console output' }],
 	})
+	expect([...runRecords.logs.objects.keys()]).toEqual([
+		'run-logs/user-bbb/run-b.json',
+	])
 	expect(clearedStorageIds.some((id) => id.includes('run-only-bucket'))).toBe(
 		true,
 	)

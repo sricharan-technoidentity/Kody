@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { expect, test, vi } from 'vitest'
 import {
@@ -52,7 +53,7 @@ const env = {
 	} as unknown as D1Database,
 	...userMeter.env,
 	COOKIE_SECRET: 'test-cookie-secret',
-	SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+	SECRET_KMS: testSecretKms,
 } as unknown as Env
 
 const props = {

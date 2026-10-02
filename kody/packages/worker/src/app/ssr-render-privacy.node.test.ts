@@ -1,8 +1,9 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { setAuthSessionSecret } from '#app/auth-session.ts'
 import { resetDataCacheForTests } from '#app/data-cache.ts'
 import { createPrivacyHandler } from '#app/handlers/privacy.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testOidcSigningEnv } from '#worker/test-support/oidc-signing-env.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
@@ -11,63 +12,15 @@ function flatten(text: string) {
 	return text.replace(/\s+/g, ' ')
 }
 
-function createAnonymousTestDb() {
-	function createStatement(query: string) {
-		const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-		const executeAll = async () => {
-			if (
-				normalizedQuery.includes('from feature_flags') ||
-				normalizedQuery.includes('from feature_flag_user_overrides')
-			) {
-				return {
-					results: [],
-					meta: { changes: 0, last_row_id: 0 },
-				}
-			}
-			return {
-				results: [],
-				meta: { changes: 0, last_row_id: 0 },
-			}
-		}
-		return {
-			query,
-			bind() {
-				return createStatement(query)
-			},
-			async all() {
-				return executeAll()
-			},
-			async first() {
-				const result = await executeAll()
-				return result.results[0] ?? null
-			},
-			async run() {
-				return { meta: { changes: 0, last_row_id: 0 } }
-			},
-		}
-	}
-
-	return {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
-}
-
 test('privacy page and usage doc distinguish chat-model inference from embeddings', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
+	await using store = await createTestDb()
 	const env = {
 		COOKIE_SECRET: testCookieSecret,
-		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		SECRET_KMS: testSecretKms,
 		...testOidcSigningEnv,
-		APP_DB: createAnonymousTestDb(),
+		APP_DB: store.db,
 		BUNDLE_ARTIFACTS_KV: {},
 		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},

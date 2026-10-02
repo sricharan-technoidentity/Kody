@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { setAuthSessionSecret } from '#app/auth-session.ts'
 import { resetDataCacheForTests } from '#app/data-cache.ts'
@@ -6,66 +7,18 @@ import { renderAppPage } from '#app/ssr-render.tsx'
 import { landingFactoryBeats } from '#universal/landing-factory-beats.ts'
 import { landingHeroPrimaryCta } from '#universal/landing-home-copy.ts'
 import { createMemoryKv } from '#worker/test-support/auth-provider-harness.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testOidcSigningEnv } from '#worker/test-support/oidc-signing-env.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createAnonymousTestDb() {
-	function createStatement(query: string) {
-		const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-		const executeAll = async () => {
-			if (
-				normalizedQuery.includes('from feature_flags') ||
-				normalizedQuery.includes('from feature_flag_user_overrides')
-			) {
-				return {
-					results: [],
-					meta: { changes: 0, last_row_id: 0 },
-				}
-			}
-			return {
-				results: [],
-				meta: { changes: 0, last_row_id: 0 },
-			}
-		}
-		return {
-			query,
-			bind() {
-				return createStatement(query)
-			},
-			async all() {
-				return executeAll()
-			},
-			async first() {
-				const result = await executeAll()
-				return result.results[0] ?? null
-			},
-			async run() {
-				return { meta: { changes: 0, last_row_id: 0 } }
-			},
-		}
-	}
-
-	return {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
-}
-
-function createTestEnv() {
+function createTestEnv(db: PgDatabase) {
 	return {
 		COOKIE_SECRET: testCookieSecret,
-		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		SECRET_KMS: testSecretKms,
 		...testOidcSigningEnv,
-		APP_DB: createAnonymousTestDb(),
+		APP_DB: db,
 		BUNDLE_ARTIFACTS_KV: createMemoryKv(),
 		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},
@@ -115,7 +68,8 @@ function homepageOnboardingFixture(
 test('homepage hero uses locked copy, compare, and session-aware connect CTA', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv()
+	await using store = await createTestDb()
+	const env = createTestEnv(store.db)
 	const requestUrl = 'https://example.com/'
 
 	const anonymous = await renderAppPage({
@@ -198,7 +152,8 @@ test('homepage hero uses locked copy, compare, and session-aware connect CTA', a
 test('homepage ?og= points crawlers at that card and keeps the canonical url clean', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv()
+	await using store = await createTestDb()
+	const env = createTestEnv(store.db)
 	const variantRequestUrl =
 		'https://example.com/?og=triggers&utm_source=youtube#primitives'
 	const variant = await renderAppPage({

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { d1ContainsLikePattern } from '#worker/d1-like-pattern.ts'
 import { chunkArray } from '@kody-internal/shared/chunk.ts'
 import { parseTagsJson } from '@kody-internal/shared/tags-json.ts'
@@ -278,7 +279,7 @@ export function extractCommunityListingLikeTokens(
 }
 
 export async function insertCommunityListing(
-	db: D1Database,
+	db: SqlDatabase,
 	// New listings are never featured; featured_at starts NULL and is only
 	// set through setCommunityListingFeaturedAt.
 	row: Omit<
@@ -329,7 +330,7 @@ export async function insertCommunityListing(
 }
 
 export async function updateCommunityListing(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingId: string
 		ownerUserId: string
@@ -401,7 +402,7 @@ export async function updateCommunityListing(
 }
 
 export async function getCommunityListingById(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingId: string
 		includeDelisted: boolean
@@ -428,7 +429,7 @@ export async function getCommunityListingById(
  * (first occurrence wins if an id is repeated).
  */
 export async function getCommunityListingsByIds(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingIds: Array<string>
 		includeDelisted: boolean
@@ -468,7 +469,7 @@ export async function getCommunityListingsByIds(
 }
 
 export async function getActiveCommunityListingWithPublisherUsername(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { listingId: string },
 ): Promise<{
 	listing: CommunityListingRecord
@@ -497,7 +498,7 @@ export async function getActiveCommunityListingWithPublisherUsername(
 }
 
 export async function getCommunityListingByOwnerAndPackage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		ownerUserId: string
 		packageId: string
@@ -521,7 +522,7 @@ export async function getCommunityListingByOwnerAndPackage(
  * unique index that guards it), so a republish can take the URL over.
  */
 export async function getCommunityListingByOwnerAndKodyId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		ownerUserId: string
 		kodyId: string
@@ -542,7 +543,7 @@ export async function getCommunityListingByOwnerAndKodyId(
 }
 
 export async function listCommunityListings(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		includeDelisted: boolean
 		limit: number
@@ -564,7 +565,7 @@ export async function listCommunityListings(
 }
 
 export async function countActiveCommunityListingsByCategory(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<CommunityCategoryCounts> {
 	const rows = await db
 		.prepare(
@@ -592,7 +593,7 @@ export async function countActiveCommunityListingsByCategory(
  * the global newest-N window.
  */
 export async function listCommunityListingCandidates(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		includeDelisted: boolean
 		limit: number
@@ -615,7 +616,8 @@ export async function listCommunityListingCandidates(
 			const pattern = d1ContainsLikePattern(token, { escape: false })
 			const columnClauses = communityListingSearchTextColumns.map((column) => {
 				bindings.push(pattern)
-				return `community_listings.${column} LIKE ?`
+				// Tokens are lower-case; SQLite LIKE folds ASCII case, Postgres does not.
+				return `lower(community_listings.${column}) LIKE ?`
 			})
 			return `(${columnClauses.join(' OR ')})`
 		})
@@ -643,7 +645,7 @@ export async function listCommunityListingCandidates(
  * `categories` keeps the window on populated shelves only.
  */
 export async function listCommunityIndexOverviewCandidates(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		limitPerCategory: number
 		categories?: ReadonlyArray<CommunityListingCategory>
@@ -681,7 +683,7 @@ export async function listCommunityIndexOverviewCandidates(
 }
 
 export async function deleteCommunityListing(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingId: string
 		ownerUserId?: string
@@ -700,7 +702,7 @@ export async function deleteCommunityListing(
 }
 
 export async function setCommunityListingFeaturedAt(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingId: string
 		featured: boolean
@@ -727,7 +729,7 @@ export async function setCommunityListingFeaturedAt(
  * stays stable as new packages are added.
  */
 export async function listFeaturedCommunityListings(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		limit: number
 	},
@@ -748,7 +750,7 @@ export async function listFeaturedCommunityListings(
 }
 
 export async function setCommunityListingStatus(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingId: string
 		status: CommunityListingStatus
@@ -766,7 +768,7 @@ export async function setCommunityListingStatus(
 }
 
 export async function insertCommunityFork(
-	db: D1Database,
+	db: SqlDatabase,
 	row: Omit<
 		CommunityForkRow,
 		'created_at' | 'adopted_at' | 'adoption_note' | 'actor'
@@ -802,7 +804,7 @@ export async function insertCommunityFork(
 }
 
 export async function deleteCommunityForksForPackage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		packageId: string
@@ -847,7 +849,7 @@ export type OrphanedCommunityForkRow = {
  * `entity_sources` row, so a missing package alone is not an orphan.
  */
 export async function listOrphanedCommunityForks(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		forkIds?: Array<string>
 	} = {},
@@ -897,7 +899,7 @@ export async function listOrphanedCommunityForks(
 }
 
 export async function deleteCommunityForksByIds(
-	db: D1Database,
+	db: SqlDatabase,
 	forkIds: Array<string>,
 ): Promise<number> {
 	const uniqueForkIds = [...new Set(forkIds)]
@@ -917,13 +919,22 @@ export async function deleteCommunityForksByIds(
 }
 
 export async function repointOrphanedCommunityForksToListing(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingId: string
 		listingName: string
 		listingKodyId: string
 	},
 ): Promise<number> {
+	if ('dialect' in db && db.dialect === 'postgres') {
+		// Orphaned forks belong to other forkers; RLS hides them from the
+		// publisher, so a definer bound to the caller's own listing moves them.
+		const row = await db
+			.prepare(`SELECT kody_community_repoint_orphan_forks(?, ?, ?) AS moved`)
+			.bind(input.listingId, input.listingName, input.listingKodyId)
+			.first<{ moved: number }>()
+		return Number(row?.moved ?? 0)
+	}
 	const result = await db
 		.prepare(
 			`UPDATE community_forks
@@ -948,7 +959,7 @@ export async function repointOrphanedCommunityForksToListing(
 }
 
 export async function getCommunityForkByListingAndUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingId: string
 		userId: string
@@ -966,7 +977,7 @@ export async function getCommunityForkByListingAndUser(
 }
 
 export async function getCommunityForkByForkedPackageId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		forkerUserId: string
 		forkedPackageId: string
@@ -984,7 +995,7 @@ export async function getCommunityForkByForkedPackageId(
 }
 
 export async function updateCommunityForkOriginCommit(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		forkerUserId: string
 		forkedPackageId: string
@@ -1007,7 +1018,7 @@ export async function updateCommunityForkOriginCommit(
 }
 
 export async function markCommunityForkAdopted(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		forkerUserId: string
 		forkedPackageId: string
@@ -1037,7 +1048,7 @@ export async function markCommunityForkAdopted(
 }
 
 export async function listCommunityForksByListingAndUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingId: string
 		userId: string
@@ -1060,7 +1071,7 @@ export async function listCommunityForksByListingAndUser(
  * each D1 chunk only; callers that need a global order must sort themselves.
  */
 export async function listCommunityForksByListingIdsAndUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		listingIds: Array<string>
 		userId: string
@@ -1091,7 +1102,7 @@ export async function listCommunityForksByListingIdsAndUser(
 }
 
 export async function countCommunityForksByListingIds(
-	db: D1Database,
+	db: SqlDatabase,
 	listingIds: Array<string>,
 ): Promise<Record<string, number>> {
 	if (listingIds.length === 0) return {}
@@ -1117,7 +1128,7 @@ export async function countCommunityForksByListingIds(
 }
 
 export async function listCommunityActivityRowsForAdmin(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		page: number
 		pageSize: number
@@ -1142,7 +1153,7 @@ export async function listCommunityActivityRowsForAdmin(
 }
 
 export async function listCommunityActivityPageRowsForAdmin(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		page: number
 		pageSize: number
@@ -1169,7 +1180,7 @@ export async function listCommunityActivityPageRowsForAdmin(
 }
 
 export async function getCommunityActivityByIdForAdmin(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { kind: CommunityActivityKind; activityId: string },
 ): Promise<CommunityActivityRecord | null> {
 	const row = await db
@@ -1184,7 +1195,7 @@ export async function getCommunityActivityByIdForAdmin(
 }
 
 export async function upsertCommunityRating(
-	db: D1Database,
+	db: SqlDatabase,
 	row: Omit<CommunityRatingRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -1222,7 +1233,7 @@ export async function upsertCommunityRating(
 }
 
 export async function deleteCommunityRatingsByListingId(
-	db: D1Database,
+	db: SqlDatabase,
 	listingId: string,
 ): Promise<void> {
 	await db
@@ -1231,8 +1242,35 @@ export async function deleteCommunityRatingsByListingId(
 		.run()
 }
 
+/**
+ * Owner unpublish: remove every user's ratings and activity on the caller's
+ * listing. Runs before the listing row is deleted.
+ */
+export async function deleteOwnedCommunityListingEngagement(
+	db: SqlDatabase,
+	listingId: string,
+): Promise<void> {
+	if ('dialect' in db && db.dialect === 'postgres') {
+		// Other users' rows are hidden by RLS, and a DELETE predicate would need
+		// SELECT on rating notes; a definer bound to the owned listing clears them.
+		await db
+			.prepare(`SELECT kody_community_clear_listing_engagement(?) AS cleared`)
+			.bind(listingId)
+			.first()
+		return
+	}
+	await db.batch([
+		db
+			.prepare(`DELETE FROM community_ratings WHERE listing_id = ?`)
+			.bind(listingId),
+		db
+			.prepare(`DELETE FROM community_activity_events WHERE listing_id = ?`)
+			.bind(listingId),
+	])
+}
+
 export async function getCommunityRatingAggregatesByListingId(
-	db: D1Database,
+	db: SqlDatabase,
 	listingId: string,
 ): Promise<CommunityRatingAggregate> {
 	const row = await db
@@ -1260,7 +1298,7 @@ export async function getCommunityRatingAggregatesByListingId(
 }
 
 export async function getCommunityRatingAggregatesByListingIds(
-	db: D1Database,
+	db: SqlDatabase,
 	listingIds: Array<string>,
 ): Promise<Record<string, CommunityRatingAggregate>> {
 	if (listingIds.length === 0) return {}
@@ -1310,7 +1348,7 @@ export async function getCommunityRatingAggregatesByListingIds(
 }
 
 export async function insertCommunityReport(
-	db: D1Database,
+	db: SqlDatabase,
 	row: Omit<CommunityReportRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -1343,7 +1381,7 @@ export async function insertCommunityReport(
 }
 
 export async function listCommunityReports(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		status?: CommunityReportStatus
 	},
@@ -1365,7 +1403,7 @@ export async function listCommunityReports(
 }
 
 export async function getCommunityReportById(
-	db: D1Database,
+	db: SqlDatabase,
 	reportId: string,
 ): Promise<CommunityReportRecord | null> {
 	const row = await db
@@ -1382,7 +1420,7 @@ export async function getCommunityReportById(
 }
 
 export async function resolveCommunityReportRow(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		reportId: string
 		status: Exclude<CommunityReportStatus, 'open'>
@@ -1411,7 +1449,7 @@ export async function resolveCommunityReportRow(
 }
 
 export async function insertCommunityBan(
-	db: D1Database,
+	db: SqlDatabase,
 	row: Omit<CommunityBanRow, 'created_at'> & { created_at?: string },
 ): Promise<void> {
 	await db
@@ -1433,7 +1471,7 @@ export async function insertCommunityBan(
 }
 
 export async function deleteCommunityBan(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<boolean> {
 	const result = await db
@@ -1444,7 +1482,7 @@ export async function deleteCommunityBan(
 }
 
 export async function getCommunityBan(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<CommunityBanRecord | null> {
 	const row = await db

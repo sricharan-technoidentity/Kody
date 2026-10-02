@@ -1,13 +1,13 @@
 import {
 	getCapabilityVectorIndex,
 	isCapabilitySearchOffline,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import {
 	reindexPagedVectorRows,
 	type VectorReindexSweepOptions,
 	type VectorReindexSweepResult,
-} from '#worker/vectorize/reindex-sweep.ts'
-import { userVectorNamespace } from '#worker/vectorize/vector-namespaces.ts'
+} from '#worker/search-index/reindex-sweep.ts'
+import { userVectorNamespace } from '#worker/search-index/vector-namespaces.ts'
 import { buildJobEmbedText } from '#mcp/jobs-embed.ts'
 import { jobVectorId } from '#mcp/jobs-vectorize.ts'
 import { runD1WithRetry } from '#worker/d1-retry.ts'

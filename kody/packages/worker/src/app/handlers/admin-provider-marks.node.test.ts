@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { type PermissionString, type RoleName } from '#universal/permissions.ts'
@@ -62,7 +63,7 @@ function createHarness() {
 	applyRepositoryMigrations(sqlite, migrationsDirectory)
 	const env = {
 		APP_DB: createD1FromSqlite(sqlite),
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		COMMUNITY_ASSETS: {
 			async put() {},
 			async get() {

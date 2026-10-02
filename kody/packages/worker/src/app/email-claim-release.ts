@@ -10,6 +10,8 @@ import {
 } from '#worker/identity/email-claims.ts'
 import { normalizeEmail } from '#worker/identity/normalize-email.ts'
 import { toHex } from '@kody-internal/shared/hex.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+import { resolveTokenOwnerDb } from '#worker/identity/token-owner-db.ts'
 
 export const emailClaimReleaseRequestRateLimitConfig = {
 	maxRequests: 3,
@@ -155,7 +157,9 @@ export type VerifyEmailClaimReleaseResult =
 	  }
 
 export async function verifyEmailClaimReleaseToken(input: {
-	db: D1Database
+	db: SqlDatabase
+	/** Owner-scoped writers; required on PostgreSQL, where RLS hides the token. */
+	forUser?: (stableUserId: string) => SqlDatabase
 	token: unknown
 	now?: Date
 }): Promise<VerifyEmailClaimReleaseResult> {
@@ -163,7 +167,14 @@ export async function verifyEmailClaimReleaseToken(input: {
 	if (!token) return { ok: false, reason: 'missing_token' }
 
 	const tokenHash = await hashVerificationToken(token)
-	const record = await input.db
+	const db = await resolveTokenOwnerDb({
+		db: input.db,
+		forUser: input.forUser,
+		kind: 'email_claim_release',
+		key: tokenHash,
+	})
+	if (!db) return { ok: false, reason: 'invalid_token' }
+	const record = await db
 		.prepare(
 			`SELECT pec.id, pec.user_id, pec.email, pec.expires_at,
 			        u.email AS current_email, u.stable_user_id
@@ -184,7 +195,7 @@ export async function verifyEmailClaimReleaseToken(input: {
 
 	if (!record) return { ok: false, reason: 'invalid_token' }
 	if (record.expires_at < now.getTime()) {
-		await input.db
+		await db
 			.prepare(`DELETE FROM pending_email_claim_releases WHERE id = ?`)
 			.bind(record.id)
 			.run()
@@ -192,14 +203,14 @@ export async function verifyEmailClaimReleaseToken(input: {
 	}
 
 	const releasable = await resolveReleasableEmailClaim({
-		db: input.db,
+		db: db,
 		userId: record.user_id,
 		stableUserId: record.stable_user_id,
 		currentEmail: record.current_email,
 		email: record.email,
 	})
 	if (!releasable.ok) {
-		await input.db
+		await db
 			.prepare(`DELETE FROM pending_email_claim_releases WHERE id = ?`)
 			.bind(record.id)
 			.run()
@@ -212,7 +223,7 @@ export async function verifyEmailClaimReleaseToken(input: {
 		}
 	}
 
-	const recentReleases = await countRecentEmailClaimReleases(input.db, {
+	const recentReleases = await countRecentEmailClaimReleases(db, {
 		userId: record.user_id,
 		windowSeconds: emailClaimReleaseSuccessRateLimitConfig.windowSeconds,
 		now,
@@ -221,12 +232,12 @@ export async function verifyEmailClaimReleaseToken(input: {
 		return { ok: false, reason: 'daily_cap' }
 	}
 
-	await releaseAccountEmailClaim(input.db, {
+	await releaseAccountEmailClaim(db, {
 		userId: record.user_id,
 		email: releasable.email,
 		now,
 	})
-	await input.db
+	await db
 		.prepare(
 			`DELETE FROM pending_email_claim_releases WHERE user_id = ? AND email = ?`,
 		)

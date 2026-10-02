@@ -27,6 +27,11 @@ import {
 import { resolveTransactionalEmailConfig } from '#app/email/sender-config.ts'
 import { type OAuthGrantHelpers } from '#worker/oauth-grants.ts'
 import { resolveUserStableId } from '#worker/user-id.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import {
+	getAccountWriterFactory,
+	resolveTokenOwnerDb,
+} from '#worker/identity/token-owner-db.ts'
 
 const resetRequestSchema = object({
 	email: string(),
@@ -60,8 +65,6 @@ function getPasswordResetEmailConfig(
 }
 
 export function createPasswordResetRequestHandler(env: Env) {
-	const db = createDb(env.APP_DB)
-
 	return {
 		middleware: [],
 		async handler({ request, url }) {
@@ -103,11 +106,20 @@ export function createPasswordResetRequestHandler(env: Env) {
 				return Response.json({ error: 'Email is required.' }, { status: 400 })
 			}
 
-			const userRecord = await db.findOne(usersTable, {
-				where: { email: normalizedEmail },
+			// Only the address is known before sign-in; continue on its owner's writer.
+			const accountDb = await resolveTokenOwnerDb<D1Database | PgDatabase>({
+				db: env.APP_DB,
+				forUser: getAccountWriterFactory(env),
+				kind: 'account_email',
+				key: normalizedEmail,
 			})
+			const userRecord = accountDb
+				? await createDb(accountDb).findOne(usersTable, {
+						where: { email: normalizedEmail },
+					})
+				: null
 
-			if (userRecord) {
+			if (accountDb && userRecord) {
 				const userId = userRecord.id
 				// Token writes and the email send happen after the response so
 				// the reply latency does not depend on whether the address is
@@ -116,7 +128,7 @@ export function createPasswordResetRequestHandler(env: Env) {
 				void deferWork('password-reset-request-error', async () => {
 					const emailConfig = getPasswordResetEmailConfig(env, url)
 					const resetToken = await createPasswordResetToken({
-						db: env.APP_DB,
+						db: accountDb,
 						userId,
 						expiresAt: Date.now() + passwordResetTokenExpiryMs,
 					})
@@ -187,8 +199,6 @@ export function createPasswordResetRequestHandler(env: Env) {
 }
 
 export function createPasswordResetConfirmHandler(env: Env) {
-	const db = createDb(env.APP_DB)
-
 	return {
 		middleware: [],
 		async handler({ request, url }) {
@@ -246,9 +256,20 @@ export function createPasswordResetConfirmHandler(env: Env) {
 			}
 
 			const tokenHash = await hashPasswordResetToken(token)
-			const resetRecord = await db.findOne(passwordResetsTable, {
-				where: { token_hash: tokenHash },
+			const accountDb = await resolveTokenOwnerDb<D1Database | PgDatabase>({
+				db: env.APP_DB,
+				forUser: getAccountWriterFactory(env),
+				kind: 'password_reset',
+				key: tokenHash,
 			})
+			// A missing owner means no such token; the shared binding is never queried.
+			const d1 = accountDb ?? env.APP_DB
+			const db = createDb(d1)
+			const resetRecord = accountDb
+				? await db.findOne(passwordResetsTable, {
+						where: { token_hash: tokenHash },
+					})
+				: null
 			const now = Date.now()
 
 			if (!resetRecord || resetRecord.expires_at < now) {
@@ -293,7 +314,7 @@ export function createPasswordResetConfirmHandler(env: Env) {
 				.OAUTH_PROVIDER
 			const result = await applyPasswordChange({
 				db,
-				d1: env.APP_DB,
+				d1,
 				helpers,
 				userId: resetRecord.user_id,
 				stableUserId: resolveUserStableId(userRecord),

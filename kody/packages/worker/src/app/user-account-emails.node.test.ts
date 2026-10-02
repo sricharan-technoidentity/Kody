@@ -1,7 +1,5 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 
 const sendCloudflareEmail = vi.fn(async () => ({ ok: true }))
@@ -165,23 +163,15 @@ test('connect-agent mail does not claim when unsubscribe minting fails', async (
 })
 
 test('connect-agent mail skips when the user opted out of Kody tips', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	const db = createD1FromSqlite(sqlite)
-	await db
-		.prepare(
-			`INSERT INTO users (username, email, password_hash, stable_user_id, plan, account_type)
-			 VALUES ('ada', 'ada@example.com', 'x', 'user-1', 'free', 'person')`,
-		)
-		.run()
-	await db
-		.prepare(
-			`INSERT INTO user_tips_email_opt_outs (user_id, opted_out_at)
-			 VALUES ('user-1', '2026-09-06T00:00:00.000Z')`,
-		)
-		.run()
+	await using store = await createTestDb({ userId: 'user-1' })
+	await store.pg.exec(`
+		INSERT INTO users (username, email, password_hash, stable_user_id, plan, account_type)
+		VALUES ('ada', 'ada@example.com', 'x', 'user-1', 'free', 'person');
+		INSERT INTO user_tips_email_opt_outs (user_id, opted_out_at)
+		VALUES ('user-1', '2026-09-06T00:00:00.000Z');
+	`)
 	const { kv } = createKv()
-	const env = { ...createEnv(kv), APP_DB: db } as unknown as Env
+	const env = { ...createEnv(kv), APP_DB: store.db } as unknown as Env
 	sendCloudflareEmail.mockClear()
 	expect(
 		await sendConnectAgentEmail({
@@ -244,17 +234,13 @@ test('account emails reserve the KV claim before sending and release it on send 
 })
 
 test('failed verify-time connect-agent mail opens an event campaign row for the sweep', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	const db = createD1FromSqlite(sqlite)
-	await db
-		.prepare(
-			`INSERT INTO users (username, email, password_hash, stable_user_id, plan, account_type)
-			 VALUES ('ada', 'ada@example.com', 'x', 'user-open', 'free', 'person')`,
-		)
-		.run()
+	await using database = await createTestDb({ userId: 'user-open' })
+	await database.pg.query(
+		`INSERT INTO users (username, email, password_hash, stable_user_id, plan, account_type)
+		 VALUES ('ada', 'ada@example.com', 'x', 'user-open', 'free', 'person')`,
+	)
 	const { kv, store } = createKv()
-	const env = { ...createEnv(kv), APP_DB: db } as unknown as Env
+	const env = { ...createEnv(kv), APP_DB: database.db } as unknown as Env
 	env.COOKIE_SECRET = ''
 	sendCloudflareEmail.mockClear()
 	consoleWarn.mockImplementation(() => {})
@@ -271,7 +257,7 @@ test('failed verify-time connect-agent mail opens an event campaign row for the 
 			userAccountEmailKvKey({ userId: 'user-open', kind: 'connect_agent' }),
 		),
 	).toBeUndefined()
-	expect(await readUsageCampaign(db, 'user-open')).toMatchObject({
+	expect(await readUsageCampaign(database.reader, 'user-open')).toMatchObject({
 		state: 'VerifiedNoMcp',
 		origin: 'event',
 		send_count: 0,

@@ -1,18 +1,15 @@
 import { isoTimestampDayKey } from '@kody-internal/shared/date-keys.ts'
-import { canonicalJsonStringify } from '@kody-internal/shared/canonical-json.ts'
 import {
 	toJsonSafeValue,
 	type JsonValue,
 } from '@kody-internal/shared/json-safe-value.ts'
-import { sha256Base64Url } from '@kody-internal/shared/sha256.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
-import * as Sentry from '@sentry/cloudflare'
 import {
-	WorkflowEntrypoint,
-	type WorkflowEvent,
-	type WorkflowStep,
-} from 'cloudflare:workers'
-import { NonRetryableError } from 'cloudflare:workflows'
+	createTemporalPackageWorkflowBinding,
+	type PackageWorkflowEngine,
+	type PackageWorkflowInstance,
+} from '#worker/temporal/package-workflow.ts'
+import { workflowIds } from '#worker/temporal/ids.ts'
 import { getAppBaseUrl } from '#worker/app-base-url.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import {
@@ -29,15 +26,12 @@ import {
 	getSavedPackageById,
 	getSavedPackageByKodyId,
 } from '#worker/package-registry/repo.ts'
-import { buildSentryOptions } from '#worker/sentry-options.ts'
 import { assertWithinEntitlement } from '#worker/entitlements/service.ts'
 import { resolveBackgroundMcpUser } from '#worker/identity/background-mcp-user.ts'
 import {
 	AccountSuspendedError,
 	accountSuspendedErrorCode,
-	isAccountSuspendedError,
 } from '#worker/account/account-suspension.ts'
-import { recordUsage } from '#worker/usage/record-usage.ts'
 import {
 	beginRunRecord,
 	deleteWorkflowProjectionIfCreating,
@@ -63,7 +57,6 @@ import {
 	terminalWorkflowStatusValues,
 	type WorkflowRunStatus,
 } from './workflow-statuses.ts'
-import { applyDynamicWorkflowSentryScope } from './package-workflows-sentry.ts'
 
 /** Persisted on every RunLog workflow projection for this binding. */
 export const dynamicCallableWorkflowsBindingName =
@@ -165,55 +158,22 @@ export type WorkflowRunInspection = {
 }
 
 function resolveWorkflowEngineBinding(
-	env: Pick<Env, 'DYNAMIC_CALLABLE_WORKFLOWS'>,
+	env: Pick<Env, 'TEMPORAL'>,
 	bindingName: WorkflowBindingName,
-): Workflow<DynamicCallableWorkflowPayload> {
-	switch (bindingName) {
-		case 'DYNAMIC_CALLABLE_WORKFLOWS': {
-			if (!env.DYNAMIC_CALLABLE_WORKFLOWS) {
-				throw new Error('Missing DYNAMIC_CALLABLE_WORKFLOWS binding.')
-			}
-			return env.DYNAMIC_CALLABLE_WORKFLOWS
-		}
-		default: {
-			const exhaustive: never = bindingName
-			throw new Error(`Unsupported workflow binding: ${String(exhaustive)}`)
-		}
-	}
-}
-
-type WorkflowStepDoConfig = {
-	retries?: {
-		limit: number
-		delay: string | number
-		backoff?: string
-	}
-	timeout?: string | number
-}
-
-const workflowStepDoConfig: WorkflowStepDoConfig = {
-	retries: {
-		limit: 3,
-		delay: '30 seconds',
-		backoff: 'exponential',
-	},
-	timeout: '5 minutes',
+) {
+	if (bindingName !== dynamicCallableWorkflowsBindingName)
+		throw new Error(`Unsupported workflow binding: ${bindingName}`)
+	if (!env.TEMPORAL)
+		throw new Error('Missing TEMPORAL binding for durable package workflows.')
+	return createTemporalPackageWorkflowBinding(env.TEMPORAL)
 }
 
 /**
  * Sandbox budget for workflow-invoked package exports / inline code.
- * Kept under the Cloudflare Workflow step timeout (`5 minutes`) so status
+ * Kept under the Temporal activity timeout (`5 minutes`) so status
  * bookkeeping still has headroom after the sandbox returns.
  */
 export const workflowExecutorTimeoutMs = 270_000
-
-type DynamicCallableWorkflowStep = {
-	do(
-		name: string,
-		config: WorkflowStepDoConfig,
-		callback: () => Promise<JsonValue>,
-	): Promise<JsonValue>
-}
 
 const packageWorkflowTokenId = 'internal:package-workflows'
 const maxPackageWorkflowParamsJsonBytes = 16 * 1024
@@ -345,31 +305,6 @@ export function normalizePackageWorkflowParams(
 	return normalized as PackageWorkflowParams
 }
 
-export async function createPackageWorkflowInstanceId(input: {
-	userId: string
-	packageId: string
-	workflowName: string
-	idempotencyKey: string
-	runAt: string | Date
-	options?: {
-		includeRunAt?: boolean
-	}
-}) {
-	const canonical = canonicalJsonStringify({
-		userId: normalizeNonEmptyString(input.userId, 'userId'),
-		packageId: normalizeNonEmptyString(input.packageId, 'packageId'),
-		workflowName: normalizeNonEmptyString(input.workflowName, 'workflowName'),
-		idempotencyKey: normalizeNonEmptyString(
-			input.idempotencyKey,
-			'idempotencyKey',
-		),
-		...(input.options?.includeRunAt === false
-			? {}
-			: { runAt: normalizeRunAt(input.runAt) }),
-	})
-	return `pkgwf-${(await sha256Base64Url(canonical)).slice(0, 43)}`
-}
-
 export function createPackageWorkflowPlanDate(runAt: string | Date) {
 	return isoTimestampDayKey(normalizeRunAt(runAt))
 }
@@ -450,7 +385,7 @@ function createDynamicPackageWorkflowPayload(input: {
 	}
 }
 
-function validateDynamicCallableWorkflowPayload(
+export function validateDynamicCallableWorkflowPayload(
 	input: unknown,
 ): DynamicCallableWorkflowPayload {
 	if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -537,7 +472,7 @@ function validateDynamicCallableWorkflowPayload(
 }
 
 async function readWorkflowInstanceSummary(
-	instance: WorkflowInstance,
+	instance: PackageWorkflowInstance,
 ): Promise<{ id: string; status?: string }> {
 	const status = await instance.status()
 	return {
@@ -547,7 +482,7 @@ async function readWorkflowInstanceSummary(
 }
 
 async function getExistingWorkflowInstance(
-	workflow: Workflow<DynamicCallableWorkflowPayload>,
+	workflow: PackageWorkflowEngine,
 	id: string,
 ) {
 	try {
@@ -647,10 +582,10 @@ function mapWorkflowProjectionToInspection(
 }
 
 /**
- * RunLog-only idempotency lookup (binding-scoped; excludes `creating`).
+ * Run-state-only idempotency lookup (binding-scoped; excludes `creating`).
  */
 export async function findWorkflowRunByIdempotencyKey(input: {
-	env: Pick<Env, 'RUN_LOG'>
+	env: Pick<Env, 'RUN_STATE'>
 	userId: string
 	idempotencyKey: string
 	bindingName?: WorkflowBindingName
@@ -670,7 +605,7 @@ export async function findWorkflowRunByIdempotencyKey(input: {
 }
 
 async function getWorkflowRunForUser(input: {
-	env: Pick<Env, 'RUN_LOG'>
+	env: Pick<Env, 'RUN_STATE'>
 	userId: string
 	id: string
 }): Promise<WorkflowRunInspection | null> {
@@ -749,48 +684,12 @@ function payloadFromWorkflowInspection(
 	}
 }
 
-async function createInlineWorkflowInstanceId(input: {
-	userId: string
-	workflowName: string
-	idempotencyKey: string
-	runAt: string | Date
-	options?: {
-		includeRunAt?: boolean
-	}
-}) {
-	const canonical = canonicalJsonStringify({
-		userId: normalizeNonEmptyString(input.userId, 'userId'),
-		sourceType: 'inline',
-		workflowName: normalizeNonEmptyString(input.workflowName, 'workflowName'),
-		idempotencyKey: normalizeNonEmptyString(
-			input.idempotencyKey,
-			'idempotencyKey',
-		),
-		...(input.options?.includeRunAt === false
-			? {}
-			: { runAt: normalizeRunAt(input.runAt) }),
-	})
-	return `dynwf-${(await sha256Base64Url(canonical)).slice(0, 43)}`
-}
-
-async function createDynamicCallableWorkflowInstanceId(
-	payload: DynamicCallableWorkflowPayload,
-	options?: {
-		includeRunAt?: boolean
-	},
-) {
-	if (payload.sourceType === 'package') {
-		return await createPackageWorkflowInstanceId({ ...payload, options })
-	}
-	return await createInlineWorkflowInstanceId({ ...payload, options })
-}
-
 function isTerminalWorkflowStatus(status: string | null | undefined): boolean {
 	return status != null && terminalWorkflowStatuses.has(status)
 }
 
 async function projectWorkflowRun(input: {
-	env: Pick<Env, 'RUN_LOG'>
+	env: Pick<Env, 'RUN_STATE'>
 	userId: string
 	id: string
 	payload: DynamicCallableWorkflowPayload
@@ -831,8 +730,8 @@ async function projectWorkflowRun(input: {
 	})
 }
 
-async function updateWorkflowRunStatus(input: {
-	env: Pick<Env, 'RUN_LOG'>
+export async function updateWorkflowRunStatus(input: {
+	env: Pick<Env, 'RUN_STATE'>
 	id: string
 	payload: DynamicCallableWorkflowPayload
 	status: string
@@ -929,7 +828,7 @@ async function resolveWorkflowPayload(input: {
 }
 
 export async function createDynamicCallableWorkflow(input: {
-	env: Pick<Env, 'APP_DB' | 'DYNAMIC_CALLABLE_WORKFLOWS' | 'RUN_LOG'>
+	env: Pick<Env, 'APP_DB' | 'TEMPORAL' | 'TEMPORAL' | 'RUN_STATE'>
 	userId: string
 	userEmail?: string | null
 	packageContext?: {
@@ -961,11 +860,10 @@ export async function createDynamicCallableWorkflow(input: {
 		}
 	}
 	const payload = await resolveWorkflowPayload(input)
-	const id = await createDynamicCallableWorkflowInstanceId(payload, {
-		// An explicit idempotency key must single-flight even before the
-		// RunLog projection row is written.
-		includeRunAt: !idempotencyKeyInput,
-	})
+	const id = workflowIds.packageWorkflowRun(
+		payload.userId,
+		payload.idempotencyKey,
+	)
 	const existing = await getExistingWorkflowInstance(workflowBinding, id)
 	if (existing) {
 		await projectWorkflowRun({
@@ -1026,7 +924,7 @@ export async function createDynamicCallableWorkflow(input: {
 		throw error
 	}
 
-	let instance: WorkflowInstance
+	let instance: PackageWorkflowInstance
 	try {
 		instance = await workflowBinding.create({
 			id,
@@ -1104,7 +1002,7 @@ export type CancelWorkflowRunResult =
 	| { outcome: 'cancelled'; run: WorkflowRunInspection }
 
 export async function cancelWorkflowRunForUser(input: {
-	env: Pick<Env, 'DYNAMIC_CALLABLE_WORKFLOWS' | 'RUN_LOG'>
+	env: Pick<Env, 'TEMPORAL' | 'RUN_STATE'>
 	userId: string
 	workflowRunId: string
 }): Promise<CancelWorkflowRunResult> {
@@ -1114,7 +1012,7 @@ export async function cancelWorkflowRunForUser(input: {
 		'workflowRunId',
 	)
 	// USER-ISOLATION BOUNDARY: never touch the workflow binding before this
-	// ownership check passes. RunLog is keyed by userId.
+	// ownership check passes. Run state is keyed by userId.
 	const owned = await getWorkflowRunForUser({
 		env,
 		userId: input.userId,
@@ -1128,7 +1026,7 @@ export async function cancelWorkflowRunForUser(input: {
 		return { outcome: 'already_terminal', run: row }
 	}
 	const workflowBinding = resolveWorkflowEngineBinding(env, row.bindingName)
-	let instance: WorkflowInstance | null = null
+	let instance: PackageWorkflowInstance | null = null
 	try {
 		instance = await workflowBinding.get(row.id)
 	} catch (error) {
@@ -1142,9 +1040,7 @@ export async function cancelWorkflowRunForUser(input: {
 			// terminate throws instead of stamping cancelled over a finished run.
 			await instance.terminate()
 		} catch (error) {
-			// Per Cloudflare WorkflowInstance.terminate (worker-configuration.d.ts):
-			// "Terminate the instance. If it is errored, terminated or complete, an
-			// error will be thrown." — that contract makes catch-and-reread correct.
+			// Cancellation must lose to a concurrently completed or failed run.
 			let statusResult: { status?: string } | null = null
 			try {
 				statusResult = await instance.status()
@@ -1285,7 +1181,7 @@ export async function cancelWorkflowRunForUser(input: {
 }
 
 export async function listWorkflowRunsForUser(input: {
-	env: Pick<Env, 'DYNAMIC_CALLABLE_WORKFLOWS' | 'RUN_LOG'>
+	env: Pick<Env, 'TEMPORAL' | 'RUN_STATE'>
 	userId: string
 	limit?: number
 }): Promise<Array<WorkflowRunInspection>> {
@@ -1312,7 +1208,7 @@ export async function listWorkflowRunsForUser(input: {
 				return
 			}
 			const workflowBinding = resolveWorkflowEngineBinding(env, row.bindingName)
-			let instance: WorkflowInstance
+			let instance: PackageWorkflowInstance
 			try {
 				instance = await workflowBinding.get(row.id)
 			} catch (error) {
@@ -1343,141 +1239,14 @@ export async function listWorkflowRunsForUser(input: {
 	return rows
 }
 
-export class DynamicCallableWorkflowBase extends WorkflowEntrypoint<
-	Env,
-	DynamicCallableWorkflowPayload
-> {
-	async run(
-		event: Readonly<WorkflowEvent<DynamicCallableWorkflowPayload>>,
-		step: WorkflowStep,
-	) {
-		const payload = validateDynamicCallableWorkflowPayload(event.payload)
-		applyDynamicWorkflowSentryScope({
-			payload,
-			instanceId: event.instanceId,
-		})
-		const runAt = new Date(payload.runAt)
-		if (runAt.getTime() > Date.now()) {
-			await step.sleepUntil('wait until dynamic workflow runAt', runAt)
-		}
-		const typedStep = step as unknown as DynamicCallableWorkflowStep
-		// Captured inside a step so replays after interruption reuse the original
-		// start time. The clock starts after the scheduled runAt sleep so a
-		// workflow queued days ahead does not record days of "runtime".
-		const startedAtMs = Number(
-			await typedStep.do(
-				'capture usage start time',
-				workflowStepDoConfig,
-				async () => Date.now(),
-			),
-		)
-		await typedStep.do(
-			'mark workflow running',
-			workflowStepDoConfig,
-			async () => {
-				await updateWorkflowRunStatus({
-					env: this.env,
-					id: event.instanceId,
-					payload,
-					status: 'running',
-				})
-				return { ok: true }
-			},
-		)
-		let result: JsonValue
-		try {
-			result = await typedStep.do(
-				payload.sourceType === 'package'
-					? 'invoke saved package workflow export'
-					: 'execute inline workflow code',
-				workflowStepDoConfig,
-				async () => {
-					try {
-						if (payload.sourceType === 'package') {
-							return await this.invokePackageWorkflowExport(
-								payload,
-								event.instanceId,
-							)
-						}
-						return await this.invokeInlineWorkflowCode(
-							payload,
-							event.instanceId,
-						)
-					} catch (error) {
-						// Suspension stays in force across step retries, so fail the
-						// step once instead of waiting out the retry backoff.
-						if (isAccountSuspendedError(error)) {
-							throw new NonRetryableError(error.message, error.name)
-						}
-						throw error
-					}
-				},
-			)
-		} catch (error) {
-			await updateWorkflowRunStatus({
-				env: this.env,
-				id: event.instanceId,
-				payload,
-				status: 'errored',
-				lastError: getErrorMessage(error),
-				completedAt: new Date().toISOString(),
-			})
-			await this.recordWorkflowRunUsage({
-				typedStep,
-				payload,
-				instanceId: event.instanceId,
-				startedAtMs,
-				outcome: 'error',
-			})
-			throw error
-		}
-		// The catch above only wraps workflow execution: a failing terminal
-		// status write must not relabel a successful run as an error.
-		await updateWorkflowRunStatus({
-			env: this.env,
-			id: event.instanceId,
-			payload,
-			status: 'complete',
-			completedAt: new Date().toISOString(),
-		})
-		await this.recordWorkflowRunUsage({
-			typedStep,
-			payload,
-			instanceId: event.instanceId,
-			startedAtMs,
-			outcome: 'success',
-		})
-		return result
+export class PackageWorkflowExecutor {
+	protected readonly ctx: { waitUntil(promise: Promise<unknown>): void }
+	protected readonly env: Env
+	constructor(ctx: { waitUntil(promise: Promise<unknown>): void }, env: Env) {
+		this.ctx = ctx
+		this.env = env
 	}
-
-	private async recordWorkflowRunUsage(input: {
-		typedStep: DynamicCallableWorkflowStep
-		payload: DynamicCallableWorkflowPayload
-		instanceId: string
-		startedAtMs: number
-		outcome: 'success' | 'error'
-	}) {
-		if (!input.payload.userId) return
-		// Emitted inside a step so a replayed run() returns the cached result
-		// instead of recording the event again. The outcome is part of the step
-		// name so cached results from one path can never shadow the other.
-		await input.typedStep.do(
-			`record workflow usage (${input.outcome})`,
-			workflowStepDoConfig,
-			async () => {
-				await recordUsage(this.env, {
-					userId: input.payload.userId,
-					eventType: 'workflow_run',
-					entityId: input.instanceId,
-					durationMs: Date.now() - input.startedAtMs,
-					outcome: input.outcome,
-				})
-				return { ok: true }
-			},
-		)
-	}
-
-	private async invokePackageWorkflowExport(
+	async invokePackageWorkflowExport(
 		payload: Extract<DynamicCallableWorkflowPayload, { sourceType: 'package' }>,
 		instanceId: string,
 	): Promise<JsonValue> {
@@ -1502,8 +1271,7 @@ export class DynamicCallableWorkflowBase extends WorkflowEntrypoint<
 			},
 		})
 		try {
-			// Ephemeral + raised timeout: Workflow step.do already caches
-			// successful results. Keyed invoke would replay a sandbox timeout
+			// Ephemeral + raised timeout: Temporal records the successful activity result. Keyed invoke would replay a sandbox timeout
 			// on retry (~ms) instead of re-executing; the default 90s export
 			// cap is also below the 5-minute step window.
 			const response = await invokePackageExport({
@@ -1557,7 +1325,7 @@ export class DynamicCallableWorkflowBase extends WorkflowEntrypoint<
 		}
 	}
 
-	private async invokeInlineWorkflowCode(
+	async invokeInlineWorkflowCode(
 		payload: Extract<DynamicCallableWorkflowPayload, { sourceType: 'inline' }>,
 		instanceId: string,
 	): Promise<JsonValue> {
@@ -1659,8 +1427,3 @@ export class DynamicCallableWorkflowBase extends WorkflowEntrypoint<
 		}
 	}
 }
-
-export const DynamicCallableWorkflow = Sentry.instrumentWorkflowWithSentry(
-	(env: Env) => buildSentryOptions(env),
-	DynamicCallableWorkflowBase,
-)

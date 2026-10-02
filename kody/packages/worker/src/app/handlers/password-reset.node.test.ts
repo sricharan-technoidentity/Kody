@@ -2,40 +2,11 @@ import { expect, test, vi } from 'vitest'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
 import type * as AuditLog from '#worker/audit-log.ts'
 import { honeypotFieldName } from '#universal/public-form-protection.ts'
+import { hashPasswordResetToken } from '#worker/identity/password-reset-tokens.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const mockModule = vi.hoisted(() => ({
-	createRecord: vi.fn(async () => undefined),
-	deleteMany: vi.fn(async () => undefined),
-	update: vi.fn(async () => undefined),
-	findOne: vi.fn(
-		async (_table: unknown, query?: { where?: Record<string, unknown> }) => {
-			if (query?.where && 'token_hash' in query.where) {
-				return {
-					id: 1,
-					user_id: 123,
-					token_hash: query.where.token_hash,
-					expires_at: Date.now() + 60_000,
-				}
-			}
-			return {
-				id: 123,
-				email: 'user@example.com',
-				stable_user_id: 'a'.repeat(64),
-			}
-		},
-	),
 	sendCloudflareEmail: vi.fn(async () => ({ ok: true })),
-}))
-
-vi.mock('#worker/db.ts', () => ({
-	createDb: () => ({
-		create: mockModule.createRecord,
-		deleteMany: mockModule.deleteMany,
-		findOne: mockModule.findOne,
-		update: mockModule.update,
-	}),
-	passwordResetsTable: {},
-	usersTable: {},
 }))
 
 // The shared audit-log-spy setup file routes logAuditEvent; this test also
@@ -74,40 +45,52 @@ async function requestResetAndFlush(
 	return { response, flush: () => Promise.all(deferred) }
 }
 
-function createPasswordResetD1Mock() {
-	return {
-		prepare(query: string) {
-			const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-			return {
-				bind() {
-					return {
-						async run() {
-							if (
-								normalizedQuery.startsWith('delete from password_resets') ||
-								normalizedQuery.startsWith('insert into password_resets')
-							) {
-								return { meta: { changes: 1, last_row_id: 1 } }
-							}
-							return { meta: { changes: 0, last_row_id: 0 } }
-						},
-					}
-				},
-			}
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
+
+const ownerStableUserId = 'a'.repeat(64)
+const resetToken = 'a'.repeat(64)
+
+/** One verified account (id 123) with a live reset token, and a bystander. */
+async function createResetDb() {
+	const store = await createTestDb()
+	await store.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash)
+		 VALUES (123, 'reset-user', 'user@example.com', $1, 'unused'),
+		        (124, 'bystander', 'bystander@example.com', $2, 'unused')`,
+		[ownerStableUserId, 'b'.repeat(64)],
+	)
+	await store.pg.query(
+		`INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES (123, $1, $2)`,
+		[await hashPasswordResetToken(resetToken), Date.now() + 60_000],
+	)
+	return store
 }
 
-function createEnv(overrides: Record<string, unknown> = {}) {
+function createEnv(store: TestDb, overrides: Record<string, unknown> = {}) {
 	return {
-		APP_DB: createPasswordResetD1Mock(),
+		// Signed-out requests: a writer with no account context, plus each
+		// account's writer once a definer names it.
+		APP_DB: store.db,
+		APP_DB_FOR_USER: (stableUserId: string) => store.forUser(stableUserId).db,
 		CLOUDFLARE_ACCOUNT_ID: 'account-id',
 		CLOUDFLARE_API_BASE_URL: 'https://api.cloudflare.test',
 		CLOUDFLARE_API_TOKEN: 'api-token',
 		...overrides,
-	} as Env
+	} as unknown as Env
+}
+
+async function passwordChangedAt(store: TestDb) {
+	const { rows } = await store.pg.query<{ password_changed_at: string | null }>(
+		`SELECT password_changed_at FROM users WHERE id = 123`,
+	)
+	return rows[0]?.password_changed_at ?? null
+}
+
+async function resetTokenUsers(store: TestDb) {
+	const { rows } = await store.pg.query<{ user_id: number }>(
+		`SELECT user_id FROM password_resets ORDER BY id`,
+	)
+	return rows.map((row) => Number(row.user_id))
 }
 
 function createResetRequest() {
@@ -121,8 +104,9 @@ const hexTokenPattern = /[0-9a-f]{64}/i
 
 test('password reset request ignores leftover website autofill and rejects the honeypot', async () => {
 	vi.clearAllMocks()
+	await using store = await createResetDb()
 	const handler = createPasswordResetRequestHandler(
-		createEnv({
+		createEnv(store, {
 			APP_BASE_URL: 'https://kody.codes',
 			SYSTEM_EMAIL_DOMAIN: 'kody.codes',
 		}),
@@ -163,8 +147,9 @@ test('password reset request ignores leftover website autofill and rejects the h
 
 test('password reset keeps local action links on the request origin', async () => {
 	vi.clearAllMocks()
+	await using store = await createResetDb()
 	const handler = createPasswordResetRequestHandler(
-		createEnv({
+		createEnv(store, {
 			APP_BASE_URL: 'https://kody.codes',
 			SYSTEM_EMAIL_DOMAIN: 'kody.codes',
 			WRANGLER_IS_LOCAL_DEV: 'true',
@@ -188,8 +173,9 @@ test('password reset keeps local action links on the request origin', async () =
 
 test('password reset sends from the sending domain when SYSTEM_EMAIL_DOMAIN overrides a legacy APP_BASE_URL', async () => {
 	vi.clearAllMocks()
+	await using store = await createResetDb()
 	const handler = createPasswordResetRequestHandler(
-		createEnv({
+		createEnv(store, {
 			APP_BASE_URL: 'https://heykody.dev',
 			SYSTEM_EMAIL_DOMAIN: 'kody.codes',
 		}),
@@ -222,9 +208,10 @@ test('password reset sends from the sending domain when SYSTEM_EMAIL_DOMAIN over
 
 test('password reset sends from the APP_BASE_URL hostname without logging the token', async () => {
 	vi.clearAllMocks()
+	await using store = await createResetDb()
 	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 	const handler = createPasswordResetRequestHandler(
-		createEnv({ APP_BASE_URL: 'https://app.example.com/path' }),
+		createEnv(store, { APP_BASE_URL: 'https://app.example.com/path' }),
 	)
 
 	try {
@@ -269,9 +256,10 @@ test('password reset sends from the APP_BASE_URL hostname without logging the to
 
 test('password reset skips sending when APP_BASE_URL is missing and logs a redacted payload', async () => {
 	vi.clearAllMocks()
+	await using store = await createResetDb()
 	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 	const handler = createPasswordResetRequestHandler(
-		createEnv({ APP_BASE_URL: '' }),
+		createEnv(store, { APP_BASE_URL: '' }),
 	)
 
 	try {
@@ -332,12 +320,13 @@ function createTrackingGrantHelpers(
 
 test('password reset confirm revokes MCP grants before stamping password_changed_at', async () => {
 	vi.clearAllMocks()
+	await using store = await createResetDb()
 	const { helpers, revokedGrantIds } = createTrackingGrantHelpers([
 		{ id: 'grant-1', clientId: 'client-a' },
 		{ id: 'grant-2', clientId: 'client-b' },
 	])
 	const handler = createPasswordResetConfirmHandler(
-		createEnv({
+		createEnv(store, {
 			OAUTH_PROVIDER: helpers,
 			APP_BASE_URL: 'https://kody.codes',
 			SYSTEM_EMAIL_DOMAIN: 'kody.codes',
@@ -348,7 +337,7 @@ test('password reset confirm revokes MCP grants before stamping password_changed
 		request: new Request('https://example.com/password-reset/confirm', {
 			method: 'POST',
 			body: JSON.stringify({
-				token: 'a'.repeat(64),
+				token: resetToken,
 				password: 'new-password-123',
 			}),
 		}),
@@ -358,18 +347,13 @@ test('password reset confirm revokes MCP grants before stamping password_changed
 
 	expect(response.status).toBe(200)
 	expect(await response.json()).toEqual({ ok: true })
-	expect(helpers.listUserGrants).toHaveBeenCalledWith('a'.repeat(64), {
+	expect(helpers.listUserGrants).toHaveBeenCalledWith(ownerStableUserId, {
 		cursor: undefined,
 	})
 	expect(revokedGrantIds).toEqual(['grant-1', 'grant-2'])
-	expect(mockModule.update).toHaveBeenCalledWith(
-		{},
-		123,
-		expect.objectContaining({
-			password_changed_at: expect.any(String),
-		}),
-	)
-	expect(mockModule.deleteMany).toHaveBeenCalled()
+	expect(await passwordChangedAt(store)).toEqual(expect.any(String))
+	// The owner's reset tokens are consumed; the bystander has none to lose.
+	expect(await resetTokenUsers(store)).toEqual([])
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
 		expect.objectContaining({
 			category: 'auth',
@@ -388,14 +372,18 @@ test('password reset confirm revokes MCP grants before stamping password_changed
 
 test('password reset confirm revokes a grant created between first revoke and password_changed_at', async () => {
 	vi.clearAllMocks()
+	await using store = await createResetDb()
 	const { helpers, revokedGrantIds, liveGrants } = createTrackingGrantHelpers([
 		{ id: 'grant-a', clientId: 'client-a' },
 	])
-	mockModule.update.mockImplementationOnce(async () => {
+	// A grant minted while the first revoke pass runs shows up only in the
+	// re-list after password_changed_at is stamped.
+	helpers.revokeGrant.mockImplementationOnce(async (grantId: string) => {
+		revokedGrantIds.push(grantId)
 		liveGrants.push({ id: 'grant-raced', clientId: 'client-b' })
 	})
 	const handler = createPasswordResetConfirmHandler(
-		createEnv({
+		createEnv(store, {
 			OAUTH_PROVIDER: helpers,
 			APP_BASE_URL: 'https://kody.codes',
 			SYSTEM_EMAIL_DOMAIN: 'kody.codes',
@@ -406,7 +394,7 @@ test('password reset confirm revokes a grant created between first revoke and pa
 		request: new Request('https://example.com/password-reset/confirm', {
 			method: 'POST',
 			body: JSON.stringify({
-				token: 'a'.repeat(64),
+				token: resetToken,
 				password: 'new-password-123',
 			}),
 		}),
@@ -416,14 +404,15 @@ test('password reset confirm revokes a grant created between first revoke and pa
 
 	expect(response.status).toBe(200)
 	expect(revokedGrantIds).toEqual(['grant-a', 'grant-raced'])
-	expect(mockModule.update).toHaveBeenCalled()
-	expect(mockModule.deleteMany).toHaveBeenCalled()
+	expect(await passwordChangedAt(store)).toEqual(expect.any(String))
+	expect(await resetTokenUsers(store)).toEqual([])
 })
 
 test('password reset confirm fails closed when MCP grants cannot be revoked', async () => {
 	vi.clearAllMocks()
+	await using store = await createResetDb()
 	const handler = createPasswordResetConfirmHandler(
-		createEnv({
+		createEnv(store, {
 			OAUTH_PROVIDER: {
 				listUserGrants: async () => ({
 					items: [{ id: 'grant-1', clientId: 'client-a' }],
@@ -439,7 +428,7 @@ test('password reset confirm fails closed when MCP grants cannot be revoked', as
 		request: new Request('https://example.com/password-reset/confirm', {
 			method: 'POST',
 			body: JSON.stringify({
-				token: 'a'.repeat(64),
+				token: resetToken,
 				password: 'new-password-123',
 			}),
 		}),
@@ -451,13 +440,61 @@ test('password reset confirm fails closed when MCP grants cannot be revoked', as
 	expect(await response.json()).toEqual({
 		error: 'Unable to finish password reset right now.',
 	})
-	expect(mockModule.update).not.toHaveBeenCalled()
+	expect(await passwordChangedAt(store)).toBeNull()
+	expect(await resetTokenUsers(store)).toEqual([123])
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
 		expect.objectContaining({
 			category: 'auth',
 			action: 'password_reset_confirm',
 			result: 'failure',
 			reason: 'kv unavailable',
+		}),
+	)
+})
+
+test('password reset request mints the token on the address owner only and is silent for unknown addresses', async () => {
+	vi.clearAllMocks()
+	await using store = await createResetDb()
+	const handler = createPasswordResetRequestHandler(
+		createEnv(store, { APP_BASE_URL: '' }),
+	)
+	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+	try {
+		for (const email of ['user@example.com', 'nobody@example.com']) {
+			const { response, flush } = await requestResetAndFlush(handler, {
+				request: new Request('https://kody.codes/password-reset', {
+					method: 'POST',
+					body: JSON.stringify({ email }),
+				}),
+				url: new URL('https://kody.codes/password-reset'),
+			})
+			await flush()
+			expect(await response.json()).toEqual({
+				ok: true,
+				message: 'If the account exists, a reset email has been sent.',
+			})
+		}
+	} finally {
+		warnSpy.mockRestore()
+	}
+	// The owner's seeded token was replaced by a fresh one; nothing else was written.
+	const { rows } = await store.pg.query<{
+		user_id: number
+		token_hash: string
+	}>(`SELECT user_id, token_hash FROM password_resets`)
+	expect(rows).toEqual([
+		{
+			user_id: 123,
+			token_hash: expect.not.stringMatching(
+				await hashPasswordResetToken(resetToken),
+			),
+		},
+	])
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			action: 'password_reset_request',
+			result: 'failure',
+			reason: 'email_not_found',
 		}),
 	)
 })

@@ -1,3 +1,4 @@
+import { reconcileStaleRunRecords } from '#worker/run-records/reconcile-stale.ts'
 import * as Sentry from '@sentry/cloudflare'
 import { checkAuthDenialBurstAndNotify } from '#app/auth-denial-alerts.ts'
 import { checkEmailDeliveryBurstAndNotify } from '#app/email-delivery-alerts.ts'
@@ -11,21 +12,14 @@ import { sendUserErrorRateEmails } from '#app/user-error-rate-emails.ts'
 import { sendUserUsageCampaignEmails } from '#app/user-usage-campaign-emails.ts'
 import { emitFleetEntitlementCrossingEvents } from '#app/usage-entitlement-alerts.ts'
 import { isRetryableD1LockError } from '#worker/d1-retry.ts'
-import {
-	runDrExportTick,
-	runDrExportWatchdogTick,
-} from '#worker/dr/exporter.ts'
 import { sweepStaleInboundDeliveries } from '#worker/email/reconcile-inbound-deliveries.ts'
 import { pruneSystemEmailRetention } from '#worker/email/system-email.ts'
-import { reconcileD1StorageBytes } from '#worker/entitlements/d1-storage-reconciliation.ts'
 import { pruneJobRetention } from '#worker/jobs/job-retention-cleanup.ts'
-import { jobsData } from '#worker/jobs/jobs-data.ts'
 import { reconcileArtifactsPushes } from '#worker/jobs/reconcile-artifacts-pushes.ts'
 import { cleanupRepoSessionBranches } from '#worker/repo/repo-session-cleanup.ts'
 import { backfillStorageBucketEstimates } from '#worker/storage-buckets/estimate-backfill.ts'
 import { refreshAdminInsightsRunLogSnapshot } from '#worker/admin/insights-runlog-snapshot.ts'
 import { aggregateUsageRollups } from '#worker/usage/aggregate-rollups.ts'
-import { runDurableObjectDurationAttribution } from '#worker/usage/durable-object-duration-attribution.ts'
 import { runCreditDebits } from '#worker/billing/credit-debits.ts'
 
 export {
@@ -42,11 +36,10 @@ import {
 } from '@kody-internal/shared/jobs/scheduled-lanes.ts'
 
 /**
- * Execute one platform scheduled lane in the main worker. The cron trigger
- * and the scheduled dispatch queue live in the jobs worker (ADR 0016), which
- * forwards every lane it does not own through `JobsHost.runScheduledLane`.
- * Lanes the jobs worker executes locally (job scheduling watchdog) never
- * arrive here.
+ * Execute one platform scheduled lane: the `runScheduledLane` activity of a
+ * `MaintenanceLane` workflow, fired by the lane's Temporal Schedule
+ * (`temporal/lanes.ts`). The OAuth purge runs as its own paging workflow and
+ * the retired jobs-worker watchdog never arrives here.
  */
 export async function runScheduledLane(input: {
 	env: Env
@@ -92,23 +85,31 @@ export async function runScheduledLane(input: {
 				now: input.scheduledAt,
 			})
 		case 'd1_storage_reconciliation':
-			return reconcileD1StorageBytes({
-				db: input.env.APP_DB,
-				env: input.env,
-				jobs: jobsData(input.env),
-				now: input.scheduledAt,
-			})
-		case 'oauth_purge_expired': {
-			const id = input.env.OAUTH_PURGE_COORDINATOR.idFromName('global')
-			const stub = input.env.OAUTH_PURGE_COORDINATOR.get(id)
-			return stub.run({ scheduledAt: input.scheduledAt.getTime() })
-		}
+		case 'durable_object_duration_attribution':
+		case 'dr_export':
+		case 'dr_export_watchdog':
+			throw new Error(
+				`Scheduled lane "${input.lane}" is retired in the AWS target.`,
+			)
+		case 'oauth_purge_expired':
+			throw new Error(
+				'Scheduled lane "oauth_purge_expired" runs as the OAuthPurgeSweep workflow.',
+			)
 		case 'retention':
 			return pruneRetention({ env: input.env, now: input.scheduledAt })
 		case 'unverified_account_purge':
 			return pruneUnverifiedAccounts({
 				env: input.env,
 				now: input.scheduledAt,
+			})
+		case 'run_records_reconciliation':
+			if (!input.env.RUN_RECORDS)
+				throw new Error(
+					'Missing RUN_RECORDS binding for stale run reconciliation.',
+				)
+			return reconcileStaleRunRecords({
+				db: input.env.APP_DB,
+				records: input.env.RUN_RECORDS,
 			})
 		case 'job_retention':
 			return pruneJobRetention({ env: input.env, now: input.scheduledAt })
@@ -158,11 +159,6 @@ export async function runScheduledLane(input: {
 			}
 			return { ...result, fleetPackageErrorRate, runLogSnapshot, creditDebits }
 		}
-		case 'durable_object_duration_attribution':
-			return runDurableObjectDurationAttribution({
-				env: input.env,
-				now: input.scheduledAt,
-			})
 		case 'compute_overage_billing':
 			// Inactive no-op; overage invoicing is retired (#2617).
 			return
@@ -235,16 +231,6 @@ export async function runScheduledLane(input: {
 				return { status: 'failed' }
 			}
 		}
-		// DR export lanes are dispatched on cadence by the jobs worker without
-		// access to DR configuration; both ticks exit cheaply with a
-		// `not-configured` result when DR export is disabled.
-		case 'dr_export':
-			return runDrExportTick({ env: input.env, now: input.scheduledAt })
-		case 'dr_export_watchdog':
-			return runDrExportWatchdogTick({
-				env: input.env,
-				now: input.scheduledAt,
-			})
 		default: {
 			const exhaustive: never = input.lane
 			throw new Error(`Unhandled scheduled lane: ${String(exhaustive)}`)

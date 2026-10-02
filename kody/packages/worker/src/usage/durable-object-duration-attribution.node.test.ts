@@ -61,7 +61,6 @@ function createEnv(input: {
 		APP_DB: db,
 		MCP_CLIENT_HUB: fakeNamespace('hub'),
 		STORAGE_RUNNER: fakeNamespace('storage'),
-		RUN_LOG: fakeNamespace('runlog'),
 		USER_METER: fakeNamespace('meter'),
 		MAILBOX: fakeNamespace('mailbox'),
 		REPO_SESSION_INDEX: fakeNamespace('index'),
@@ -94,7 +93,7 @@ test('owner map covers user-named, bucket, repo-session, and realtime objects', 
 		userId: 'user-a',
 		doClass: 'McpClientHub',
 	})
-	expect(owners.get('runlog:user-a')?.doClass).toBe('RunLog')
+	expect(owners.has('runlog:user-a')).toBe(false)
 	expect(owners.get('storage:["user-a","package:p1"]')?.doClass).toBe(
 		'StorageRunner',
 	)

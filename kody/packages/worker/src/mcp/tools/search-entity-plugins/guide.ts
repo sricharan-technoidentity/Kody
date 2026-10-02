@@ -4,7 +4,7 @@ import { guideMetadataList } from '#worker/guide-catalog-modules.ts'
 import { resolveMarkdownDocument } from '#worker/guides/document-sections.ts'
 import { type GuideMetadata } from '#worker/guides/guide-types.ts'
 import { formatRequestedLineLabel } from '#worker/guides/line-anchor.ts'
-import { lexicalScore } from '#worker/vectorize/scoring.ts'
+import { lexicalScore } from '#worker/search-index/scoring.ts'
 
 import { type SearchEntityPlugin } from '../search-entity-plugin.ts'
 import { maxChars } from '../search-constants.ts'

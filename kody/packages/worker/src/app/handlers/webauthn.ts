@@ -38,6 +38,12 @@ import {
 } from '#app/webauthn.ts'
 import { createDb, usersTable } from '#worker/db.ts'
 import { resolveUserStableId } from '#worker/user-id.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { getUniqueConstraintField } from '#worker/database-errors.ts'
+import {
+	getAccountWriterFactory,
+	resolveTokenOwnerDb,
+} from '#worker/identity/token-owner-db.ts'
 
 export function createWebauthnRegistrationHandler(env: Env) {
 	return {
@@ -163,30 +169,32 @@ export function createWebauthnRegistrationHandler(env: Env) {
 			const { credential, credentialDeviceType, credentialBackedUp, aaguid } =
 				verification.registrationInfo
 
-			const existingPasskey = await findPasskeyById(env.APP_DB, credential.id)
-			if (existingPasskey) {
+			// Credential ids are unique across accounts, and RLS hides other
+			// accounts' passkeys, so the insert's unique violation is the check.
+			try {
+				await createPasskey(env.APP_DB, {
+					id: credential.id,
+					aaguid,
+					publicKey: isoBase64URL.fromBuffer(credential.publicKey),
+					userId: user.userId,
+					webauthnUserId: challengeData.webauthnUserId,
+					counter: credential.counter,
+					deviceType: credentialDeviceType,
+					backedUp: credentialBackedUp,
+					transports: credential.transports?.join(',') ?? null,
+					name: buildDefaultPasskeyName({
+						aaguid,
+						deviceType: credentialDeviceType,
+						userAgent: request.headers.get('user-agent'),
+					}),
+				})
+			} catch (error) {
+				if (getUniqueConstraintField(error) !== 'id') throw error
 				return jsonResponse(
 					{ ok: false, error: 'This passkey is already registered.' },
 					{ status: 409, headers: { 'Set-Cookie': clearChallengeCookie } },
 				)
 			}
-
-			await createPasskey(env.APP_DB, {
-				id: credential.id,
-				aaguid,
-				publicKey: isoBase64URL.fromBuffer(credential.publicKey),
-				userId: user.userId,
-				webauthnUserId: challengeData.webauthnUserId,
-				counter: credential.counter,
-				deviceType: credentialDeviceType,
-				backedUp: credentialBackedUp,
-				transports: credential.transports?.join(',') ?? null,
-				name: buildDefaultPasskeyName({
-					aaguid,
-					deviceType: credentialDeviceType,
-					userAgent: request.headers.get('user-agent'),
-				}),
-			})
 
 			void logAuditEvent({
 				db: auditDatabaseFromEnv(env),
@@ -206,8 +214,6 @@ export function createWebauthnRegistrationHandler(env: Env) {
 }
 
 export function createWebauthnAuthenticationHandler(env: Env) {
-	const db = createDb(env.APP_DB)
-
 	return {
 		middleware: [],
 		async handler({ request, url }) {
@@ -261,8 +267,21 @@ export function createWebauthnAuthenticationHandler(env: Env) {
 			}
 			const rememberMe = body.rememberMe === true
 
-			const passkey = await findPasskeyById(env.APP_DB, body.response.id)
-			if (!passkey) {
+			// Signed out: resolve the credential's owner, then use their writer.
+			const credentialId = body.response.id
+			const accountDb =
+				typeof credentialId === 'string'
+					? await resolveTokenOwnerDb<D1Database | PgDatabase>({
+							db: env.APP_DB,
+							forUser: getAccountWriterFactory(env),
+							kind: 'passkey',
+							key: credentialId,
+						})
+					: null
+			const passkey = accountDb
+				? await findPasskeyById(accountDb, credentialId)
+				: null
+			if (!accountDb || !passkey) {
 				void logAuditEvent({
 					db: auditDatabaseFromEnv(env),
 					category: 'auth',
@@ -317,12 +336,12 @@ export function createWebauthnAuthenticationHandler(env: Env) {
 			}
 
 			await updatePasskeyCounter(
-				env.APP_DB,
+				accountDb,
 				passkey.id,
 				verification.authenticationInfo.newCounter,
 			)
 
-			const userRecord = await db.findOne(usersTable, {
+			const userRecord = await createDb(accountDb).findOne(usersTable, {
 				where: { id: passkey.user_id },
 			})
 			if (!userRecord) {
@@ -352,7 +371,7 @@ export function createWebauthnAuthenticationHandler(env: Env) {
 					secure,
 				),
 			)
-			await touchLastActiveAt(env.APP_DB, {
+			await touchLastActiveAt(accountDb, {
 				stableUserId: resolveUserStableId(userRecord),
 			})
 			void logAuditEvent({

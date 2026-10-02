@@ -9,17 +9,10 @@ import {
 } from '#worker/maintenance-handler.ts'
 import {
 	mailboxDurableObjectName,
-	runLogDurableObjectName,
 	storageRunnerDurableObjectName,
-	userMeterDurableObjectName,
 } from '#worker/user-scoped-durable-object-name.ts'
 
-const doPitrKinds = [
-	'mailbox',
-	'run-log',
-	'user-meter',
-	'storage-runner',
-] as const
+const doPitrKinds = ['mailbox', 'storage-runner'] as const
 const pitrWindowMs = 30 * 24 * 60 * 60 * 1000
 
 type DoPitrKind = (typeof doPitrKinds)[number]
@@ -75,14 +68,6 @@ function pitrRpcForTarget(
 		case 'mailbox':
 			return env.MAILBOX.get(
 				env.MAILBOX.idFromName(mailboxDurableObjectName(target.userId)),
-			) as unknown as DurableObjectPitrRpc
-		case 'run-log':
-			return env.RUN_LOG.get(
-				env.RUN_LOG.idFromName(runLogDurableObjectName(target.userId)),
-			) as unknown as DurableObjectPitrRpc
-		case 'user-meter':
-			return env.USER_METER.get(
-				env.USER_METER.idFromName(userMeterDurableObjectName(target.userId)),
 			) as unknown as DurableObjectPitrRpc
 		case 'storage-runner': {
 			if (!target.storageId) {

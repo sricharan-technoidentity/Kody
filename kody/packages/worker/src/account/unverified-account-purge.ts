@@ -105,11 +105,19 @@ function purgeCutoffs(now: Date) {
 	}
 }
 
+/**
+ * UTC second of a stored stamp (`YYYY-MM-DD HH:MM:SS` or ISO `...T...Z`) as
+ * comparable text, in SQL both SQLite and PostgreSQL accept.
+ */
+function utcSecondSql(expression: string) {
+	return `replace(substr(${expression}, 1, 19), 'T', ' ')`
+}
+
 function unverifiedAccountSqlConditions() {
 	return [
 		...unverifiedPersonEligibilitySql,
-		'datetime(created_at) < datetime(?)',
-		'(deleting_at IS NULL OR datetime(deleting_at) < datetime(?))',
+		`${utcSecondSql('created_at')} < ${utcSecondSql('?')}`,
+		`(deleting_at IS NULL OR ${utcSecondSql('deleting_at')} < ${utcSecondSql('?')})`,
 	] as const
 }
 
@@ -234,7 +242,7 @@ async function listUnverifiedAccountsPage(input: {
 				`SELECT id, stable_user_id, email, created_at
 				FROM users
 				WHERE ${conditions}
-				ORDER BY (deleting_at IS NULL) DESC, datetime(created_at) ASC, id ASC
+				ORDER BY (deleting_at IS NULL) DESC, ${utcSecondSql('created_at')} ASC, id ASC
 				LIMIT ?`,
 			)
 			.bind(input.ageCutoff, input.retryBackoffCutoff, input.batchSize)
@@ -273,7 +281,7 @@ async function claimUnverifiedAccountForPurge(input: {
 				SET deleting_at = ?, updated_at = ?
 				WHERE id = ?
 					AND ${eligibility}
-					AND datetime(deleting_at) < datetime(?)`,
+					AND ${utcSecondSql('deleting_at')} < ${utcSecondSql('?')}`,
 			)
 			.bind(deletingAt, deletingAt, input.dbUserId, input.retryBackoffCutoff)
 			.run(),
@@ -312,7 +320,13 @@ export async function listUnverifiedAccountPurgeCandidates(input: {
 }
 
 export async function pruneUnverifiedAccounts(input: {
+	/** Operator environment: lists, claims and releases through account administration. */
 	env: Env
+	/**
+	 * Environment that deletes one account. PostgreSQL needs the subject's
+	 * `kody_subject_purger` here; legacy bindings reuse `env`.
+	 */
+	subjectEnv?: (stableUserId: string) => Env
 	now?: Date
 	timeBudgetMs?: number
 	batchSize?: number
@@ -359,7 +373,7 @@ export async function pruneUnverifiedAccounts(input: {
 		}
 		try {
 			await deleteUserAccount({
-				env: input.env,
+				env: input.subjectEnv?.(account.stable_user_id) ?? input.env,
 				dbUserId: account.id,
 				mcpUserId: account.stable_user_id,
 			})

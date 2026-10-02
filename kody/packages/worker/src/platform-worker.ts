@@ -9,12 +9,9 @@ import { PackageAppRuntimeBridge } from '#worker/package-runtime/package-app.ts'
 import { refuseNonCanonicalProductionHost } from '#app/canonical-host.ts'
 import { McpClientHub } from './mcp-client/hub.ts'
 import { MCP } from './mcp/index.ts'
-import { UserMeter } from './entitlements/user-meter-do.ts'
-import { StripePlanRefresh } from './billing/stripe-plan-refresh-do.ts'
 import { Mailbox } from './email/mailbox-do.ts'
 import { RepoSession } from './repo/repo-session-do.ts'
 import { RepoSessionIndex } from './repo/repo-session-index-do.ts'
-import { OAuthPurgeCoordinator } from './oauth-purge.ts'
 import { getWorkerSentryOptions } from './sentry-options.ts'
 
 /**
@@ -36,12 +33,9 @@ import { getWorkerSentryOptions } from './sentry-options.ts'
 export {
 	MCP,
 	McpClientHub,
-	OAuthPurgeCoordinator,
-	UserMeter,
 	Mailbox,
 	RepoSession,
 	RepoSessionIndex,
-	StripePlanRefresh,
 	KodyFetchGateway,
 	DynamicWorkerUsageTail,
 	PackageAppRuntimeBridge,

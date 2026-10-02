@@ -79,7 +79,7 @@ test('dedupe claim precedes UserMeter and a Mailbox retry does not prepare USER 
 	const authority = createUserInboundDeliveryAuthority({
 		env: {
 			APP_DB: { prepare } as unknown as D1Database,
-			USER_METER: namespace(meter),
+			USER_METERS: { forUser: () => meter } as unknown as Env['USER_METERS'],
 			MAILBOX: namespace(mailbox),
 		},
 		userId,

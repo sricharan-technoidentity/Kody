@@ -18,27 +18,8 @@
 				"universal/**/*.{ts,tsx}"
 			]
 		},
-		"packages/jobs-worker": {
-			"project": ["src/**/*.ts"]
-		},
-		"packages/highlight-worker": {
-			"project": ["src/**/*.ts"]
-		},
-		"packages/backup-control-plane": {
-			"project": ["*.ts"]
-		},
-		"packages/status": {
-			"project": ["*.ts"]
-		},
-		"packages/nx-cache": {
-			"entry": ["smoke-probe.ts"],
-			"project": ["*.ts"]
-		},
 		"packages/shared": {
 			"entry": ["src/**/*.ts"],
-			"project": ["src/**/*.ts"]
-		},
-		"packages/mock-servers/cloudflare": {
 			"project": ["src/**/*.ts"]
 		}
 	}

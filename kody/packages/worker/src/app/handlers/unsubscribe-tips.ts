@@ -11,6 +11,7 @@ import {
 	tipsUnsubscribeOneClickBody,
 	verifyTipsUnsubscribeToken,
 } from '#worker/usage/tips-unsubscribe.ts'
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 
 function getUnsubscribeError(reason: 'missing_token' | 'invalid_token') {
 	switch (reason) {
@@ -86,8 +87,9 @@ export function createUnsubscribeTipsHandler(env: Env) {
 				}
 			}
 
+			// The signed link names the account; write through its own scoped writer.
 			const result = await optOutTipsEmails({
-				db: env.APP_DB,
+				db: getAccountWriterFactory(env)?.(claims.userId) ?? env.APP_DB,
 				userId: claims.userId,
 			})
 			void logAuditEvent({

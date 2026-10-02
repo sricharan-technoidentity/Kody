@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { getUniqueConstraintField } from '#worker/database-errors.ts'
 import { normalizeEmail } from '#worker/identity/normalize-email.ts'
 import {
@@ -48,7 +49,7 @@ export type AdminCreatedUser = {
 }
 
 async function resolveUsername(input: {
-	db: D1Database
+	db: SqlDatabase
 	env?: Pick<Env, 'BUNDLE_ARTIFACTS_KV'>
 	email: string
 	username?: string | null
@@ -74,7 +75,7 @@ async function resolveUsername(input: {
 	return explicitUsername
 }
 
-async function deleteUserBestEffort(db: D1Database, userId: number) {
+async function deleteUserBestEffort(db: SqlDatabase, userId: number) {
 	try {
 		await db.prepare(`DELETE FROM users WHERE id = ?`).bind(userId).run()
 	} catch (error) {
@@ -89,7 +90,9 @@ function buildSetupLink(input: { origin: string; token: string }) {
 }
 
 export async function adminCreateUserWithPasswordSetup(input: {
-	db: D1Database
+	db: SqlDatabase
+	/** Scoped writer for the new account; required by PostgreSQL RLS. */
+	forUser?: (stableUserId: string) => SqlDatabase
 	env?: Pick<Env, 'BUNDLE_ARTIFACTS_KV'>
 	email: string
 	username?: string | null
@@ -128,7 +131,7 @@ export async function adminCreateUserWithPasswordSetup(input: {
 		const result = await input.db
 			.prepare(
 				`INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id, plan)
-				 VALUES (?, ?, ?, ?, ?, 'free')`,
+				 VALUES (?, ?, ?, ?, ?, 'free') RETURNING id`,
 			)
 			.bind(
 				username,
@@ -137,15 +140,14 @@ export async function adminCreateUserWithPasswordSetup(input: {
 				nowIso,
 				stableUserId,
 			)
-			.run()
-		const lastRowId = result.meta.last_row_id
-		if (!Number.isSafeInteger(lastRowId) || lastRowId < 1) {
+			.first<{ id: number }>()
+		if (!result || !Number.isSafeInteger(result.id) || result.id < 1) {
 			throw new AdminCreateUserError(
 				'create_failed',
 				'Unable to create account.',
 			)
 		}
-		userId = lastRowId
+		userId = result.id
 	} catch (error) {
 		const uniqueField = getUniqueConstraintField(error)
 		if (uniqueField === 'email') {
@@ -163,12 +165,14 @@ export async function adminCreateUserWithPasswordSetup(input: {
 		throw error
 	}
 
-	const { assigned } = await assignUserRole({
-		db: input.db,
-		userId,
-		roleName: 'user',
-	})
-	if (!assigned) {
+	try {
+		const { assigned } = await assignUserRole({
+			db: input.db,
+			userId,
+			roleName: 'user',
+		})
+		if (!assigned) throw new Error('Default role was not assigned.')
+	} catch {
 		await deleteUserBestEffort(input.db, userId)
 		throw new AdminCreateUserError(
 			'default_role_assignment_failed',
@@ -177,7 +181,11 @@ export async function adminCreateUserWithPasswordSetup(input: {
 	}
 
 	try {
-		await claimAccountEmail(input.db, { userId, email, now })
+		await claimAccountEmail(input.forUser?.(stableUserId) ?? input.db, {
+			userId,
+			email,
+			now,
+		})
 	} catch (error) {
 		await deleteUserBestEffort(input.db, userId)
 		throw new AdminCreateUserError(
@@ -190,7 +198,7 @@ export async function adminCreateUserWithPasswordSetup(input: {
 	let resetToken: Awaited<ReturnType<typeof createPasswordResetToken>>
 	try {
 		resetToken = await createPasswordResetToken({
-			db: input.db,
+			db: input.forUser?.(stableUserId) ?? input.db,
 			userId,
 			expiresAt: setupTokenExpiresAt,
 		})

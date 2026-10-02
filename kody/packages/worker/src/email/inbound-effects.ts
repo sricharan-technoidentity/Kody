@@ -33,7 +33,7 @@ type InboundEffectsEnv = Pick<
 	| 'APP_BASE_URL'
 	| 'USAGE_EVENTS'
 	| 'MAILBOX'
-	| 'USER_METER'
+	| 'USER_METERS'
 >
 
 async function recordUserInboundUsageRollup(input: {

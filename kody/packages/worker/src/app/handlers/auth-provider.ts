@@ -48,6 +48,12 @@ import {
 	setVerifySessionSecret,
 } from '#app/verify-session.ts'
 import { createDb, oauthConnectionsTable, usersTable } from '#worker/db.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import {
+	getAccountWriterFactory,
+	getNewAccountDb,
+	resolveTokenOwnerDb,
+} from '#worker/identity/token-owner-db.ts'
 import { ensureDefaultEmailInbox } from '#worker/email/default-inbox.ts'
 import { getPlatformEmailDomain } from '#worker/email/platform-address.ts'
 import { resolvePlanWrite } from '#universal/plans.ts'
@@ -285,6 +291,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 	const db = createDb(env.APP_DB)
 
 	async function createConnection(input: {
+		db: D1Database | PgDatabase
 		provider: OauthProviderId
 		profile: OauthProfile
 		userId: number
@@ -303,7 +310,8 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			 SELECT ?, ?, id, ?
 			 FROM users
 			 WHERE id = ? AND deleting_at IS NULL`
-		const inserted = await env.APP_DB.prepare(insertSql)
+		const inserted = await input.db
+			.prepare(insertSql)
 			.bind(
 				input.provider,
 				input.profile.providerUserId,
@@ -317,6 +325,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 	}
 
 	async function completeDiscordGuildLogin(input: {
+		db: D1Database | PgDatabase
 		provider: OauthProviderId
 		userId: number
 		discordUserId: string
@@ -329,7 +338,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			accessToken: input.accessToken,
 		})
 		await maybeSyncDiscordGuildRolesForUser({
-			env,
+			env: { ...env, APP_DB: input.db } as Env,
 			userId: input.userId,
 			discordUserId: input.discordUserId,
 		})
@@ -409,6 +418,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			}
 
 			async function issueLogin(
+				accountDb: D1Database | PgDatabase,
 				user: {
 					id: number
 					stable_user_id: string | null
@@ -443,7 +453,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				// Two-factor accounts get the same pending-verification gate as
 				// password and passkey logins; the session cookie is only
 				// issued once the TOTP code passes.
-				if (await isTwoFactorEnabled(env.APP_DB, user.id)) {
+				if (await isTwoFactorEnabled(accountDb, user.id)) {
 					setVerifySessionSecret(env.COOKIE_SECRET)
 					const verifyCookie = await createVerifySessionCookie(
 						{ stableUserId, email: user.email, rememberMe: false },
@@ -478,7 +488,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 					secure,
 					options.issuedAt ?? Date.now(),
 				)
-				await touchLastActiveAt(env.APP_DB, { stableUserId })
+				await touchLastActiveAt(accountDb, { stableUserId })
 				void logAuditEvent({
 					db: auditDatabaseFromEnv(env),
 					category: 'auth',
@@ -496,12 +506,24 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				return redirect(postLoginPath, cookies)
 			}
 
-			const connection = await db.findOne(oauthConnectionsTable, {
-				where: {
-					provider_name: provider,
-					provider_id: profile.providerUserId,
-				},
-			})
+			// Signed in, the request's writer is the session account's. Signed
+			// out, only the provider identity is known: continue on its owner's.
+			const connectionDb = session
+				? env.APP_DB
+				: await resolveTokenOwnerDb<D1Database | PgDatabase>({
+						db: env.APP_DB,
+						forUser: getAccountWriterFactory(env),
+						kind: 'oauth_connection',
+						key: [provider, profile.providerUserId],
+					})
+			const connection = connectionDb
+				? await createDb(connectionDb).findOne(oauthConnectionsTable, {
+						where: {
+							provider_name: provider,
+							provider_id: profile.providerUserId,
+						},
+					})
+				: null
 
 			// 1. A signed-in user links the provider identity to their account
 			// (an existing connection for another user is a conflict, never an
@@ -522,6 +544,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				if (connection) {
 					if (connection.user_id === currentUser.id) {
 						await completeDiscordGuildLogin({
+							db: env.APP_DB,
 							provider,
 							userId: currentUser.id,
 							discordUserId: profile.providerUserId,
@@ -536,6 +559,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				}
 				try {
 					await createConnection({
+						db: env.APP_DB,
 						provider,
 						profile,
 						userId: currentUser.id,
@@ -551,6 +575,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 					throw error
 				}
 				await completeDiscordGuildLogin({
+					db: env.APP_DB,
 					provider,
 					userId: currentUser.id,
 					discordUserId: profile.providerUserId,
@@ -573,20 +598,21 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			}
 
 			// 2. A known connection signs its user in directly.
-			if (connection) {
-				const user = await db.findOne(usersTable, {
+			if (connectionDb && connection) {
+				const user = await createDb(connectionDb).findOne(usersTable, {
 					where: { id: connection.user_id },
 				})
 				if (!user) {
 					return fail('account-error', 'connection_user_missing')
 				}
 				await completeDiscordGuildLogin({
+					db: connectionDb,
 					provider,
 					userId: user.id,
 					discordUserId: profile.providerUserId,
 					accessToken,
 				})
-				return issueLogin(user)
+				return issueLogin(connectionDb, user)
 			}
 
 			// Without a provider-verified email we can neither match an
@@ -600,11 +626,19 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			// the identity and signs that account in. An unverified row is
 			// treated as a possible squat: invalidate the password, drop
 			// attacker-added factors, then link.
-			const existingUser = await db.findOne(usersTable, { where: { email } })
-			if (existingUser) {
+			const emailOwnerDb = await resolveTokenOwnerDb<D1Database | PgDatabase>({
+				db: env.APP_DB,
+				forUser: getAccountWriterFactory(env),
+				kind: 'account_email',
+				key: email,
+			})
+			const existingUser = emailOwnerDb
+				? await createDb(emailOwnerDb).findOne(usersTable, { where: { email } })
+				: null
+			if (emailOwnerDb && existingUser) {
 				try {
 					await assertAccountWritableDb(
-						env.APP_DB,
+						emailOwnerDb,
 						resolveUserStableId(existingUser),
 					)
 				} catch (error) {
@@ -619,8 +653,8 @@ export function createAuthProviderCallbackHandler(env: Env) {
 						.OAUTH_PROVIDER
 					try {
 						const reclaim = await applyPasswordChange({
-							db,
-							d1: env.APP_DB,
+							db: createDb(emailOwnerDb),
+							d1: emailOwnerDb,
 							helpers,
 							userId: existingUser.id,
 							stableUserId: resolveUserStableId(existingUser),
@@ -656,6 +690,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				}
 				try {
 					await createConnection({
+						db: emailOwnerDb,
 						provider,
 						profile,
 						userId: existingUser.id,
@@ -672,11 +707,12 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				// The provider asserted ownership of this exact email, which is
 				// the same proof the verification email flow provides.
 				if (!existingUser.email_verified_at) {
-					const stamped = await env.APP_DB.prepare(
-						`UPDATE users
+					const stamped = await emailOwnerDb
+						.prepare(
+							`UPDATE users
 						 SET email_verified_at = ?, updated_at = CURRENT_TIMESTAMP
 						 WHERE id = ? AND deleting_at IS NULL`,
-					)
+						)
 						.bind(new Date().toISOString(), existingUser.id)
 						.run()
 					if ((stamped.meta.changes ?? 0) === 1) {
@@ -686,22 +722,24 @@ export function createAuthProviderCallbackHandler(env: Env) {
 						})
 					}
 					if ((stamped.meta.changes ?? 0) !== 1) {
-						await env.APP_DB.prepare(
-							`DELETE FROM oauth_connections
+						await emailOwnerDb
+							.prepare(
+								`DELETE FROM oauth_connections
 							 WHERE user_id = ? AND provider_name = ? AND provider_id = ?`,
-						)
+							)
 							.bind(existingUser.id, provider, profile.providerUserId)
 							.run()
 						return fail('email-unavailable', 'account_deleting')
 					}
 				}
 				await completeDiscordGuildLogin({
+					db: emailOwnerDb,
 					provider,
 					userId: existingUser.id,
 					discordUserId: profile.providerUserId,
 					accessToken,
 				})
-				return issueLogin(existingUser, '/account', {
+				return issueLogin(emailOwnerDb, existingUser, '/account', {
 					issuedAt: sessionIssuedAt,
 				})
 			}
@@ -714,6 +752,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				stable_user_id: string
 				email: string
 			} | null = null
+			let accountDb: D1Database | PgDatabase
 			try {
 				username = await getAvailableUsernameFromBase(
 					env.APP_DB,
@@ -732,9 +771,11 @@ export function createAuthProviderCallbackHandler(env: Env) {
 					stage: 'signup_started',
 					userId: stableUserId,
 				})
+				// The new account's own writer: RLS lets it create and see only itself.
+				accountDb = getNewAccountDb(env, stableUserId)
 				const createdAt = new Date().toISOString()
 				const signupAttribution = loginState.attribution
-				const createdUser = await db.create(
+				const createdUser = await createDb(accountDb).create(
 					usersTable,
 					{
 						username,
@@ -762,7 +803,8 @@ export function createAuthProviderCallbackHandler(env: Env) {
 
 			async function rollbackNewUser(userId: number) {
 				try {
-					await env.APP_DB.prepare(`DELETE FROM users WHERE id = ?`)
+					await accountDb
+						.prepare(`DELETE FROM users WHERE id = ?`)
 						.bind(userId)
 						.run()
 				} catch (error) {
@@ -773,7 +815,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			let assigned = false
 			try {
 				;({ assigned } = await assignUserRole({
-					db: env.APP_DB,
+					db: accountDb,
 					userId: newUser.id,
 					roleName: 'user',
 				}))
@@ -786,7 +828,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			}
 
 			try {
-				await claimAccountEmail(env.APP_DB, {
+				await claimAccountEmail(accountDb, {
 					userId: newUser.id,
 					email,
 				})
@@ -797,19 +839,25 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			}
 
 			try {
-				await createConnection({ provider, profile, userId: newUser.id })
+				await createConnection({
+					db: accountDb,
+					provider,
+					profile,
+					userId: newUser.id,
+				})
 			} catch (error) {
 				console.error('Failed to store OAuth connection at signup:', error)
 				await rollbackNewUser(newUser.id)
 				return fail('account-error', 'connection_create_failed')
 			}
 			await attachPendingPackageShareInvitesSafely({
-				db: env.APP_DB,
+				db: accountDb,
 				userId: newUser.stable_user_id,
 				email,
 				username,
 			})
 			await completeDiscordGuildLogin({
+				db: accountDb,
 				provider,
 				userId: newUser.id,
 				discordUserId: profile.providerUserId,
@@ -823,7 +871,8 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			if (platformEmailDomain) {
 				try {
 					await ensureDefaultEmailInbox({
-						db: env.APP_DB,
+						// ponytail: D1-typed until P6 moves mailboxes; it reclaims stale address rows cross-user.
+						db: accountDb as D1Database,
 						userId: stableUserId,
 						username,
 						domain: platformEmailDomain,
@@ -859,7 +908,8 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			})
 			try {
 				await attributeReferralAtSignup({
-					db: env.APP_DB,
+					// ponytail: the referrer lookup is cross-user; P4 `entitlements` gives it a definer.
+					db: accountDb as D1Database,
 					refereeStableUserId: stableUserId,
 					refereeUsername: username,
 					referralCode: resolveReferralCodeForSignup({
@@ -889,7 +939,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				stage: 'email_verified',
 				userId: stableUserId,
 			})
-			return issueLogin(newUser, defaultPostVerificationRedirect, {
+			return issueLogin(accountDb, newUser, defaultPostVerificationRedirect, {
 				destination: withAccountCreatedQuery(
 					redirectTo ?? defaultPostVerificationRedirect,
 				),

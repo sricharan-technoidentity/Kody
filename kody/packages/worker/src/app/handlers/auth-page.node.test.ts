@@ -6,7 +6,8 @@ import {
 	type AuthSession,
 } from '#app/auth-session.ts'
 import { createAuthPageHandler } from '#app/handlers/auth-page.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -23,47 +24,8 @@ vi.mock('#app/ssr-render.tsx', () => ({
 	},
 }))
 
-function createStaleSessionTestEnv() {
-	return {
-		COOKIE_SECRET: testCookieSecret,
-		APP_DB: {
-			prepare(query: string) {
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				return {
-					query,
-					bind() {
-						return {
-							query,
-							async all() {
-								if (
-									normalizedQuery.startsWith('select') &&
-									normalizedQuery.includes('from "users"')
-								) {
-									return { results: [], meta: { changes: 0 } }
-								}
-								if (normalizedQuery.includes('from user_roles ur')) {
-									return { results: [], meta: { changes: 0 } }
-								}
-								return { results: [], meta: { changes: 0 } }
-							},
-							async first() {
-								return null
-							},
-							async run() {
-								return { meta: { changes: 0 } }
-							},
-						}
-					},
-				}
-			},
-			async batch(statements: Array<{ query?: string }>) {
-				return await executePreparedD1Batch(statements)
-			},
-			async exec() {
-				return
-			},
-		} as unknown as D1Database,
-	} as Env
+function createSessionTestEnv(db: PgDatabase) {
+	return { COOKIE_SECRET: testCookieSecret, APP_DB: db } as unknown as Env
 }
 
 test('auth page renders login for a stale session instead of redirecting away', async () => {
@@ -74,7 +36,11 @@ test('auth page renders login for a stale session instead of redirecting away', 
 		rememberMe: false,
 	}
 	const cookie = await createAuthCookie(session, false)
-	const handler = createAuthPageHandler(createStaleSessionTestEnv(), 'login')
+	await using store = await createTestDb()
+	const handler = createAuthPageHandler(
+		createSessionTestEnv(store.forUser(session.stableUserId).db),
+		'login',
+	)
 	const response = await handler.handler(
 		new RequestContext(
 			new Request('https://example.com/login?redirectTo=%2Faccount', {
@@ -95,57 +61,13 @@ test('auth page renders login for a deleting account instead of redirecting to /
 		rememberMe: false,
 	}
 	const cookie = await createAuthCookie(session, false)
-	const env = {
-		COOKIE_SECRET: testCookieSecret,
-		APP_DB: {
-			prepare(query: string) {
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				return {
-					query,
-					bind() {
-						return {
-							query,
-							async all() {
-								if (
-									normalizedQuery.startsWith('select') &&
-									normalizedQuery.includes('from "users"')
-								) {
-									return {
-										results: [
-											{
-												id: 7,
-												email: 'deleting@example.com',
-												username: 'deleting-user',
-												stable_user_id: 'a'.repeat(64),
-												deleting_at: '2026-08-31 15:00:00',
-											},
-										],
-										meta: { changes: 0 },
-									}
-								}
-								if (normalizedQuery.includes('from user_roles ur')) {
-									return { results: [], meta: { changes: 0 } }
-								}
-								return { results: [], meta: { changes: 0 } }
-							},
-							async first() {
-								return null
-							},
-							async run() {
-								return { meta: { changes: 0 } }
-							},
-						}
-					},
-				}
-			},
-			async batch(statements: Array<{ query?: string }>) {
-				return await executePreparedD1Batch(statements)
-			},
-			async exec() {
-				return
-			},
-		} as unknown as D1Database,
-	} as Env
+	await using store = await createTestDb()
+	await store.pg.query(
+		`INSERT INTO users (id, email, username, password_hash, stable_user_id, deleting_at)
+		 VALUES (7, 'deleting@example.com', 'deleting-user', 'unused', $1, '2026-08-31 15:00:00')`,
+		[session.stableUserId],
+	)
+	const env = createSessionTestEnv(store.forUser(session.stableUserId).db)
 	const handler = createAuthPageHandler(env, 'login')
 	const response = await handler.handler(
 		new RequestContext(

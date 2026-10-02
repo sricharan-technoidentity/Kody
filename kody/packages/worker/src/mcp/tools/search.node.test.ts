@@ -3,10 +3,9 @@ import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { buildCapabilityRegistry } from '#mcp/capabilities/build-capability-registry.ts'
 import {
-	CAPABILITY_EMBEDDING_DIMENSIONS,
 	createTextEmbeddingCache,
 	deterministicEmbedding,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import { filterCapabilityRegistryForCaller } from '#mcp/capabilities/access-control.ts'
 import { defineDomainCapability } from '#mcp/capabilities/define-domain-capability.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
@@ -135,19 +134,12 @@ const emptyOptionalSearchRows = {
 	'packageRows' | 'userSecretRows' | 'userValueRows' | 'userIntegrationRows'
 >
 
-function createDeterministicAiBinding(): Ai {
+function createDeterministicEmbeddings() {
 	return {
-		async run(...args: Array<unknown>) {
-			const input = args[1] as { text?: unknown }
-			const texts = Array.isArray(input.text)
-				? input.text.map(String)
-				: [String(input.text ?? '')]
-			return {
-				data: texts.map((text) => deterministicEmbedding(text)),
-				shape: [texts.length, CAPABILITY_EMBEDDING_DIMENSIONS],
-			}
+		async embedTexts(texts: readonly string[]) {
+			return texts.map((text) => deterministicEmbedding(text))
 		},
-	} as unknown as Ai
+	}
 }
 
 function leanPackage(
@@ -951,7 +943,7 @@ test('searchUnified degrades to lexical package ranking when the vector query th
 	let packageVectorQueryAttempts = 0
 	const env = {
 		SENTRY_ENVIRONMENT: 'production',
-		AI: createDeterministicAiBinding(),
+		BEDROCK_EMBEDDINGS: createDeterministicEmbeddings(),
 		CAPABILITY_VECTOR_INDEX: {
 			async query(
 				_values: Array<number>,
@@ -1196,7 +1188,7 @@ test('settleWithBudget uses an absolute launch deadline and degrades safely', as
 
 test('searchUnified shares query embedding, fail-closes package isolation, and keeps lexical-only Vectorize misses', async () => {
 	consoleWarn.mockImplementation(() => {})
-	let aiRunCount = 0
+	let embedCallCount = 0
 	let inFlightQueries = 0
 	let maxInFlightQueries = 0
 	let packageQueryCount = 0
@@ -1222,10 +1214,10 @@ test('searchUnified shares query embedding, fail-closes package isolation, and k
 	])
 	const env = {
 		SENTRY_ENVIRONMENT: 'production',
-		AI: {
-			async run(...args: Array<unknown>) {
-				aiRunCount += 1
-				return createDeterministicAiBinding().run(...args)
+		BEDROCK_EMBEDDINGS: {
+			async embedTexts(texts: readonly string[]) {
+				embedCallCount += 1
+				return createDeterministicEmbeddings().embedTexts(texts)
 			},
 		},
 		CAPABILITY_VECTOR_INDEX: {
@@ -1271,7 +1263,7 @@ test('searchUnified shares query embedding, fail-closes package isolation, and k
 			userIntegrationRows: [],
 		},
 	})
-	expect(aiRunCount).toBe(1)
+	expect(embedCallCount).toBe(1)
 	expect(maxInFlightQueries).toBeGreaterThanOrEqual(2)
 	expect(packageQueryCount).toBe(1)
 	expect(capturedFilters).toContainEqual(
@@ -1705,7 +1697,7 @@ test('searchUnified ranks platform (built-in) package rows and drops unmarked fo
 	)
 })
 
-test('searchUnified embeds each distinct query text once online and never calls Workers AI offline', async () => {
+test('searchUnified embeds each distinct query text once online and never calls Bedrock offline', async () => {
 	const embedTexts: Array<string> = []
 	const offline = await searchUnified({
 		env: {} as Env,
@@ -1720,17 +1712,11 @@ test('searchUnified embeds each distinct query text once online and never calls 
 
 	const onlineEnv = {
 		SENTRY_ENVIRONMENT: 'production',
-		AI: {
-			async run(...args: Array<unknown>) {
-				const input = args[1] as { text?: unknown }
-				const batch = Array.isArray(input.text)
-					? input.text.map(String)
-					: [String(input.text ?? '')]
+		BEDROCK_EMBEDDINGS: {
+			async embedTexts(input: readonly string[]) {
+				const batch = [...input]
 				embedTexts.push(...batch)
-				return {
-					data: batch.map((text) => deterministicEmbedding(text)),
-					shape: [batch.length, CAPABILITY_EMBEDDING_DIMENSIONS],
-				}
+				return batch.map((text) => deterministicEmbedding(text))
 			},
 		},
 		CAPABILITY_VECTOR_INDEX: {

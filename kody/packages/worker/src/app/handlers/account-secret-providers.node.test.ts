@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
@@ -65,7 +66,7 @@ function createAppEnv(db: D1Database) {
 		APP_DB: db,
 		APP_BASE_URL: 'http://example.com',
 		COOKIE_SECRET: testCookieSecret,
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		SENTRY_ENVIRONMENT: 'test',
 		...createInMemoryUserMeterEnv().env,
 	} as unknown as Env

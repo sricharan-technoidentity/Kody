@@ -5,6 +5,8 @@
  */
 
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { getUniqueConstraintField } from '#worker/database-errors.ts'
 import { computeOverageInvoiceMetadataKey } from '#worker/billing/stripe-client.ts'
 import {
 	isReferralStandardCreditActive,
@@ -150,14 +152,25 @@ export async function attributeReferralAtSignup(input: {
 	if (code === normalizeReferralCode(input.refereeUsername)) {
 		return { outcome: 'ignored', reason: 'self' }
 	}
-	const referrer = await input.db
-		.prepare(
-			`SELECT stable_user_id, account_type
-			 FROM users
-			 WHERE username = ?`,
-		)
-		.bind(code)
-		.first<{ stable_user_id: string; account_type: string | null }>()
+	const db = input.db as D1Database | PgDatabase
+	// The referee's writer cannot see the referrer; on PostgreSQL the directory
+	// answers only a person account's stable id for the code (platform excluded).
+	const referrer =
+		'dialect' in db && db.dialect === 'postgres'
+			? await db
+					.prepare(
+						`SELECT kody_referral_referrer(?) AS stable_user_id, NULL AS account_type`,
+					)
+					.bind(code)
+					.first<{ stable_user_id: string | null; account_type: null }>()
+			: await input.db
+					.prepare(
+						`SELECT stable_user_id, account_type
+						 FROM users
+						 WHERE username = ?`,
+					)
+					.bind(code)
+					.first<{ stable_user_id: string; account_type: string | null }>()
 	if (!referrer?.stable_user_id) {
 		return { outcome: 'ignored', reason: 'unknown_referrer' }
 	}
@@ -183,8 +196,7 @@ export async function attributeReferralAtSignup(input: {
 			.run()
 		return { outcome: 'attributed' }
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error)
-		if (/UNIQUE constraint failed/i.test(message)) {
+		if (getUniqueConstraintField(error)) {
 			return { outcome: 'already_attributed' }
 		}
 		throw error

@@ -12,7 +12,7 @@ export type InboundMailboxEnv = Pick<
 	| 'BUNDLE_ARTIFACTS_KV'
 	| 'APP_BASE_URL'
 	| 'USAGE_EVENTS'
-	| 'USER_METER'
+	| 'USER_METERS'
 	| 'MAILBOX'
 	| 'EMAIL_EVENTS'
 > &

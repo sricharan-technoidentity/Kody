@@ -1,6 +1,5 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	buildPermissionString,
 	listAdminRolePermissionStrings,
@@ -27,9 +26,9 @@ test('parsePermissionString splits action, entity, and access', () => {
 	})
 })
 
-test('permission registry and migration seed rows stay aligned', () => {
-	using db = new DatabaseSync(':memory:')
-	applyAllMigrations(db, new URL('../../migrations/', import.meta.url))
+test('permission registry and Postgres seed rows stay aligned', async () => {
+	await using database = await createTestDb()
+	const db = database.reader
 
 	type PermissionRow = {
 		action: PermissionAction
@@ -37,19 +36,19 @@ test('permission registry and migration seed rows stay aligned', () => {
 		access: PermissionAccess
 	}
 	const seededPermissions = (
-		db
+		await db
 			.prepare(`SELECT action, entity, access FROM permissions`)
-			.all() as Array<PermissionRow>
-	).map((row) => buildPermissionString(row))
+			.all<PermissionRow>()
+	).results.map((row) => buildPermissionString(row))
 	expect(seededPermissions.sort()).toEqual(
 		listRegistryPermissionStrings().sort(),
 	)
 
-	function listSeededRolePermissionStrings(
+	async function listSeededRolePermissionStrings(
 		roleName: string,
-	): Array<PermissionString> {
+	): Promise<Array<PermissionString>> {
 		return (
-			db
+			await db
 				.prepare(
 					`SELECT p.action, p.entity, p.access
 					FROM role_permissions rp
@@ -57,11 +56,12 @@ test('permission registry and migration seed rows stay aligned', () => {
 					INNER JOIN permissions p ON p.id = rp.permission_id
 					WHERE r.name = ?`,
 				)
-				.all(roleName) as Array<PermissionRow>
-		).map((row) => buildPermissionString(row))
+				.bind(roleName)
+				.all<PermissionRow>()
+		).results.map((row) => buildPermissionString(row))
 	}
 
-	expect(listSeededRolePermissionStrings('user').sort()).toEqual(
+	expect((await listSeededRolePermissionStrings('user')).sort()).toEqual(
 		listUserRolePermissionStrings().sort(),
 	)
 	expect(listUserRolePermissionStrings().sort()).toEqual(
@@ -72,7 +72,7 @@ test('permission registry and migration seed rows stay aligned', () => {
 			.sort(),
 	)
 
-	expect(listSeededRolePermissionStrings('admin').sort()).toEqual(
+	expect((await listSeededRolePermissionStrings('admin')).sort()).toEqual(
 		listAdminRolePermissionStrings().sort(),
 	)
 	expect(listAdminRolePermissionStrings().sort()).toEqual(
@@ -80,7 +80,7 @@ test('permission registry and migration seed rows stay aligned', () => {
 	)
 
 	const seededRoleNames = (
-		db.prepare(`SELECT name FROM roles`).all() as Array<{ name: string }>
-	).map((row) => row.name)
+		await db.prepare(`SELECT name FROM roles`).all<{ name: string }>()
+	).results.map((row) => row.name)
 	expect(seededRoleNames.sort()).toEqual([...roleNames].sort())
 })

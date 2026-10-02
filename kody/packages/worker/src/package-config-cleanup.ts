@@ -1,3 +1,6 @@
+import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+
 export async function deleteAllPackageScopedSecrets(input: {
 	env: Pick<Env, 'APP_DB'>
 	userId: string
@@ -17,6 +20,36 @@ export async function removeAllSecretApprovalsForPackage(input: {
 	userId: string
 	packageId: string
 }) {
+	const db = input.env.APP_DB as D1Database | PgDatabase
+	if ('dialect' in db && db.dialect === 'postgres') {
+		// Rows whose stored list is not valid JSON are left untouched, as on SQLite.
+		const result = await db
+			.prepare(
+				`UPDATE secret_entries AS e
+				SET allowed_packages = (
+					SELECT COALESCE(jsonb_agg(value), '[]'::jsonb)::text
+					FROM jsonb_array_elements_text(e.allowed_packages::jsonb) AS value
+					WHERE value <> ?
+				),
+				updated_at = ?
+				WHERE e.bucket_id IN (
+					SELECT id
+					FROM secret_buckets
+					WHERE user_id = ? AND scope = 'user'
+				)
+				AND CASE WHEN pg_input_is_valid(e.allowed_packages, 'jsonb')
+					THEN e.allowed_packages::jsonb @> jsonb_build_array(?::text)
+					ELSE false END`,
+			)
+			.bind(
+				input.packageId,
+				utcSqliteTimestamp(),
+				input.userId,
+				input.packageId,
+			)
+			.run()
+		return result.meta.changes ?? 0
+	}
 	const result = await input.env.APP_DB.prepare(
 		`UPDATE secret_entries AS e
 		SET allowed_packages = (

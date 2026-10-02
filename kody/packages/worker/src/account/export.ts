@@ -31,8 +31,8 @@ import {
 import {
 	userMeterNamespace,
 	userMeterRpc,
+	type UserMeterExportResult,
 } from '#worker/entitlements/user-meter-client.ts'
-import { type UserMeterExportResult } from '#worker/entitlements/user-meter-do.ts'
 import {
 	countInternalUserMailboxRows,
 	exportInternalUserMailbox,
@@ -52,9 +52,6 @@ const maxExportPageSize = 500
 // Full exports stream each D1 table in keyset-paged batches of this size so
 // memory stays bounded per query even for very large tables (e.g. mailboxes).
 const d1ExportPageSize = 500
-// Internal alias for the SQLite rowid used as the keyset cursor. Stripped from
-// exported rows so the export document schema is unchanged.
-const exportRowidColumn = '__account_export_rowid'
 
 export const accountExportSectionNames = [
 	'd1_table',
@@ -447,7 +444,42 @@ async function selectRows<T extends Record<string, unknown>>(
 	return result.results ?? []
 }
 
-// Reads one keyset page of a table: rows are selected by ascending rowid
+// The schema is fixed per deploy, so each table's key is read from the catalog once.
+const primaryKeyColumns = new Map<string, Promise<Array<string>>>()
+function tablePrimaryKey(env: Env, table: string) {
+	let columns = primaryKeyColumns.get(table)
+	if (!columns) {
+		columns = selectRows<{ name: string }>(
+			env,
+			`SELECT a.attname AS name
+			FROM pg_catalog.pg_index i
+			JOIN pg_catalog.pg_attribute a
+				ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+			WHERE i.indrelid = to_regclass(?) AND i.indisprimary
+			ORDER BY array_position(i.indkey::int2[], a.attnum)`,
+			[`public.${table}`],
+		).then((rows) => {
+			if (rows.length === 0) throw new Error(`${table} has no primary key`)
+			return rows.map((row) => row.name)
+		})
+		columns.catch(() => primaryKeyColumns.delete(table))
+		primaryKeyColumns.set(table, columns)
+	}
+	return columns
+}
+
+/** Keyset cursor: the JSON primary-key tuple of the last row, or null to start. */
+function parseKeyCursor(startAfter: string | undefined, keyLength: number) {
+	if (!startAfter) return null
+	try {
+		const parsed: unknown = JSON.parse(startAfter)
+		return Array.isArray(parsed) && parsed.length === keyLength ? parsed : null
+	} catch {
+		return null
+	}
+}
+
+// Reads one keyset page of a table: rows are selected in primary-key order
 // strictly after the cursor, with a SQL LIMIT, so a single query never loads
 // more than one page regardless of table size. Conditions for every export
 // target of the table are OR-combined into one query, which also removes the
@@ -457,33 +489,37 @@ async function selectD1TablePage(input: {
 	table: string
 	conditions: ReadonlyArray<D1TableCondition>
 	mcpUserId: string
-	afterRowid: number
+	startAfter: string | undefined
 	limit: number
 }) {
+	const key = await tablePrimaryKey(input.env, input.table)
+	const after = parseKeyCursor(input.startAfter, key.length)
 	const where = input.conditions
 		.map((condition) => `(${condition.condition})`)
 		.join(' OR ')
-	const sql = `SELECT ${input.table}.rowid AS ${exportRowidColumn}, ${input.table}.*
+	const keySql = key.map((column) => `${input.table}.${column}`).join(', ')
+	const sql = `SELECT ${input.table}.*
 		FROM ${input.table}
-		WHERE (${where}) AND ${input.table}.rowid > ?
-		ORDER BY ${input.table}.rowid
+		WHERE (${where})${after ? ` AND (${keySql}) > (${key.map(() => '?').join(', ')})` : ''}
+		ORDER BY ${keySql}
 		LIMIT ?`
 	const params = [
 		...input.conditions.flatMap((condition) => condition.params),
-		input.afterRowid,
+		...(after ?? []),
 		input.limit + 1,
 	]
 	const rawRows = await selectRows(input.env, sql, params)
 	const truncated = rawRows.length > input.limit
 	const pageRows = truncated ? rawRows.slice(0, input.limit) : rawRows
-	let lastRowid = input.afterRowid
-	const rows: Array<ReturnType<typeof sanitizeRow>> = []
-	for (const rawRow of pageRows) {
-		const { [exportRowidColumn]: rowid, ...columns } = rawRow
-		lastRowid = Number(rowid)
-		rows.push(sanitizeRow(input.table, columns, input.mcpUserId))
+	const last = pageRows.at(-1)
+	return {
+		rows: pageRows.map((row) => sanitizeRow(input.table, row, input.mcpUserId)),
+		nextStartAfter:
+			truncated && last
+				? JSON.stringify(key.map((column) => last[column]))
+				: null,
+		truncated,
 	}
-	return { rows, lastRowid, truncated }
 }
 
 async function collectD1TableRows(input: {
@@ -500,7 +536,7 @@ async function collectD1TableRows(input: {
 		warnings: [],
 	}
 	const redacted = new Set<string>()
-	let afterRowid = 0
+	let startAfter: string | undefined
 	try {
 		while (true) {
 			const page = await selectD1TablePage({
@@ -508,15 +544,15 @@ async function collectD1TableRows(input: {
 				table: input.table,
 				conditions: input.conditions,
 				mcpUserId: input.mcpUserId,
-				afterRowid,
+				startAfter,
 				limit: d1ExportPageSize,
 			})
 			for (const entry of page.rows) {
 				for (const column of entry.redactedColumns) redacted.add(column)
 				section.rows.push(entry.row)
 			}
-			if (!page.truncated) break
-			afterRowid = page.lastRowid
+			if (!page.nextStartAfter) break
+			startAfter = page.nextStartAfter
 		}
 	} catch (error) {
 		const warning = `D1 export failed for ${input.table}: ${getErrorMessage(error)}`
@@ -1177,7 +1213,7 @@ async function collectD1TableCounts(input: {
 	)
 }
 
-function parseRowidCursor(startAfter: string | undefined) {
+function parseOffsetCursor(startAfter: string | undefined) {
 	if (!startAfter) return 0
 	const parsed = Number.parseInt(startAfter, 10)
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
@@ -1204,7 +1240,7 @@ async function readD1TableSectionPage(input: {
 				input.mcpUserId,
 				input.table as (typeof jobsWorkerExportTables)[number],
 			)
-			const afterIndex = parseRowidCursor(input.startAfter)
+			const afterIndex = parseOffsetCursor(input.startAfter)
 			const items = rows.slice(afterIndex, afterIndex + pageSize)
 			const truncated = afterIndex + pageSize < rows.length
 			return {
@@ -1236,13 +1272,13 @@ async function readD1TableSectionPage(input: {
 			table: input.table,
 			conditions,
 			mcpUserId: input.mcpUserId,
-			afterRowid: parseRowidCursor(input.startAfter),
+			startAfter: input.startAfter,
 			limit: pageSize,
 		})
 		return {
 			items: page.rows.map((entry) => entry.row),
 			truncated: page.truncated,
-			nextStartAfter: page.truncated ? String(page.lastRowid) : null,
+			nextStartAfter: page.nextStartAfter,
 			pageSize,
 		}
 	} catch (error) {
@@ -1346,7 +1382,7 @@ async function exportUserMeterCounters(input: {
 	try {
 		if (!userMeterNamespace(input.env)) {
 			input.warnings.push(
-				'USER_METER binding was unavailable; user meter counters were not exported.',
+				'USER_METERS binding was unavailable; user meter counters were not exported.',
 			)
 			return null
 		}
@@ -1543,7 +1579,7 @@ function buildManifest(input: {
 				: countUserMeterExportEntries(input.durableObjects.userMeter),
 		warnings: input.warnings.filter(
 			(warning) =>
-				warning.startsWith('User meter ') || warning.startsWith('USER_METER '),
+				warning.startsWith('User meter ') || warning.startsWith('USER_METERS '),
 		),
 		discovery: { section: 'user_meter' },
 	}
@@ -1863,7 +1899,7 @@ export async function readAccountExportSection(input: {
 	}
 	if (input.section === 'user_meter') {
 		if (!userMeterNamespace(input.env)) {
-			throw new Error('USER_METER binding was unavailable.')
+			throw new Error('USER_METERS binding was unavailable.')
 		}
 		const pageSize = normalizePageSize(input.pageSize)
 		const page = await userMeterRpc({

@@ -1,12 +1,14 @@
 vi.unmock('#worker/audit-log.ts')
 
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { createSuccessfulDeletionEnv } from '#worker/test-support/account-deletion.ts'
+import { createPgDatabase, type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { createTestAuditDb } from '#worker/test-support/aws/test-audit-db.ts'
+import {
+	createJobsBindingStub,
+	createSuccessfulDeletionEnv,
+} from '#worker/test-support/account-deletion.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import * as AuditLog from '#worker/audit-log.ts'
@@ -36,17 +38,21 @@ function minutesAgo(minutes: number) {
 	return new Date(now.getTime() - minutes * 60 * 1000).toISOString()
 }
 
-function deletingAt(sqlite: DatabaseSync, username: string) {
-	const row = sqlite
-		.prepare(`SELECT deleting_at FROM users WHERE username = ?`)
-		.get(username) as { deleting_at: string | null } | undefined
-	return row?.deleting_at ?? null
+type AppDb = Awaited<ReturnType<typeof createAppDb>>
+type AuditDb = Awaited<ReturnType<typeof createTestAuditDb>>
+
+async function deletingAt(app: AppDb, username: string) {
+	const { rows } = await app.pg.query<{ deleting_at: string | null }>(
+		`SELECT deleting_at FROM users WHERE username = $1`,
+		[username],
+	)
+	return rows[0]?.deleting_at ?? null
 }
 
 function withVerifyAfterUnverifiedAccountSelect(
-	db: D1Database,
+	db: PgDatabase,
 	verifiedAt: string,
-): D1Database {
+): PgDatabase {
 	const originalPrepare = db.prepare.bind(db)
 	return {
 		...db,
@@ -56,13 +62,14 @@ function withVerifyAfterUnverifiedAccountSelect(
 				return statement
 			}
 			return {
+				...statement,
 				bind(...params: Array<unknown>) {
 					const bound = statement.bind(...params)
 					return {
 						...bound,
-						async all<T extends { id: number }>() {
-							const result = await bound.all<T>()
-							for (const row of result.results ?? []) {
+						async all<T>() {
+							const result = await bound.all<T & { id: number }>()
+							for (const row of result.results) {
 								await originalPrepare(
 									`UPDATE users SET email_verified_at = ? WHERE id = ?`,
 								)
@@ -75,7 +82,7 @@ function withVerifyAfterUnverifiedAccountSelect(
 				},
 			}
 		},
-	} as D1Database
+	}
 }
 
 function emptyDeletionResult(): AccountDeletionResult {
@@ -97,36 +104,53 @@ function emailHash(email: string) {
 	return createHash('sha256').update(email.trim().toLowerCase()).digest('hex')
 }
 
-function createAppDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	applyAllMigrations(
-		sqlite,
-		new URL('../../../jobs-worker/migrations/', import.meta.url),
-	)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
-function createAuditDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(
-		readFileSync(
-			new URL('../../audit-migrations/0001-audit-events.sql', import.meta.url),
-			'utf8',
-		),
-	)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
-function createPurgeEnv(appDb: D1Database, auditDb: D1Database) {
+/**
+ * The purge lists, claims and releases through kody_admin; each account is
+ * deleted through that subject's kody_subject_purger (jobs through its writer).
+ */
+async function createAppDb() {
+	const database = await createTestDb()
+	const purgers = new Map<string, PgDatabase>()
 	return {
-		...createSuccessfulDeletionEnv(appDb),
+		pg: database.pg,
+		db: createPgDatabase({ connection: database.pg, role: 'kody_admin' }),
+		purgerFor(stableUserId: string) {
+			let purger = purgers.get(stableUserId)
+			if (!purger) {
+				purger = createPgDatabase({
+					connection: database.pg,
+					role: 'kody_subject_purger',
+					userId: stableUserId,
+				})
+				purgers.set(stableUserId, purger)
+			}
+			return purger
+		},
+		writerFor: (stableUserId: string) => database.forUser(stableUserId).db,
+		[Symbol.asyncDispose]: () => database.pg.close(),
+	}
+}
+
+function createPurgeEnv(app: AppDb, auditDb: PgDatabase, db = app.db) {
+	const env = {
+		...createSuccessfulDeletionEnv(db as unknown as D1Database),
 		AUDIT_DB: auditDb,
-	} as Env
+	} as unknown as Env
+	return {
+		env,
+		subjectEnv: (stableUserId: string) =>
+			({
+				...env,
+				APP_DB: app.purgerFor(stableUserId),
+				JOBS: createJobsBindingStub(
+					app.writerFor(stableUserId) as unknown as D1Database,
+				),
+			}) as unknown as Env,
+	}
 }
 
 async function seedUser(
-	db: D1Database,
+	app: AppDb,
 	input: {
 		username: string
 		email: string
@@ -138,14 +162,13 @@ async function seedUser(
 	},
 ) {
 	const stableUserId = await createStableUserIdFromEmail(input.email)
-	const inserted = await db
-		.prepare(
-			`INSERT INTO users (
-				username, email, password_hash, stable_user_id,
-				email_verified_at, account_type, deleting_at, created_at
-			) VALUES (?, ?, 'hash', ?, ?, ?, ?, ?)`,
-		)
-		.bind(
+	const { rows } = await app.pg.query<{ id: number }>(
+		`INSERT INTO users (
+			username, email, password_hash, stable_user_id,
+			email_verified_at, account_type, deleting_at, created_at
+		) VALUES ($1, $2, 'hash', $3, $4, $5, $6, $7)
+		RETURNING id::int AS id`,
+		[
 			input.username,
 			input.email,
 			stableUserId,
@@ -153,78 +176,74 @@ async function seedUser(
 			input.accountType ?? 'person',
 			input.deletingAt ?? null,
 			input.createdAt,
-		)
-		.run()
-	const id = Number(inserted.meta.last_row_id)
+		],
+	)
+	const id = rows[0]!.id
 	if (input.oauthProvider) {
-		await db
-			.prepare(
-				`INSERT INTO oauth_connections (provider_name, provider_id, user_id)
-				VALUES (?, ?, ?)`,
-			)
-			.bind(input.oauthProvider, `${input.oauthProvider}-${id}`, id)
-			.run()
+		await app.pg.query(
+			`INSERT INTO oauth_connections (provider_name, provider_id, user_id)
+			VALUES ($1, $2, $3)`,
+			[input.oauthProvider, `${input.oauthProvider}-${id}`, id],
+		)
 	}
 	return { id, stableUserId, email: input.email, username: input.username }
 }
 
-function usernames(sqlite: DatabaseSync) {
-	return (
-		sqlite
-			.prepare(`SELECT username FROM users ORDER BY username ASC`)
-			.all() as Array<{ username: string }>
-	).map((row) => row.username)
+async function usernames(app: AppDb) {
+	const { rows } = await app.pg.query<{ username: string }>(
+		`SELECT username FROM users ORDER BY username ASC`,
+	)
+	return rows.map((row) => row.username)
 }
 
-function auditActions(sqlite: DatabaseSync) {
-	return sqlite
-		.prepare(
-			`SELECT category, action, result, email_hash, reason
-			FROM audit_events
-			ORDER BY id ASC`,
-		)
-		.all() as Array<{
+async function auditActions(audit: AuditDb) {
+	const { rows } = await audit.pg.query<{
 		category: string
 		action: string
 		result: string
 		email_hash: string | null
 		reason: string | null
-	}>
+	}>(
+		`SELECT category, action, result, email_hash, reason
+		FROM audit_events
+		ORDER BY id ASC`,
+	)
+	return rows
 }
 
 test('purge deletes only aged unverified person accounts through full account deletion and writes an audit row', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const eligible = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const eligible = await seedUser(app, {
 		username: 'stale-unverified',
 		email: 'stale@example.com',
 		createdAt: daysAgo(8),
 	})
-	await seedUser(db, {
+	await seedUser(app, {
 		username: 'verified-old',
 		email: 'verified@example.com',
 		createdAt: daysAgo(30),
 		emailVerifiedAt: daysAgo(29),
 	})
-	await seedUser(db, {
+	await seedUser(app, {
 		username: 'young-unverified',
 		email: 'young@example.com',
 		createdAt: daysAgo(1),
 	})
-	await seedUser(db, {
+	await seedUser(app, {
 		username: 'platform-unverified',
 		email: 'platform@example.com',
 		createdAt: daysAgo(30),
 		accountType: 'platform',
 	})
-	await seedUser(db, {
+	await seedUser(app, {
 		username: 'fenced-unverified',
 		email: 'fenced@example.com',
 		createdAt: daysAgo(30),
 		deletingAt: minutesAgo(5),
 	})
-	await seedUser(db, {
+	await seedUser(app, {
 		username: 'social-unverified',
 		email: 'social@example.com',
 		createdAt: daysAgo(30),
@@ -232,7 +251,7 @@ test('purge deletes only aged unverified person accounts through full account de
 	})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -247,18 +266,20 @@ test('purge deletes only aged unverified person accounts through full account de
 	})
 	expect(deleteUserAccount).toHaveBeenCalledTimes(1)
 	expect(deleteUserAccount).toHaveBeenCalledWith({
-		env: expect.objectContaining({ APP_DB: db }),
+		env: expect.objectContaining({
+			APP_DB: app.purgerFor(eligible.stableUserId),
+		}),
 		dbUserId: eligible.id,
 		mcpUserId: eligible.stableUserId,
 	})
-	expect(usernames(sqlite)).toEqual([
+	expect(await usernames(app)).toEqual([
 		'fenced-unverified',
 		'platform-unverified',
 		'social-unverified',
 		'verified-old',
 		'young-unverified',
 	])
-	expect(auditActions(audit.sqlite)).toEqual([
+	expect(await auditActions(audit)).toEqual([
 		{
 			category: 'account',
 			action: 'unverified_account_purged',
@@ -271,32 +292,32 @@ test('purge deletes only aged unverified person accounts through full account de
 
 test('purge walks oldest-first keyset pages and stops at the bounded batch size', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const oldest = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const oldest = await seedUser(app, {
 		username: 'oldest',
 		email: 'oldest@example.com',
 		createdAt: daysAgo(11),
 	})
-	const second = await seedUser(db, {
+	const second = await seedUser(app, {
 		username: 'second',
 		email: 'second@example.com',
 		createdAt: daysAgo(10),
 	})
-	const third = await seedUser(db, {
+	const third = await seedUser(app, {
 		username: 'third',
 		email: 'third@example.com',
 		createdAt: daysAgo(9),
 	})
-	const fourth = await seedUser(db, {
+	const fourth = await seedUser(app, {
 		username: 'fourth',
 		email: 'fourth@example.com',
 		createdAt: daysAgo(8),
 	})
-	const env = createPurgeEnv(db, audit.db)
+	const env = createPurgeEnv(app, audit.db)
 
 	const firstRun = await pruneUnverifiedAccounts({
-		env,
+		...env,
 		now,
 		batchSize: 2,
 	})
@@ -313,11 +334,11 @@ test('purge walks oldest-first keyset pages and stops at the bounded batch size'
 	expect(deleteUserAccount.mock.calls.map((call) => call[0].mcpUserId)).toEqual(
 		[oldest.stableUserId, second.stableUserId],
 	)
-	expect(usernames(sqlite)).toEqual(['fourth', 'third'])
+	expect(await usernames(app)).toEqual(['fourth', 'third'])
 
 	deleteUserAccount.mockClear()
 	const secondRun = await pruneUnverifiedAccounts({
-		env,
+		...env,
 		now,
 		batchSize: 2,
 	})
@@ -325,26 +346,26 @@ test('purge walks oldest-first keyset pages and stops at the bounded batch size'
 	expect(deleteUserAccount.mock.calls.map((call) => call[0].mcpUserId)).toEqual(
 		[third.stableUserId, fourth.stableUserId],
 	)
-	expect(usernames(sqlite)).toEqual([])
-	expect(auditActions(audit.sqlite)).toHaveLength(4)
+	expect(await usernames(app)).toEqual([])
+	expect(await auditActions(audit)).toHaveLength(4)
 })
 
 test('a failed deletion is audited with a bounded reason, reported per account, and does not stop the rest of the batch', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const failing = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const failing = await seedUser(app, {
 		username: 'failing',
 		email: 'failing@example.com',
 		createdAt: daysAgo(12),
 	})
-	const surviving = await seedUser(db, {
+	const surviving = await seedUser(app, {
 		username: 'purged-after-failure',
 		email: 'after@example.com',
 		createdAt: daysAgo(11),
 	})
-	const last = await seedUser(db, {
+	const last = await seedUser(app, {
 		username: 'purged-last',
 		email: 'last@example.com',
 		createdAt: daysAgo(10),
@@ -357,7 +378,7 @@ test('a failed deletion is audited with a bounded reason, reported per account, 
 	})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -385,8 +406,8 @@ test('a failed deletion is audited with a bounded reason, reported per account, 
 		warnings: ['simulated inventory', 'second inventory warning'],
 		error: 'AccountDeletionInventoryError: simulated inventory',
 	})
-	expect(usernames(sqlite)).toEqual(['failing'])
-	expect(auditActions(audit.sqlite)).toEqual([
+	expect(await usernames(app)).toEqual(['failing'])
+	expect(await auditActions(audit)).toEqual([
 		{
 			category: 'account',
 			action: 'unverified_account_purge_failed',
@@ -403,11 +424,11 @@ test('a failed deletion is audited with a bounded reason, reported per account, 
 			reason: 'unverified_for_10_days',
 		}),
 	])
-	expect(deletingAt(sqlite, 'failing')).toBeNull()
+	expect(await deletingAt(app, 'failing')).toBeNull()
 
 	deleteUserAccount.mockClear()
 	const retry = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 	expect(retry).toEqual({
@@ -419,20 +440,20 @@ test('a failed deletion is audited with a bounded reason, reported per account, 
 			{ stableUserId: failing.stableUserId, ageDays: 12, outcome: 'purged' },
 		],
 	})
-	expect(usernames(sqlite)).toEqual([])
+	expect(await usernames(app)).toEqual([])
 })
 
 test('the failure audit reason falls back to the error message and is truncated', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const failing = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const failing = await seedUser(app, {
 		username: 'long-failure',
 		email: 'long-failure@example.com',
 		createdAt: daysAgo(9),
 	})
-	const other = await seedUser(db, {
+	const other = await seedUser(app, {
 		username: 'writers-active',
 		email: 'writers-active@example.com',
 		createdAt: daysAgo(8),
@@ -446,7 +467,7 @@ test('the failure audit reason falls back to the error message and is truncated'
 		})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -468,7 +489,7 @@ test('the failure audit reason falls back to the error message and is truncated'
 			'AccountDeletionWritersActiveError: Account deletion is waiting for 2 active user write(s) to finish.',
 		warnings: [],
 	})
-	expect(auditActions(audit.sqlite)).toEqual([
+	expect(await auditActions(audit)).toEqual([
 		expect.objectContaining({
 			action: 'unverified_account_purge_failed',
 			result: 'failure',
@@ -482,15 +503,15 @@ test('the failure audit reason falls back to the error message and is truncated'
 			reason: writersActive?.error,
 		}),
 	])
-	expect(deletingAt(sqlite, 'writers-active')).toBeNull()
+	expect(await deletingAt(app, 'writers-active')).toBeNull()
 })
 
 test('failure details redact email addresses before they reach outcomes, audit rows, or logs', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	consoleWarn.mockImplementation(() => {})
-	const { db } = createAppDb()
-	const audit = createAuditDb()
-	const leaky = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const leaky = await seedUser(app, {
 		username: 'leaky',
 		email: 'leaky.person+tag@example.com',
 		createdAt: daysAgo(9),
@@ -503,7 +524,7 @@ test('failure details redact email addresses before they reach outcomes, audit r
 	})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -520,7 +541,7 @@ test('failure details redact email addresses before they reach outcomes, audit r
 		],
 	})
 	expect(JSON.stringify(result)).not.toContain('@example.com')
-	const [auditRow] = auditActions(audit.sqlite)
+	const [auditRow] = await auditActions(audit)
 	expect(auditRow).toMatchObject({
 		action: 'unverified_account_purge_failed',
 		reason: outcome?.error,
@@ -532,9 +553,9 @@ test('failure details redact email addresses before they reach outcomes, audit r
 test('a Stripe cancellation failure is a pre-cleanup failure: fence released, account retained, retried next run', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const billing = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const billing = await seedUser(app, {
 		username: 'billing-failure',
 		email: 'billing-failure@example.com',
 		createdAt: daysAgo(12),
@@ -546,7 +567,7 @@ test('a Stripe cancellation failure is a pre-cleanup failure: fence released, ac
 	})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -568,30 +589,30 @@ test('a Stripe cancellation failure is a pre-cleanup failure: fence released, ac
 			},
 		],
 	})
-	expect(usernames(sqlite)).toEqual(['billing-failure'])
-	expect(deletingAt(sqlite, 'billing-failure')).toBeNull()
+	expect(await usernames(app)).toEqual(['billing-failure'])
+	expect(await deletingAt(app, 'billing-failure')).toBeNull()
 
 	deleteUserAccount.mockClear()
 	const retry = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 	expect(retry).toMatchObject({ scanned: 1, purged: 1, failed: 0 })
-	expect(usernames(sqlite)).toEqual([])
+	expect(await usernames(app)).toEqual([])
 })
 
 test('a failed failure-audit write is logged and does not stop the rest of the batch', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	const logAuditEvent = vi.spyOn(AuditLog, 'logAuditEvent')
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const failing = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const failing = await seedUser(app, {
 		username: 'failing-audit-down',
 		email: 'failing-audit-down@example.com',
 		createdAt: daysAgo(12),
 	})
-	const purged = await seedUser(db, {
+	const purged = await seedUser(app, {
 		username: 'purged-after-audit-down',
 		email: 'purged-after-audit-down@example.com',
 		createdAt: daysAgo(11),
@@ -602,7 +623,7 @@ test('a failed failure-audit write is logged and does not stop the rest of the b
 	logAuditEvent.mockRejectedValueOnce(new Error('audit db down'))
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -611,8 +632,8 @@ test('a failed failure-audit write is logged and does not stop the rest of the b
 		'unverified_account_purge_audit_failed',
 		{ userId: failing.stableUserId, error: expect.any(Error) },
 	)
-	expect(usernames(sqlite)).toEqual(['failing-audit-down'])
-	expect(auditActions(audit.sqlite)).toEqual([
+	expect(await usernames(app)).toEqual(['failing-audit-down'])
+	expect(await auditActions(audit)).toEqual([
 		expect.objectContaining({
 			action: 'unverified_account_purged',
 			email_hash: emailHash(purged.email),
@@ -624,14 +645,14 @@ test('a failed fence release is logged and does not stop the rest of the batch',
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	const abortAccountDeleting = vi.spyOn(DeletionState, 'abortAccountDeleting')
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const stuck = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const stuck = await seedUser(app, {
 		username: 'stuck-fence',
 		email: 'stuck@example.com',
 		createdAt: daysAgo(12),
 	})
-	const afterStuck = await seedUser(db, {
+	const afterStuck = await seedUser(app, {
 		username: 'purged-after-stuck',
 		email: 'after-stuck@example.com',
 		createdAt: daysAgo(11),
@@ -644,7 +665,7 @@ test('a failed fence release is logged and does not stop the rest of the batch',
 	})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -668,16 +689,16 @@ test('a failed fence release is logged and does not stop the rest of the batch',
 		'unverified_account_purge_release_failed',
 		{ userId: stuck.stableUserId, error: expect.any(Error) },
 	)
-	expect(usernames(sqlite)).toEqual(['stuck-fence'])
-	expect(deletingAt(sqlite, 'stuck-fence')).not.toBeNull()
+	expect(await usernames(app)).toEqual(['stuck-fence'])
+	expect(await deletingAt(app, 'stuck-fence')).not.toBeNull()
 })
 
 test('a pre-existing fence is left in place when a restamped deletion fails', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const fenced = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const fenced = await seedUser(app, {
 		username: 'restamp-fail',
 		email: 'restamp-fail@example.com',
 		createdAt: daysAgo(12),
@@ -688,7 +709,7 @@ test('a pre-existing fence is left in place when a restamped deletion fails', as
 	})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -712,9 +733,9 @@ test('a pre-existing fence is left in place when a restamped deletion fails', as
 		warnings: [],
 		error: 'Error: simulated restamped deletion failure',
 	})
-	expect(usernames(sqlite)).toEqual(['restamp-fail'])
-	expect(deletingAt(sqlite, 'restamp-fail')).not.toBeNull()
-	expect(auditActions(audit.sqlite)).toEqual([
+	expect(await usernames(app)).toEqual(['restamp-fail'])
+	expect(await deletingAt(app, 'restamp-fail')).not.toBeNull()
+	expect(await auditActions(audit)).toEqual([
 		expect.objectContaining({
 			action: 'unverified_account_purge_failed',
 			result: 'failure',
@@ -727,9 +748,9 @@ test('a pre-existing fence is left in place when a restamped deletion fails', as
 test('a cleanup error keeps a claim-created fence so the damaged account retries', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const damaged = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const damaged = await seedUser(app, {
 		username: 'cleanup-fail',
 		email: 'cleanup-fail@example.com',
 		createdAt: daysAgo(8),
@@ -742,7 +763,7 @@ test('a cleanup error keeps a claim-created fence so the damaged account retries
 	})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -766,9 +787,9 @@ test('a cleanup error keeps a claim-created fence so the damaged account retries
 		warnings: ['simulated cleanup'],
 		error: 'AccountDeletionCleanupError: simulated cleanup',
 	})
-	expect(usernames(sqlite)).toEqual(['cleanup-fail'])
-	expect(deletingAt(sqlite, 'cleanup-fail')).not.toBeNull()
-	expect(auditActions(audit.sqlite)).toEqual([
+	expect(await usernames(app)).toEqual(['cleanup-fail'])
+	expect(await deletingAt(app, 'cleanup-fail')).not.toBeNull()
+	expect(await auditActions(audit)).toEqual([
 		expect.objectContaining({
 			action: 'unverified_account_purge_failed',
 			result: 'failure',
@@ -779,7 +800,7 @@ test('a cleanup error keeps a claim-created fence so the damaged account retries
 
 	deleteUserAccount.mockClear()
 	const retry = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 	expect(retry).toEqual({
@@ -790,21 +811,21 @@ test('a cleanup error keeps a claim-created fence so the damaged account retries
 		outcomes: [],
 	})
 	expect(deleteUserAccount).not.toHaveBeenCalled()
-	expect(usernames(sqlite)).toEqual(['cleanup-fail'])
+	expect(await usernames(app)).toEqual(['cleanup-fail'])
 })
 
 test('an audit failure after a successful delete does not stop the batch or release a fence', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
 	const logAuditEvent = vi.spyOn(AuditLog, 'logAuditEvent')
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const first = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const first = await seedUser(app, {
 		username: 'audit-fail',
 		email: 'audit-fail@example.com',
 		createdAt: daysAgo(10),
 	})
-	const second = await seedUser(db, {
+	const second = await seedUser(app, {
 		username: 'audit-ok',
 		email: 'audit-ok@example.com',
 		createdAt: daysAgo(9),
@@ -812,7 +833,7 @@ test('an audit failure after a successful delete does not stop the batch or rele
 	logAuditEvent.mockRejectedValueOnce(new Error('audit db down'))
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -834,8 +855,8 @@ test('an audit failure after a successful delete does not stop the batch or rele
 			error: expect.any(Error),
 		},
 	)
-	expect(usernames(sqlite)).toEqual([])
-	expect(auditActions(audit.sqlite)).toEqual([
+	expect(await usernames(app)).toEqual([])
+	expect(await auditActions(audit)).toEqual([
 		expect.objectContaining({
 			action: 'unverified_account_purged',
 			email_hash: emailHash(second.email),
@@ -845,19 +866,21 @@ test('an audit failure after a successful delete does not stop the batch or rele
 
 test('a claim that loses the race to verification keeps the account and writes no audit', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const raced = await seedUser(db, {
+	await using app = await createAppDb()
+	const { db } = app
+	await using audit = await createTestAuditDb()
+	const raced = await seedUser(app, {
 		username: 'verified-during-select',
 		email: 'raced@example.com',
 		createdAt: daysAgo(8),
 	})
 	const env = createPurgeEnv(
-		withVerifyAfterUnverifiedAccountSelect(db, now.toISOString()),
+		app,
 		audit.db,
+		withVerifyAfterUnverifiedAccountSelect(db, now.toISOString()),
 	)
 
-	const result = await pruneUnverifiedAccounts({ env, now })
+	const result = await pruneUnverifiedAccounts({ ...env, now })
 
 	expect(result).toEqual({
 		scanned: 1,
@@ -873,43 +896,46 @@ test('a claim that loses the race to verification keeps the account and writes n
 		],
 	})
 	expect(deleteUserAccount).not.toHaveBeenCalled()
-	expect(usernames(sqlite)).toEqual(['verified-during-select'])
-	expect(auditActions(audit.sqlite)).toEqual([])
-	const row = sqlite
-		.prepare(`SELECT email_verified_at, deleting_at FROM users WHERE id = ?`)
-		.get(raced.id) as {
+	expect(await usernames(app)).toEqual(['verified-during-select'])
+	expect(await auditActions(audit)).toEqual([])
+	const {
+		rows: [row],
+	} = await app.pg.query<{
 		email_verified_at: string | null
 		deleting_at: string | null
-	}
+	}>(`SELECT email_verified_at, deleting_at FROM users WHERE id = $1`, [
+		raced.id,
+	])
+	if (!row) throw new Error('raced account is missing')
 	expect(row.email_verified_at).not.toBeNull()
 	expect(row.deleting_at).toBeNull()
 })
 
 test('never-attempted accounts are purged before stale fences; in-backoff fences are skipped', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const staleFence = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const staleFence = await seedUser(app, {
 		username: 'stale-fence',
 		email: 'stale-fence@example.com',
 		createdAt: daysAgo(30),
 		deletingAt: daysAgo(1),
 	})
-	const fresh = await seedUser(db, {
+	const fresh = await seedUser(app, {
 		username: 'fresh-unverified',
 		email: 'fresh@example.com',
 		createdAt: daysAgo(8),
 	})
-	await seedUser(db, {
+	await seedUser(app, {
 		username: 'recent-fence',
 		email: 'recent-fence@example.com',
 		createdAt: daysAgo(20),
 		deletingAt: minutesAgo(5),
 	})
-	const env = createPurgeEnv(db, audit.db)
+	const env = createPurgeEnv(app, audit.db)
 
 	const firstRun = await pruneUnverifiedAccounts({
-		env,
+		...env,
 		now,
 		batchSize: 1,
 	})
@@ -925,11 +951,11 @@ test('never-attempted accounts are purged before stale fences; in-backoff fences
 	expect(deleteUserAccount.mock.calls.map((call) => call[0].mcpUserId)).toEqual(
 		[fresh.stableUserId],
 	)
-	expect(usernames(sqlite)).toEqual(['recent-fence', 'stale-fence'])
+	expect(await usernames(app)).toEqual(['recent-fence', 'stale-fence'])
 
 	deleteUserAccount.mockClear()
 	const secondRun = await pruneUnverifiedAccounts({
-		env,
+		...env,
 		now,
 		batchSize: 2,
 	})
@@ -945,23 +971,23 @@ test('never-attempted accounts are purged before stale fences; in-backoff fences
 	expect(deleteUserAccount.mock.calls.map((call) => call[0].mcpUserId)).toEqual(
 		[staleFence.stableUserId],
 	)
-	expect(usernames(sqlite)).toEqual(['recent-fence'])
-	expect(deletingAt(sqlite, 'recent-fence')).not.toBeNull()
-	expect(auditActions(audit.sqlite)).toHaveLength(2)
+	expect(await usernames(app)).toEqual(['recent-fence'])
+	expect(await deletingAt(app, 'recent-fence')).not.toBeNull()
+	expect(await auditActions(audit)).toHaveLength(2)
 })
 
 test('a zero time budget deletes nothing', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	await seedUser(app, {
 		username: 'would-purge',
 		email: 'budget@example.com',
 		createdAt: daysAgo(8),
 	})
 
 	const result = await pruneUnverifiedAccounts({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 		timeBudgetMs: 0,
 	})
@@ -974,32 +1000,32 @@ test('a zero time budget deletes nothing', async () => {
 		outcomes: [],
 	})
 	expect(deleteUserAccount).not.toHaveBeenCalled()
-	expect(usernames(sqlite)).toEqual(['would-purge'])
-	expect(deletingAt(sqlite, 'would-purge')).toBeNull()
-	expect(auditActions(audit.sqlite)).toEqual([])
+	expect(await usernames(app)).toEqual(['would-purge'])
+	expect(await deletingAt(app, 'would-purge')).toBeNull()
+	expect(await auditActions(audit)).toEqual([])
 })
 
 test('listUnverifiedAccountPurgeCandidates previews the claim page without claiming, deleting, or auditing', async () => {
 	const deleteUserAccount = vi.spyOn(AccountDeletion, 'deleteUserAccount')
-	const { sqlite, db } = createAppDb()
-	const audit = createAuditDb()
-	const staleFence = await seedUser(db, {
+	await using app = await createAppDb()
+	await using audit = await createTestAuditDb()
+	const staleFence = await seedUser(app, {
 		username: 'preview-stale-fence',
 		email: 'preview-stale-fence@example.com',
 		createdAt: daysAgo(30),
 		deletingAt: daysAgo(1),
 	})
-	const fresh = await seedUser(db, {
+	const fresh = await seedUser(app, {
 		username: 'preview-fresh',
 		email: 'preview-fresh@example.com',
 		createdAt: daysAgo(9),
 	})
-	await seedUser(db, {
+	await seedUser(app, {
 		username: 'preview-young',
 		email: 'preview-young@example.com',
 		createdAt: daysAgo(2),
 	})
-	await seedUser(db, {
+	await seedUser(app, {
 		username: 'preview-recent-fence',
 		email: 'preview-recent-fence@example.com',
 		createdAt: daysAgo(20),
@@ -1007,7 +1033,7 @@ test('listUnverifiedAccountPurgeCandidates previews the claim page without claim
 	})
 
 	const preview = await listUnverifiedAccountPurgeCandidates({
-		env: createPurgeEnv(db, audit.db),
+		...createPurgeEnv(app, audit.db),
 		now,
 	})
 
@@ -1020,12 +1046,12 @@ test('listUnverifiedAccountPurgeCandidates previews the claim page without claim
 	})
 	expect(JSON.stringify(preview)).not.toContain('@example.com')
 	expect(deleteUserAccount).not.toHaveBeenCalled()
-	expect(deletingAt(sqlite, 'preview-fresh')).toBeNull()
-	expect(deletingAt(sqlite, 'preview-stale-fence')).toBe(daysAgo(1))
-	expect(auditActions(audit.sqlite)).toEqual([])
+	expect(await deletingAt(app, 'preview-fresh')).toBeNull()
+	expect(await deletingAt(app, 'preview-stale-fence')).toBe(daysAgo(1))
+	expect(await auditActions(audit)).toEqual([])
 	expect(
 		await listUnverifiedAccountPurgeCandidates({
-			env: createPurgeEnv(db, audit.db),
+			...createPurgeEnv(app, audit.db),
 			now,
 			batchSize: 1,
 		}),

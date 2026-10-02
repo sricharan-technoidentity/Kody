@@ -1,7 +1,4 @@
-import { DurableObject } from 'cloudflare:workers'
-
 const oauthPurgeBatchSize = 50
-export const oauthPurgeContinuationStorageKey = 'continuation'
 
 type PurgePhase = 'grants' | 'tokens'
 
@@ -314,35 +311,20 @@ async function purgeTokenPhase(
 	}
 }
 
-async function continueOAuthPurge(
-	kv: KVNamespace,
-	storage: DurableObjectStorage,
-	now: number,
-): Promise<OAuthPurgeResult> {
-	const continuation = parseContinuation(
-		await storage.get(oauthPurgeContinuationStorageKey),
-	)
+/**
+ * One page of the OAuth purge: grants and tokens alternate, 50 keys a step.
+ * The caller carries the continuation (the `OAuthPurgeSweep` workflow passes
+ * it through Continue-As-New), so the KV data plane holds no purge state.
+ */
+export async function runOAuthPurgeStep(input: {
+	kv: KVNamespace
+	continuation: unknown
+	nowSeconds: number
+}): Promise<{ result: OAuthPurgeResult; continuation: PurgeContinuation }> {
+	const continuation = parseContinuation(input.continuation)
 	const result =
 		continuation.nextPhase === 'grants'
-			? await purgeGrantPhase(kv, continuation, now)
-			: await purgeTokenPhase(kv, continuation)
-	await storage.put(oauthPurgeContinuationStorageKey, continuation)
-	return result
-}
-
-/**
- * A single global instance serializes purge invocations and stores continuation
- * in strongly consistent Durable Object storage. KV remains only the provider's
- * data plane; it is not used as a lock or continuation-state authority.
- */
-export class OAuthPurgeCoordinator extends DurableObject<Env> {
-	run(input: { scheduledAt: number }): Promise<OAuthPurgeResult> {
-		return this.ctx.blockConcurrencyWhile(() =>
-			continueOAuthPurge(
-				this.env.OAUTH_KV,
-				this.ctx.storage,
-				Math.floor(input.scheduledAt / 1000),
-			),
-		)
-	}
+			? await purgeGrantPhase(input.kv, continuation, input.nowSeconds)
+			: await purgeTokenPhase(input.kv, continuation)
+	return { result, continuation }
 }

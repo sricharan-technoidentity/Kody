@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	foldOnboardingFunnelRows,
 	onboardingFunnelCountQuery,
@@ -74,29 +75,20 @@ test('funnel points omit prompts, secrets, and non-stable ids', () => {
 
 test('first search emits once even when the stamp is repeated', async () => {
 	const writeDataPoint = vi.fn()
-	const columns = new Map<string, string | null>()
-	const db = {
-		prepare(sql: string) {
-			return {
-				bind(...values: Array<unknown>) {
-					return {
-						async run() {
-							if (sql.includes('SET first_search_at =')) {
-								if (columns.get('first_search_at') == null) {
-									columns.set('first_search_at', String(values[0]))
-									return { meta: { changes: 1 } }
-								}
-								return { meta: { changes: 0 } }
-							}
-							return { meta: { changes: 0 } }
-						},
-					}
-				},
-			}
-		},
-	} as unknown as D1Database
+	await using database = await createTestDb({ userId })
+	await database.pg.query(
+		`INSERT INTO users (username, email, stable_user_id, password_hash)
+		 VALUES ('alice', 'alice@example.test', $1, 'x')`,
+		[userId],
+	)
+	const db = database.db
 	const env = { ONBOARDING_FUNNEL_EVENTS: { writeDataPoint } }
-	expect(await stampFirstSearch(db, { stableUserId: userId }, env)).toBe(true)
+	expect(
+		await Promise.all([
+			stampFirstSearch(db, { stableUserId: userId }, env),
+			stampFirstSearch(db, { stableUserId: userId }, env),
+		]),
+	).toEqual([true, false])
 	expect(await stampFirstSearch(db, { stableUserId: userId }, env)).toBe(false)
 	expect(writeDataPoint).toHaveBeenCalledOnce()
 	expect(writeDataPoint.mock.calls[0]?.[0]).toMatchObject({

@@ -1,6 +1,5 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import {
 	assignDiscordMemberRole,
@@ -234,15 +233,14 @@ test('official guild membership lookup classifies member, absent, and fail-open'
 		message: 'Discord guild membership lookup failed (500).',
 	})
 
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE oauth_connections (
-			user_id INTEGER NOT NULL,
-			provider_name TEXT NOT NULL,
-			provider_id TEXT NOT NULL
-		)
-	`)
-	const db = createD1FromSqlite(sqlite)
+	await using database = await createTestDb()
+	await database.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash)
+		 VALUES (11, 'discord-member', 'member@example.test', 'discord-member', 'x'),
+			(12, 'other-user', 'other@example.test', 'other-user', 'x')`,
+	)
+	// Membership reads only the signed-in user's own linked identities.
+	const { db: writer, reader: db } = database.forUser('discord-member')
 	expect(
 		await readOfficialDiscordMembershipForUser({
 			env: { ...configuredEnv, APP_DB: db },
@@ -251,7 +249,7 @@ test('official guild membership lookup classifies member, absent, and fail-open'
 		}),
 	).toBe(false)
 
-	await db
+	await writer
 		.prepare(
 			`INSERT INTO oauth_connections (user_id, provider_name, provider_id)
 			 VALUES (?, 'discord', ?)`,
@@ -265,6 +263,16 @@ test('official guild membership lookup classifies member, absent, and fail-open'
 			fetchImpl,
 		}),
 	).toBe(true)
+	expect(
+		await readOfficialDiscordMembershipForUser({
+			env: {
+				...configuredEnv,
+				APP_DB: database.forUser('other-user').reader,
+			},
+			userId: 11,
+			fetchImpl,
+		}),
+	).toBe(false)
 	expect(
 		await readOfficialDiscordMembershipForUser({
 			env: { ...configuredEnv, APP_DB: db },
@@ -290,7 +298,7 @@ test('official guild membership lookup classifies member, absent, and fail-open'
 	).toBeNull()
 
 	const secondDiscordUserId = '555555555555555555'
-	await db
+	await writer
 		.prepare(
 			`INSERT INTO oauth_connections (user_id, provider_name, provider_id)
 			 VALUES (?, 'discord', ?)`,
@@ -542,24 +550,19 @@ test('maybe helpers swallow Discord failures instead of throwing', async () => {
 })
 
 test('user-level sync looks up Discord and stripe_plan, then disconnect removes every role', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE users (
-			id INTEGER PRIMARY KEY,
-			stripe_plan TEXT
-		);
-		CREATE TABLE oauth_connections (
-			user_id INTEGER NOT NULL,
-			provider_name TEXT NOT NULL,
-			provider_id TEXT NOT NULL
-		);
-		INSERT INTO users (id, stripe_plan) VALUES (7, 'standard');
-		INSERT INTO oauth_connections (user_id, provider_name, provider_id)
-		VALUES (7, 'discord', '${discordUserId}');
-	`)
+	await using database = await createTestDb()
+	await database.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash, stripe_plan)
+		 VALUES (7, 'discord-plan', 'plan@example.test', 'discord-plan', 'x', 'standard')`,
+	)
+	await database.pg.query(
+		`INSERT INTO oauth_connections (user_id, provider_name, provider_id)
+		 VALUES (7, 'discord', $1)`,
+		[discordUserId],
+	)
 	const env = {
 		...configuredEnv,
-		APP_DB: createD1FromSqlite(sqlite),
+		APP_DB: database.forUser('discord-plan').reader,
 	}
 	const calls: Array<{ url: string; method: string }> = []
 	async function fetchImpl(input: RequestInfo | URL, init?: RequestInit) {

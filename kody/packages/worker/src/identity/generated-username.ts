@@ -1,10 +1,19 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	getEffectiveUsernameValidationError,
 	normalizeUsername,
 	usernameFromEmail,
 } from '#worker/identity/username.ts'
 
-export async function userExistsByUsername(db: D1Database, username: string) {
+export async function userExistsByUsername(db: SqlDatabase, username: string) {
+	// Usernames are public, but RLS hides other accounts' rows; ask the directory.
+	if ('dialect' in db && db.dialect === 'postgres') {
+		const taken = await db
+			.prepare(`SELECT kody_username_taken(?) AS taken`)
+			.bind(username)
+			.first<{ taken: boolean }>()
+		return taken?.taken === true
+	}
 	const row = await db
 		.prepare(`SELECT id FROM users WHERE username = ?`)
 		.bind(username)
@@ -20,7 +29,7 @@ export async function userExistsByUsername(db: D1Database, username: string) {
  * is drawn until one is claimable.
  */
 export async function getAvailableUsernameFromBase(
-	db: D1Database,
+	db: SqlDatabase,
 	base: string,
 	env?: Pick<Env, 'BUNDLE_ARTIFACTS_KV'>,
 ) {
@@ -77,7 +86,7 @@ export async function getAvailableUsernameFromBase(
 }
 
 export async function getAvailableGeneratedUsername(
-	db: D1Database,
+	db: SqlDatabase,
 	email: string,
 	env?: Pick<Env, 'BUNDLE_ARTIFACTS_KV'>,
 ) {

@@ -1,12 +1,12 @@
-import { quoteSqlIdentifier } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	accountExportForeignUserIdColumnsByTable,
 	accountExportRedactedColumnsByTable,
 	accountExportRedactedForeignUserId,
 	accountOperatorOwnedD1Surfaces,
+	accountSubjectAnonymizeSql,
 	accountUserDataTargets,
 	buildUserScopedDeleteOrUpdateSql,
 	buildUserScopedTargetMatch,
@@ -16,9 +16,57 @@ import {
 	type UserScopedDataTarget,
 } from './data-targets.ts'
 
-function applyMigrations(db: DatabaseSync) {
-	const migrationsDir = new URL('../../migrations/', import.meta.url)
-	applyAllMigrations(db, migrationsDir)
+/**
+ * User columns deliberately outside the D1 inventory: their owners purge and
+ * export them (JOBS purgeUser / listJobsForUser, the search-index adapter), and
+ * `isolation_probe` is the P2 RLS fixture.
+ */
+const userColumnsOwnedElsewhere = new Set([
+	'jobs.user_id',
+	'archived_job_artifacts.user_id',
+	'search_vectors.user_id',
+	'isolation_probe.user_id',
+])
+
+async function schemaUserColumns() {
+	await using database = await createTestDb()
+	const { rows } = await database.pg.query<{
+		table_name: string
+		column_name: string
+	}>(
+		`SELECT c.table_name, c.column_name
+		FROM information_schema.columns c
+		JOIN information_schema.tables t
+			ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+		WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'`,
+	)
+	const tables = new Map<string, Array<string>>()
+	for (const row of rows) {
+		tables.set(row.table_name, [
+			...(tables.get(row.table_name) ?? []),
+			row.column_name,
+		])
+	}
+	const userColumns = new Set(
+		rows
+			.filter(
+				(row) =>
+					row.column_name === 'user_id' || row.column_name.endsWith('_user_id'),
+			)
+			.map((row) => `${row.table_name}.${row.column_name}`)
+			.filter((column) => !userColumnsOwnedElsewhere.has(column)),
+	)
+	return { tables, userColumns }
+}
+
+function expectInventoryCoversSchema(userColumns: Set<string>) {
+	const coveredColumns = getAccountD1UserColumnCoverage()
+	expect(
+		[...userColumns].filter((column) => !coveredColumns.has(column)),
+	).toEqual([])
+	expect(
+		[...coveredColumns].filter((column) => !userColumns.has(column)),
+	).toEqual([])
 }
 
 function matchFor(target: UserScopedDataTarget) {
@@ -132,8 +180,9 @@ test('shared user-scoped target match SQL is identical for deletion and export s
 	const replaceJsonMatch = matchFor(samples[6]!)
 	expect(replaceJsonMatch).toEqual({
 		table: 'package_codemod_runs',
-		whereSql: 'instr(filters_json, ?) > 0',
-		qualifiedWhereSql: 'instr(package_codemod_runs.filters_json, ?) > 0',
+		whereSql: "length(replace(filters_json, ?, '')) < length(filters_json)",
+		qualifiedWhereSql:
+			"length(replace(package_codemod_runs.filters_json, ?, '')) < length(package_codemod_runs.filters_json)",
 		params: ['"user-aaa"'],
 		mutation: {
 			kind: 'replace_json_string',
@@ -145,7 +194,7 @@ test('shared user-scoped target match SQL is identical for deletion and export s
 	expect(buildUserScopedDeleteOrUpdateSql(replaceJsonMatch)).toEqual({
 		sql: `UPDATE package_codemod_runs
 						SET filters_json = REPLACE(filters_json, ?, ?)
-						WHERE instr(filters_json, ?) > 0`,
+						WHERE length(replace(filters_json, ?, '')) < length(filters_json)`,
 		params: ['"user-aaa"', '"deleted-user"', '"user-aaa"'],
 	})
 
@@ -224,9 +273,8 @@ test('every accountUserDataTargets kind has a shared match builder and export gu
 	).toBe(true)
 })
 
-test('operator-owned tables are explicit deletion/export exclusions', () => {
-	using db = new DatabaseSync(':memory:')
-	applyMigrations(db)
+test('operator-owned tables are explicit deletion/export exclusions', async () => {
+	const { tables } = await schemaUserColumns()
 	const expectedTables = [
 		'platform_oauth_apps',
 		'platform_provider_marks',
@@ -241,10 +289,8 @@ test('operator-owned tables are explicit deletion/export exclusions', () => {
 		accountOperatorOwnedD1Surfaces.map((surface) => surface.table).sort(),
 	).toEqual(expectedTables)
 	for (const table of expectedTables) {
-		const columns = db
-			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table)})`)
-			.all() as Array<{ name: string }>
-		expect(columns.map((column) => column.name)).not.toContain('user_id')
+		expect(tables.get(table)).toBeDefined()
+		expect(tables.get(table)).not.toContain('user_id')
 		expect(
 			accountUserDataTargets.some(
 				(target) => 'table' in target && target.table === table,
@@ -273,11 +319,9 @@ test('operator-owned tables are explicit deletion/export exclusions', () => {
 	)
 })
 
-test('account deletion statements never bind a LIKE or GLOB pattern (D1 caps patterns at 50 bytes)', () => {
-	// A stable user id is 64 hex chars; wrapped in quotes and wildcards it is
-	// 68 bytes, which D1 rejects with "LIKE or GLOB pattern too complex". The
-	// production purge lane failed on exactly this until the JSON-column
-	// target switched to instr().
+test('account deletion statements never bind a LIKE or GLOB pattern', () => {
+	// Stable ids must match literally: a LIKE pattern would need wildcard
+	// escaping (and D1 once rejected 68-byte patterns in the purge lane).
 	const stableUserId = 'f'.repeat(64)
 	for (const target of accountUserDataTargets) {
 		const match = buildUserScopedTargetMatch({
@@ -294,7 +338,7 @@ test('account deletion statements never bind a LIKE or GLOB pattern (D1 caps pat
 	}
 })
 
-test('final schema drops entitlement_daily_counters without stale inventory coverage', () => {
+test('final schema drops entitlement_daily_counters without stale inventory coverage', async () => {
 	const deletionStatements = accountUserDataTargets.map((target) => {
 		const match = matchFor(target)
 		return buildUserScopedDeleteOrUpdateSql(match).sql
@@ -311,49 +355,13 @@ test('final schema drops entitlement_daily_counters without stale inventory cove
 		})
 	expect(exportStatements.join('\n')).not.toMatch(/entitlement_daily_counters/u)
 
-	const db = new DatabaseSync(':memory:')
-	applyMigrations(db)
-	const tableExists = db
-		.prepare(
-			`SELECT 1 AS present
-			FROM sqlite_schema
-			WHERE type = 'table' AND name = 'entitlement_daily_counters'`,
-		)
-		.get() as { present: number } | undefined
-	expect(tableExists).toBeUndefined()
-
-	const liveUserColumns = new Set<string>()
-	const tables = db
-		.prepare(
-			`SELECT name
-			FROM sqlite_schema
-			WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-			ORDER BY name`,
-		)
-		.all() as Array<{ name: string }>
-	for (const table of tables) {
-		const columns = db
-			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
-			.all() as Array<{ name: string }>
-		for (const column of columns) {
-			if (column.name === 'user_id' || column.name.endsWith('_user_id')) {
-				liveUserColumns.add(`${table.name}.${column.name}`)
-			}
-		}
-	}
-	const coveredColumns = getAccountD1UserColumnCoverage()
-	expect(liveUserColumns.has('entitlement_daily_counters.user_id')).toBe(false)
-	const missing = [...liveUserColumns].filter(
-		(column) => !coveredColumns.has(column),
-	)
-	const stale = [...coveredColumns].filter(
-		(column) => !liveUserColumns.has(column),
-	)
-	expect(missing).toEqual([])
-	expect(stale).toEqual([])
+	const { tables, userColumns } = await schemaUserColumns()
+	expect(tables.has('entitlement_daily_counters')).toBe(false)
+	expect(userColumns.has('entitlement_daily_counters.user_id')).toBe(false)
+	expectInventoryCoversSchema(userColumns)
 })
 
-test('final schema drops legacy RunLog D1 projections without stale inventory coverage', () => {
+test('final schema drops legacy RunLog D1 projections without stale inventory coverage', async () => {
 	const retiredTables = [
 		'workflow_runs',
 		'user_package_run_successes',
@@ -378,51 +386,228 @@ test('final schema drops legacy RunLog D1 projections without stale inventory co
 		expect(inventorySql).not.toMatch(new RegExp(`\\b${table}\\b`, 'u'))
 	}
 
-	const db = new DatabaseSync(':memory:')
-	applyMigrations(db)
+	const { tables, userColumns } = await schemaUserColumns()
 	for (const table of retiredTables) {
-		const tableExists = db
-			.prepare(
-				`SELECT 1 AS present
-				FROM sqlite_schema
-				WHERE type = 'table' AND name = ?`,
-			)
-			.get(table) as { present: number } | undefined
-		expect(
-			tableExists,
-			`${table} should be absent after migration 0137`,
-		).toBeUndefined()
+		expect(tables.has(table), `${table} should be absent`).toBe(false)
+		expect(userColumns.has(`${table}.user_id`)).toBe(false)
 	}
+	expectInventoryCoversSchema(userColumns)
+})
 
-	const liveUserColumns = new Set<string>()
-	const tables = db
-		.prepare(
-			`SELECT name
-			FROM sqlite_schema
-			WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-			ORDER BY name`,
+const subject = { id: 10, stableUserId: 'subject-s' }
+
+async function createSubjectTestDb() {
+	const database = await createTestDb()
+	await database.pg.exec(`
+		INSERT INTO users (id, stable_user_id, username, email, password_hash) VALUES
+			(10, 'subject-s', 'subject', 's@example.com', 'x'),
+			(11, 'other-o', 'other', 'o@example.com', 'x'),
+			(12, 'third-t', 'third', 't@example.com', 'x');
+		INSERT INTO credit_ledger_entries (id, user_id, kind, amount_micro_usd, granted_by_user_id, created_at) VALUES
+			('cl-own', 'subject-s', 'top_up', 5, NULL, 'now'),
+			('cl-granted', 'other-o', 'admin_grant', 5, 'subject-s', 'now'),
+			('cl-bystander', 'third-t', 'admin_grant', 5, 'other-o', 'now');
+		INSERT INTO platform_feedback (id, submitter_user_id, category, summary, details, reviewed_by_user_id, reviewed_at, admin_note, created_at, updated_at, submitter_username, submitter_email) VALUES
+			('fb-other', 'other-o', 'bug', 's', 'd', 'subject-s', 'now', 'note', 'now', 'now', 'other', 'o@example.com');
+		INSERT INTO community_listings (id, owner_user_id, package_id, source_id, kody_id, name, description, license, pinned_commit) VALUES
+			('lst-subject', 'subject-s', 'p1', 's1', 'k1', 'n', 'd', 'MIT', 'c'),
+			('lst-other', 'other-o', 'p2', 's2', 'k2', 'n', 'd', 'MIT', 'c');
+		INSERT INTO community_ratings (id, listing_id, user_id, stars, adaptation_effort) VALUES
+			('rt-other-on-subject', 'lst-subject', 'other-o', 5, 1),
+			('rt-subject-on-other', 'lst-other', 'subject-s', 4, 1),
+			('rt-third-on-other', 'lst-other', 'third-t', 3, 1);
+		INSERT INTO package_codemod_runs (id, codemod_id, mode, scope_user_id, initiated_by_user_id, filters_json, status, created_at, updated_at) VALUES
+			('run-fleet', 'cm', 'apply', 'other-o', 'other-o', '{"userIds":["subject-s","third-t"]}', 'done', 'now', 'now');
+		INSERT INTO value_buckets (id, user_id, scope, binding_key) VALUES
+			('vb-subject', 'subject-s', 'user', 'k'), ('vb-other', 'other-o', 'user', 'k');
+		INSERT INTO value_entries (bucket_id, name, value) VALUES
+			('vb-subject', 'a', '1'), ('vb-other', 'a', '1');
+		INSERT INTO passkeys (id, aaguid, public_key, user_id, webauthn_user_handle, device_type) VALUES
+			('pk-subject', 'a', 'k', 10, 'h', 'single'), ('pk-other', 'a', 'k', 11, 'h', 'single');
+		INSERT INTO verifications (type, target, secret, algorithm, digits, period, char_set) VALUES
+			('2fa', '10', 's', 'SHA1', 6, 30, 'A'), ('2fa', '11', 's', 'SHA1', 6, 30, 'A');
+		INSERT INTO package_scope_grants (scope_owner_user_id, grantee_user_id, created_by_user_id) VALUES
+			('subject-s', 'other-o', 'third-t'), ('other-o', 'third-t', 'subject-s');
+	`)
+	const as = (
+		role: 'kody_subject_reader' | 'kody_subject_purger' | 'kody_writer',
+	) =>
+		createPgDatabase({
+			connection: database.pg,
+			role,
+			userId: subject.stableUserId,
+		})
+	return {
+		...database,
+		as,
+		async rows(sql: string) {
+			return (await database.pg.query(sql)).rows
+		},
+	}
+}
+
+/** Mirrors deleteUserScopedRowsAndUser's PostgreSQL batch. */
+function deletionStatements(db: ReturnType<typeof createPgDatabase>) {
+	return [
+		db.prepare(accountSubjectAnonymizeSql),
+		...accountUserDataTargets.flatMap((target) => {
+			const match = buildUserScopedTargetMatch({
+				target,
+				mcpUserId: subject.stableUserId,
+				dbUserId: subject.id,
+			})
+			if (match.mutation.kind !== 'delete') return []
+			const { sql, params } = buildUserScopedDeleteOrUpdateSql(match)
+			return [db.prepare(sql).bind(...params)]
+		}),
+		db.prepare(`DELETE FROM users WHERE id = ?`).bind(subject.id),
+	]
+}
+
+test('kody_subject_purger runs the deletion inventory atomically and leaves no subject id behind', async () => {
+	await using database = await createSubjectTestDb()
+
+	// Ordinary owner roles cannot anonymize (RLS hides other users' rows, so the
+	// definer is purger-only); the failed batch rolls back as a unit.
+	const writer = database.as('kody_writer')
+	await expect(writer.batch(deletionStatements(writer))).rejects.toThrow(
+		'permission denied for function kody_subject_anonymize',
+	)
+	await expect(
+		createPgDatabase({ connection: database.pg, role: 'kody_subject_purger' })
+			.prepare(accountSubjectAnonymizeSql)
+			.all(),
+	).rejects.toThrow('app.user_id is required')
+	expect(
+		await database.rows(`SELECT COUNT(*)::int AS count FROM value_entries`),
+	).toEqual([{ count: 2 }])
+
+	const purger = database.as('kody_subject_purger')
+	const [anonymized] = await purger.batch<{
+		target_ordinal: number
+		changed_rows: number
+	}>(deletionStatements(purger))
+	expect(
+		anonymized!.results
+			.filter((row) => row.changed_rows > 0)
+			.map((row) => accountUserDataTargets[row.target_ordinal]),
+	).toEqual([
+		expect.objectContaining({ table: 'credit_ledger_entries' }),
+		expect.objectContaining({
+			table: 'package_codemod_runs',
+			column: 'filters_json',
+		}),
+		expect.objectContaining({ table: 'platform_feedback' }),
+		expect.objectContaining({ table: 'package_scope_grants' }),
+	])
+
+	expect(
+		await database.rows(`SELECT stable_user_id FROM users ORDER BY id`),
+	).toEqual([{ stable_user_id: 'other-o' }, { stable_user_id: 'third-t' }])
+	expect(
+		await database.rows(
+			`SELECT id, user_id, granted_by_user_id FROM credit_ledger_entries ORDER BY id`,
+		),
+	).toEqual([
+		{ id: 'cl-bystander', user_id: 'third-t', granted_by_user_id: 'other-o' },
+		{
+			id: 'cl-granted',
+			user_id: 'other-o',
+			granted_by_user_id: 'deleted-user',
+		},
+	])
+	expect(
+		await database.rows(
+			`SELECT id, reviewed_by_user_id, reviewed_at, admin_note FROM platform_feedback`,
+		),
+	).toEqual([
+		{
+			id: 'fb-other',
+			reviewed_by_user_id: null,
+			reviewed_at: null,
+			admin_note: null,
+		},
+	])
+	expect(await database.rows(`SELECT id FROM community_listings`)).toEqual([
+		{ id: 'lst-other' },
+	])
+	expect(await database.rows(`SELECT id FROM community_ratings`)).toEqual([
+		{ id: 'rt-third-on-other' },
+	])
+	expect(
+		await database.rows(`SELECT filters_json FROM package_codemod_runs`),
+	).toEqual([{ filters_json: '{"userIds":["deleted-user","third-t"]}' }])
+	expect(await database.rows(`SELECT bucket_id FROM value_entries`)).toEqual([
+		{ bucket_id: 'vb-other' },
+	])
+	expect(await database.rows(`SELECT id FROM passkeys`)).toEqual([
+		{ id: 'pk-other' },
+	])
+	expect(await database.rows(`SELECT target FROM verifications`)).toEqual([
+		{ target: '11' },
+	])
+	expect(
+		await database.rows(
+			`SELECT scope_owner_user_id, grantee_user_id, created_by_user_id FROM package_scope_grants`,
+		),
+	).toEqual([
+		{
+			scope_owner_user_id: 'other-o',
+			grantee_user_id: 'third-t',
+			created_by_user_id: 'deleted-user',
+		},
+	])
+
+	// Every inventory column is free of the subject's stable and integer ids.
+	const { rows: columnTypes } = await database.pg.query<{
+		table_name: string
+		column_name: string
+		data_type: string
+	}>(
+		`SELECT table_name, column_name, data_type FROM information_schema.columns
+		WHERE table_schema = 'public'`,
+	)
+	for (const column of getAccountD1UserColumnCoverage()) {
+		const [table, name] = column.split('.') as [string, string]
+		const type = columnTypes.find(
+			(row) => row.table_name === table && row.column_name === name,
+		)?.data_type
+		const value = type === 'bigint' ? subject.id : subject.stableUserId
+		const { rows } = await database.pg.query<{ count: number }>(
+			`SELECT COUNT(*)::int AS count FROM ${table} WHERE ${name} = $1`,
+			[value],
 		)
-		.all() as Array<{ name: string }>
-	for (const table of tables) {
-		const columns = db
-			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
-			.all() as Array<{ name: string }>
-		for (const column of columns) {
-			if (column.name === 'user_id' || column.name.endsWith('_user_id')) {
-				liveUserColumns.add(`${table.name}.${column.name}`)
-			}
-		}
+		expect({ column, count: rows[0]!.count }).toEqual({ column, count: 0 })
 	}
-	const coveredColumns = getAccountD1UserColumnCoverage()
-	for (const table of retiredTables) {
-		expect(liveUserColumns.has(`${table}.user_id`)).toBe(false)
-	}
-	const missing = [...liveUserColumns].filter(
-		(column) => !coveredColumns.has(column),
+})
+
+test('kody_subject_reader sees exactly the export inventory rows and cannot write', async () => {
+	await using database = await createSubjectTestDb()
+	const reader = database.as('kody_subject_reader')
+	const ids = async (table: string) =>
+		(
+			await reader
+				.prepare(`SELECT id FROM ${table} ORDER BY id`)
+				.all<{ id: string }>()
+		).results.map((row) => row.id)
+
+	// Grants the subject made are part of their export; others' ledgers are not.
+	expect(await ids('credit_ledger_entries')).toEqual(['cl-granted', 'cl-own'])
+	// Listing-owner export excludes other users' ratings on the listing.
+	expect(await ids('community_ratings')).toEqual(['rt-subject-on-other'])
+	expect(await ids('community_listings')).toEqual(['lst-subject'])
+	// Reviewer metadata is deletion-only: the reviewed feedback is not exported.
+	expect(await ids('platform_feedback')).toEqual([])
+	expect(await ids('passkeys')).toEqual(['pk-subject'])
+	expect(
+		await reader.prepare(`SELECT stable_user_id FROM users`).all(),
+	).toEqual(
+		expect.objectContaining({ results: [{ stable_user_id: 'subject-s' }] }),
 	)
-	const stale = [...coveredColumns].filter(
-		(column) => !liveUserColumns.has(column),
-	)
-	expect(missing).toEqual([])
-	expect(stale).toEqual([])
+	await expect(
+		reader.prepare(`DELETE FROM passkeys WHERE id = 'pk-subject'`).run(),
+	).rejects.toThrow('read-only transaction')
+	expect(
+		await database.rows(`SELECT COUNT(*)::int AS count FROM passkeys`),
+	).toEqual([{ count: 2 }])
 })

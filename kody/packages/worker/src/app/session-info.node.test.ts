@@ -5,7 +5,7 @@ import {
 	type AuthSession,
 } from '#app/auth-session.ts'
 import { loadSessionInfo } from '#app/session-info.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -17,56 +17,16 @@ test('loadSessionInfo signs out a deleting account and clears the session cookie
 		rememberMe: false,
 	}
 	const cookie = await createAuthCookie(session, false)
+	await using store = await createTestDb()
+	await store.pg.query(
+		`INSERT INTO users (id, email, username, password_hash, stable_user_id, deleting_at)
+		 VALUES (7, 'deleting@example.com', 'deleting-user', 'unused', $1, '2026-08-31 15:00:00')`,
+		[session.stableUserId],
+	)
 	const env = {
 		COOKIE_SECRET: testCookieSecret,
-		APP_DB: {
-			prepare(query: string) {
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				const statement = {
-					query,
-					bind() {
-						return statement
-					},
-					async all() {
-						if (
-							normalizedQuery.startsWith('select') &&
-							normalizedQuery.includes('from "users"')
-						) {
-							return {
-								results: [
-									{
-										id: 7,
-										email: 'deleting@example.com',
-										username: 'deleting-user',
-										stable_user_id: 'a'.repeat(64),
-										deleting_at: '2026-08-31 15:00:00',
-									},
-								],
-								meta: { changes: 0 },
-							}
-						}
-						if (normalizedQuery.includes('from user_roles ur')) {
-							return { results: [], meta: { changes: 0 } }
-						}
-						return { results: [], meta: { changes: 0 } }
-					},
-					async first() {
-						return null
-					},
-					async run() {
-						return { meta: { changes: 0 } }
-					},
-				}
-				return statement
-			},
-			async batch(statements: Array<{ query?: string }>) {
-				return await executePreparedD1Batch(statements)
-			},
-			async exec() {
-				return
-			},
-		} as unknown as D1Database,
-	} as Env
+		APP_DB: store.forUser(session.stableUserId).db,
+	} as unknown as Env
 
 	const loaded = await loadSessionInfo(
 		new Request('https://example.com/', { headers: { Cookie: cookie } }),

@@ -97,7 +97,11 @@ export async function upsertUsageCampaign(input: {
 				entered_at = excluded.entered_at,
 				send_count = CASE
 					WHEN excluded.state = user_usage_campaigns.state
-						THEN MAX(user_usage_campaigns.send_count, excluded.send_count)
+						THEN CASE
+							WHEN excluded.send_count > user_usage_campaigns.send_count
+								THEN excluded.send_count
+							ELSE user_usage_campaigns.send_count
+						END
 					ELSE excluded.send_count
 				END,
 				last_sent_at = CASE
@@ -116,14 +120,16 @@ export async function upsertUsageCampaign(input: {
 					WHEN user_usage_campaigns.origin = 'event' THEN 'event'
 					ELSE excluded.origin
 				END,
-				cooling_terminal = MAX(
-					user_usage_campaigns.cooling_terminal,
-					excluded.cooling_terminal
-				),
-				ever_activated = MAX(
-					user_usage_campaigns.ever_activated,
-					excluded.ever_activated
-				),
+				cooling_terminal = CASE
+					WHEN excluded.cooling_terminal > user_usage_campaigns.cooling_terminal
+						THEN excluded.cooling_terminal
+					ELSE user_usage_campaigns.cooling_terminal
+				END,
+				ever_activated = CASE
+					WHEN excluded.ever_activated > user_usage_campaigns.ever_activated
+						THEN excluded.ever_activated
+					ELSE user_usage_campaigns.ever_activated
+				END,
 				first_activated_at = COALESCE(
 					user_usage_campaigns.first_activated_at,
 					excluded.first_activated_at
@@ -166,9 +172,10 @@ export async function claimUsageCampaignSend(input: {
 }): Promise<boolean> {
 	const result = await input.db
 		.prepare(
-			`INSERT OR IGNORE INTO user_usage_campaign_sends (
+			`INSERT INTO user_usage_campaign_sends (
 				user_id, state, template, send_index, sent_at
-			) VALUES (?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT DO NOTHING`,
 		)
 		.bind(
 			input.userId,

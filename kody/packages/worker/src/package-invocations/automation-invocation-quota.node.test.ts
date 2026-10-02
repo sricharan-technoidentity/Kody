@@ -1,3 +1,4 @@
+import { DeleteItemCommand } from '@aws-sdk/client-dynamodb'
 import { expect, test, vi } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { planLimits } from '#universal/plans.ts'
@@ -251,9 +252,15 @@ test('keyed automation quota denial releases the claim so a later retry can succ
 	).toBeUndefined()
 
 	// initialize() is insert-once; drop the counter so a retry can consume.
-	const userRows = meter.metersByUser.get(token.userId)
-	expect(userRows).toBeDefined()
-	userRows?.delete(`${automationInvocationsPerDayResource}\0${day}`)
+	await meter.dynamo.send(
+		new DeleteItemCommand({
+			TableName: meter.tableName,
+			Key: {
+				pk: { S: token.userId },
+				sk: { S: `${automationInvocationsPerDayResource}#${day}` },
+			},
+		}),
+	)
 	await meter.seed({
 		userId: token.userId,
 		resource: automationInvocationsPerDayResource,

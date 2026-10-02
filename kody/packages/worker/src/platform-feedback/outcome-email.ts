@@ -1,6 +1,7 @@
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
 import { buildPlatformFeedbackOutcomeEmail } from '#app/email/messages.ts'
 import { resolveTransactionalEmailConfig } from '#app/email/sender-config.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { normalizeStableUserId } from '#worker/user-id.ts'
 import {
 	platformFeedbackOutcomeStatuses,
@@ -42,7 +43,7 @@ type SubmitterMailTarget = {
 }
 
 async function readSubmitterMailTarget(input: {
-	db: D1Database
+	db: Pick<SqlDatabase, 'prepare'>
 	stableUserId: string
 }): Promise<SubmitterMailTarget | null> {
 	const stableUserId = normalizeStableUserId(input.stableUserId)

@@ -180,20 +180,24 @@ function placeholders(values: ReadonlyArray<unknown>) {
 	return values.map(() => '?').join(', ')
 }
 
-async function selectIds(input: {
+/** A row's primary key values, in `keyColumns` order. */
+type RowKey = ReadonlyArray<IdValue>
+
+async function selectKeys(input: {
 	db: D1Database
 	sql: string
 	bindings: ReadonlyArray<string | number>
-	column?: string
-}): Promise<Array<IdValue>> {
-	const column = input.column ?? 'id'
+	keyColumns: ReadonlyArray<string>
+}): Promise<Array<RowKey>> {
 	const { results } = await runD1WithRetry(() =>
 		input.db
 			.prepare(input.sql)
 			.bind(...input.bindings)
 			.all<Record<string, unknown>>(),
 	)
-	return (results ?? []).map((row) => row[column] as IdValue)
+	return (results ?? []).map((row) =>
+		input.keyColumns.map((column) => row[column] as IdValue),
+	)
 }
 
 /**
@@ -201,45 +205,53 @@ async function selectIds(input: {
  * `deleted`) is what callers should feed into hasMore decisions: a full batch
  * that deletes fewer rows (racing writers) must not mark a table drained.
  */
-async function selectAndDeleteByIds(input: {
+async function selectAndDeleteByKeys(input: {
 	db: D1Database
 	sql: string
 	bindings: ReadonlyArray<string | number>
-	column?: string
 	table: string
-	idColumn: string
+	keyColumns: ReadonlyArray<string>
 }): Promise<{ selected: number; deleted: number }> {
-	const ids = await selectIds(input)
-	const deleted = await deleteByIds({
+	const keys = await selectKeys(input)
+	const deleted = await deleteByKeys({
 		db: input.db,
 		table: input.table,
-		idColumn: input.idColumn,
-		ids,
+		keyColumns: input.keyColumns,
+		keys,
 	})
-	return { selected: ids.length, deleted }
+	return { selected: keys.length, deleted }
 }
 
-async function deleteByIds(input: {
+/**
+ * Deletes rows by primary key, single or composite (`(a, b) IN ((?, ?), …)`
+ * row values work on SQLite and PostgreSQL alike), in chunks that stay
+ * within the bind limit.
+ */
+async function deleteByKeys(input: {
 	db: D1Database
 	table: string
-	idColumn: string
-	ids: ReadonlyArray<IdValue>
+	keyColumns: ReadonlyArray<string>
+	keys: ReadonlyArray<RowKey>
 }) {
-	if (input.ids.length === 0) return 0
+	if (input.keys.length === 0) return 0
+	const composite = input.keyColumns.length > 1
+	const target = composite
+		? `(${input.keyColumns.join(', ')})`
+		: input.keyColumns[0]
+	const tuple = composite ? `(${placeholders(input.keyColumns)})` : '?'
+	const rowsPerChunk = Math.floor(
+		retentionDeleteIdsMaxParameters / input.keyColumns.length,
+	)
 	let deleted = 0
-	for (
-		let index = 0;
-		index < input.ids.length;
-		index += retentionDeleteIdsMaxParameters
-	) {
-		const ids = input.ids.slice(index, index + retentionDeleteIdsMaxParameters)
+	for (let index = 0; index < input.keys.length; index += rowsPerChunk) {
+		const chunk = input.keys.slice(index, index + rowsPerChunk)
 		const result = await runD1WithRetry(() =>
 			input.db
 				.prepare(
 					`DELETE FROM ${input.table}
-				WHERE ${input.idColumn} IN (${placeholders(ids)})`,
+				WHERE ${target} IN (${chunk.map(() => tuple).join(', ')})`,
 				)
-				.bind(...ids)
+				.bind(...chunk.flat())
 				.run(),
 		)
 		deleted += result.meta.changes ?? 0
@@ -290,22 +302,21 @@ export async function pruneMemorySuppressionsForRetention(input: {
 }) {
 	const now = input.now ?? new Date()
 	const cutoff = cutoffIso(now, memorySuppressionRetentionDays)
-	return selectAndDeleteByIds({
+	return selectAndDeleteByKeys({
 		db: input.db,
-		column: 'rowid',
 		bindings: [
 			now.toISOString(),
 			cutoff,
 			input.batchSize ?? retentionDefaultBatchSize,
 		],
-		sql: `SELECT rowid
+		sql: `SELECT user_id, conversation_id, memory_id
 			FROM mcp_memory_conversation_suppressions
 			WHERE expires_at <= ?
 				AND last_seen_at < ?
-			ORDER BY last_seen_at ASC, rowid ASC
+			ORDER BY last_seen_at ASC, user_id ASC, conversation_id ASC, memory_id ASC
 			LIMIT ?`,
 		table: 'mcp_memory_conversation_suppressions',
-		idColumn: 'rowid',
+		keyColumns: ['user_id', 'conversation_id', 'memory_id'],
 	})
 }
 
@@ -318,16 +329,19 @@ export async function prunePlatformFeedbackForRetention(input: {
 		input.now ?? new Date(),
 		platformFeedbackRetentionDays,
 	)
-	const ids = await selectIds({
-		db: input.db,
-		bindings: [cutoff, input.batchSize ?? retentionDefaultBatchSize],
-		sql: `SELECT id
+	const ids = (
+		await selectKeys({
+			db: input.db,
+			keyColumns: ['id'],
+			bindings: [cutoff, input.batchSize ?? retentionDefaultBatchSize],
+			sql: `SELECT id
 			FROM platform_feedback
 			WHERE status IN ('resolved', 'dismissed')
 				AND updated_at < ?
 			ORDER BY updated_at ASC, id ASC
 			LIMIT ?`,
-	})
+		})
+	).map(([id]) => id)
 	let deleted = 0
 	const chunkSize = retentionDeleteIdsMaxParameters - 1
 	for (let index = 0; index < ids.length; index += chunkSize) {
@@ -458,17 +472,16 @@ export async function pruneUsageRollupsForRetention(input: {
 		input.now ?? new Date(),
 		usageRollupRetentionMonths,
 	)
-	return selectAndDeleteByIds({
+	return selectAndDeleteByKeys({
 		db: input.db,
-		column: 'rowid',
 		bindings: [oldestKeptMonth, input.batchSize ?? retentionDefaultBatchSize],
-		sql: `SELECT rowid
+		sql: `SELECT user_id, metric, month
 			FROM usage_rollups
 			WHERE month < ?
-			ORDER BY month ASC, rowid ASC
+			ORDER BY month ASC, user_id ASC, metric ASC
 			LIMIT ?`,
 		table: 'usage_rollups',
-		idColumn: 'rowid',
+		keyColumns: ['user_id', 'metric', 'month'],
 	})
 }
 
@@ -481,17 +494,16 @@ export async function pruneFeatureFlagExposuresForRetention(input: {
 		input.now ?? new Date(),
 		featureFlagExposureRetentionDays,
 	).slice(0, 'YYYY-MM-DD'.length)
-	return selectAndDeleteByIds({
+	return selectAndDeleteByKeys({
 		db: input.db,
-		column: 'rowid',
 		bindings: [cutoffDay, input.batchSize ?? retentionDefaultBatchSize],
-		sql: `SELECT rowid
+		sql: `SELECT flag_key, user_id, day, enabled, source
 			FROM feature_flag_exposure_rollups
 			WHERE day < ?
-			ORDER BY day ASC, rowid ASC
+			ORDER BY day ASC, flag_key ASC, user_id ASC, enabled ASC, source ASC
 			LIMIT ?`,
 		table: 'feature_flag_exposure_rollups',
-		idColumn: 'rowid',
+		keyColumns: ['flag_key', 'user_id', 'day', 'enabled', 'source'],
 	})
 }
 
@@ -501,7 +513,7 @@ export async function pruneAuditEventsForRetention(input: {
 	batchSize?: number
 }) {
 	const cutoff = cutoffIso(input.now ?? new Date(), auditEventRetentionDays)
-	return selectAndDeleteByIds({
+	return selectAndDeleteByKeys({
 		db: input.db,
 		bindings: [cutoff, input.batchSize ?? retentionDefaultBatchSize],
 		sql: `SELECT id
@@ -510,7 +522,7 @@ export async function pruneAuditEventsForRetention(input: {
 			ORDER BY timestamp ASC, id ASC
 			LIMIT ?`,
 		table: 'audit_events',
-		idColumn: 'id',
+		keyColumns: ['id'],
 	})
 }
 
@@ -523,9 +535,8 @@ export async function pruneStripeWebhookEventsForRetention(input: {
 		input.now ?? new Date(),
 		stripeWebhookEventRetentionDays,
 	)
-	return selectAndDeleteByIds({
+	return selectAndDeleteByKeys({
 		db: input.db,
-		column: 'event_id',
 		bindings: [cutoff, input.batchSize ?? retentionDefaultBatchSize],
 		sql: `SELECT event_id
 			FROM stripe_webhook_events
@@ -533,7 +544,7 @@ export async function pruneStripeWebhookEventsForRetention(input: {
 			ORDER BY processed_at ASC, event_id ASC
 			LIMIT ?`,
 		table: 'stripe_webhook_events',
-		idColumn: 'event_id',
+		keyColumns: ['event_id'],
 	})
 }
 
@@ -546,17 +557,16 @@ export async function pruneAgentPackageConversationUsesForRetention(input: {
 		input.now ?? new Date(),
 		agentPackageConversationUseRetentionDays,
 	)
-	return selectAndDeleteByIds({
+	return selectAndDeleteByKeys({
 		db: input.db,
-		column: 'rowid',
 		bindings: [cutoff, input.batchSize ?? retentionDefaultBatchSize],
-		sql: `SELECT rowid
+		sql: `SELECT user_id, package_id, conversation_id
 			FROM agent_package_conversation_uses
 			WHERE last_used_at < ?
-			ORDER BY last_used_at ASC, rowid ASC
+			ORDER BY last_used_at ASC, user_id ASC, package_id ASC, conversation_id ASC
 			LIMIT ?`,
 		table: 'agent_package_conversation_uses',
-		idColumn: 'rowid',
+		keyColumns: ['user_id', 'package_id', 'conversation_id'],
 	})
 }
 

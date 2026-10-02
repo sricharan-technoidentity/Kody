@@ -1,9 +1,9 @@
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
 import { buildPackageShareInviteEmail } from '#app/email/messages.ts'
 import { resolveTransactionalEmailConfig } from '#app/email/sender-config.ts'
-import { findPublicUserIdentityByStableUserId } from '#worker/identity/user-lookup.ts'
 import {
 	buildPackageShareAcceptPath,
+	findSharePeer,
 	hydratePackageShareGrantView,
 	type PackageShareGrantRow,
 } from './share-grants.ts'
@@ -24,12 +24,8 @@ export async function sendPackageShareInviteEmail(input: {
 	const deliveryEmail =
 		view?.inviteeEmail ??
 		(input.grant.granteeUserId
-			? ((
-					await findPublicUserIdentityByStableUserId({
-						db: input.env.APP_DB,
-						userId: input.grant.granteeUserId,
-					})
-				)?.email ?? null)
+			? ((await findSharePeer(input.env.APP_DB, input.grant.granteeUserId))
+					?.email ?? null)
 			: null)
 	if (!emailConfig || !view || !deliveryEmail) return { sent: false }
 	const acceptPath = buildPackageShareAcceptPath({

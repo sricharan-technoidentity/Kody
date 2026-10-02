@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { generateTOTP, getTOTPAuthUri, verifyTOTP } from '@epic-web/totp'
 
 /**
@@ -25,7 +26,7 @@ function getTwoFactorTarget(userId: number) {
 }
 
 export async function findTwoFactorVerification(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 	type: TwoFactorVerificationType,
 ) {
@@ -40,7 +41,7 @@ export async function findTwoFactorVerification(
 		.first<VerificationRow>()
 }
 
-export async function isTwoFactorEnabled(db: D1Database, userId: number) {
+export async function isTwoFactorEnabled(db: SqlDatabase, userId: number) {
 	const verification = await findTwoFactorVerification(
 		db,
 		userId,
@@ -55,7 +56,7 @@ export async function isTwoFactorEnabled(db: D1Database, userId: number) {
  * `confirmTwoFactorSetup`, so abandoning it never locks the user out.
  */
 export async function createTwoFactorSetup(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	accountName: string
 	issuer: string
@@ -73,7 +74,7 @@ export async function createTwoFactorSetup(input: {
 				period = excluded.period,
 				char_set = excluded.char_set,
 				expires_at = NULL,
-				created_at = CURRENT_TIMESTAMP`,
+				created_at = excluded.created_at`,
 		)
 		.bind(
 			twoFactorSetupVerificationType,
@@ -98,7 +99,7 @@ export async function createTwoFactorSetup(input: {
 }
 
 export async function verifyTwoFactorCode(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	code: string
 	type: TwoFactorVerificationType
@@ -132,7 +133,7 @@ export async function verifyTwoFactorCode(input: {
  * that a concurrent duplicate confirm can never delete the active factor
  * without promoting a replacement.
  */
-export async function confirmTwoFactorSetup(db: D1Database, userId: number) {
+export async function confirmTwoFactorSetup(db: SqlDatabase, userId: number) {
 	const target = getTwoFactorTarget(userId)
 	const [, promotion] = await db.batch([
 		db
@@ -157,14 +158,14 @@ export async function confirmTwoFactorSetup(db: D1Database, userId: number) {
 	return (promotion?.meta.changes ?? 0) > 0
 }
 
-export async function cancelTwoFactorSetup(db: D1Database, userId: number) {
+export async function cancelTwoFactorSetup(db: SqlDatabase, userId: number) {
 	await db
 		.prepare(`DELETE FROM verifications WHERE target = ? AND type = ?`)
 		.bind(getTwoFactorTarget(userId), twoFactorSetupVerificationType)
 		.run()
 }
 
-export async function disableTwoFactor(db: D1Database, userId: number) {
+export async function disableTwoFactor(db: SqlDatabase, userId: number) {
 	// Also drop any pending setup so a stale scanned secret can't be
 	// re-activated later without going through the full setup flow.
 	const result = await db

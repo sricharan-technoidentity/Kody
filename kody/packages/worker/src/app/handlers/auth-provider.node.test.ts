@@ -1,4 +1,3 @@
-import { type DatabaseSync } from 'node:sqlite'
 import { HttpResponse, http } from 'msw'
 import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest'
 import { createAuthCookie, setAuthSessionSecret } from '#app/auth-session.ts'
@@ -21,7 +20,6 @@ const {
 } = await import('#app/handlers/auth-provider.ts')
 import { createMswNodeServer } from '#worker/test-support/msw-node-server.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
 import {
 	createPasswordHash,
 	verifyPassword,
@@ -60,7 +58,7 @@ afterAll(() => {
 })
 
 test('providers api lists only configured providers', async () => {
-	const { db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const allEnabled = await runHandler(
 		createAuthProvidersApiHandler(createAppEnv(db)),
 		new Request('http://example.com/auth/providers.json'),
@@ -97,7 +95,7 @@ test('providers api lists only configured providers', async () => {
 })
 
 test('github sign-in creates a verified account, then signs it back in', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db)
 
 	msw.use(
@@ -173,26 +171,24 @@ test('github sign-in creates a verified account, then signs it back in', async (
 		),
 	).toBe(true)
 
-	const user = sqlite
-		.prepare(`SELECT * FROM users WHERE email = ?`)
-		.get('octo@example.com') as Record<string, unknown>
+	const user = (await db.sql.get(
+		`SELECT * FROM users WHERE email = ?`,
+		'octo@example.com',
+	)) as Record<string, unknown>
 	expect(user).toBeTruthy()
 	expect(user.username).toBe('octo-cat')
 	// Provider-verified email skips the verification-email flow.
 	expect(user.email_verified_at).toBeTruthy()
-	const roleCount = sqlite
-		.prepare(
-			`SELECT COUNT(*) AS count FROM user_roles
+	const roleCount = (await db.sql.get(
+		`SELECT COUNT(*) AS count FROM user_roles
 			 JOIN roles ON roles.id = user_roles.role_id
 			 WHERE user_roles.user_id = ? AND roles.name = 'user'`,
-		)
-		.get(user.id as number) as { count: number }
+		user.id as number,
+	)) as { count: number }
 	expect(roleCount.count).toBe(1)
-	const connection = sqlite
-		.prepare(
-			`SELECT * FROM oauth_connections WHERE provider_name = 'github' AND provider_id = '99001'`,
-		)
-		.get() as Record<string, unknown>
+	const connection = (await db.sql.get(
+		`SELECT * FROM oauth_connections WHERE provider_name = 'github' AND provider_id = '99001'`,
+	)) as Record<string, unknown>
 	expect(connection.user_id).toBe(user.id)
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
 		expect.objectContaining({
@@ -234,9 +230,9 @@ test('github sign-in creates a verified account, then signs it back in', async (
 			.getSetCookie()
 			.some((cookie) => cookie.startsWith('kody_session=')),
 	).toBe(true)
-	const userCount = sqlite
-		.prepare(`SELECT COUNT(*) AS count FROM users`)
-		.get() as { count: number }
+	const userCount = (await db.sql.get(
+		`SELECT COUNT(*) AS count FROM users`,
+	)) as { count: number }
 	expect(userCount.count).toBe(1)
 	// The first callback signs the user up and logs them in; the second
 	// callback is a pure login. Nothing else is audited.
@@ -256,15 +252,15 @@ test('github sign-in creates a verified account, then signs it back in', async (
 })
 
 test('google sign-in links a matching verified email to the existing account', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db)
-	await seedUser(sqlite, {
+	await seedUser(db, {
 		id: 7,
 		email: 'existing@example.com',
 		username: 'existing-user',
 		emailVerified: true,
 	})
-	sqlite.exec(`
+	await db.sql.exec(`
 		INSERT INTO verifications (
 			type, target, secret, algorithm, digits, period, char_set
 		) VALUES ('2fa', '7', 'KEEPSECRET', 'SHA-1', 6, 30, '0123456789');
@@ -324,47 +320,43 @@ test('google sign-in links a matching verified email to the existing account', a
 			.some((cookie) => cookie.startsWith('kody_verify=')),
 	).toBe(true)
 
-	const connection = sqlite
-		.prepare(
-			`SELECT * FROM oauth_connections WHERE provider_name = 'google' AND provider_id = 'google-sub-123'`,
-		)
-		.get() as Record<string, unknown>
+	const connection = (await db.sql.get(
+		`SELECT * FROM oauth_connections WHERE provider_name = 'google' AND provider_id = 'google-sub-123'`,
+	)) as Record<string, unknown>
 	expect(connection.user_id).toBe(7)
 	// The provider verified the exact account email, so the account is
 	// treated as email-verified.
-	const user = sqlite
-		.prepare(`SELECT password_hash, email_verified_at FROM users WHERE id = 7`)
-		.get() as { password_hash: string; email_verified_at: string | null }
+	const user = (await db.sql.get(
+		`SELECT password_hash, email_verified_at FROM users WHERE id = 7`,
+	)) as { password_hash: string; email_verified_at: string | null }
 	expect(user.email_verified_at).toBeTruthy()
 	expect(await verifyPassword('test-password', user.password_hash)).toBe(true)
 	expect(
-		sqlite
-			.prepare(`SELECT COUNT(*) AS count FROM verifications WHERE target = '7'`)
-			.get(),
+		await db.sql.get(
+			`SELECT COUNT(*) AS count FROM verifications WHERE target = '7'`,
+		),
 	).toEqual({ count: 1 })
 	expect(
-		sqlite
-			.prepare(`SELECT COUNT(*) AS count FROM passkeys WHERE user_id = 7`)
-			.get(),
+		await db.sql.get(
+			`SELECT COUNT(*) AS count FROM passkeys WHERE user_id = 7`,
+		),
 	).toEqual({ count: 1 })
 	expect(
-		sqlite
-			.prepare(
-				`SELECT COUNT(*) AS count FROM oauth_connections WHERE user_id = 7`,
-			)
-			.get(),
+		await db.sql.get(
+			`SELECT COUNT(*) AS count FROM oauth_connections WHERE user_id = 7`,
+		),
 	).toEqual({ count: 2 })
 	expect(auditEventSummaries()).not.toContain(
 		'social_link_reclaimed_unverified_account:success',
 	)
-	const userCount = sqlite
-		.prepare(`SELECT COUNT(*) AS count FROM users`)
-		.get() as { count: number }
+	const userCount = (await db.sql.get(
+		`SELECT COUNT(*) AS count FROM users`,
+	)) as { count: number }
 	expect(userCount.count).toBe(1)
 })
 
 test('google sign-in reclaims an unverified password account matching the provider email', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const revokedGrantIds = new Array<string>()
 	const env = createAppEnv(db, {
 		OAUTH_PROVIDER: {
@@ -378,13 +370,13 @@ test('google sign-in reclaims an unverified password account matching the provid
 			},
 		},
 	})
-	await seedUser(sqlite, {
+	await seedUser(db, {
 		id: 8,
 		email: 'squat@example.com',
 		username: 'squatter',
 		emailVerified: false,
 	})
-	sqlite.exec(`
+	await db.sql.exec(`
 		INSERT INTO verifications (
 			type, target, secret, algorithm, digits, period, char_set
 		) VALUES ('2fa', '8', 'ATTACKERSECRET', 'SHA-1', 6, 30, '0123456789');
@@ -436,30 +428,28 @@ test('google sign-in reclaims an unverified password account matching the provid
 			.some((cookie) => cookie.startsWith('kody_session=')),
 	).toBe(true)
 
-	const user = sqlite
-		.prepare(`SELECT password_hash, email_verified_at FROM users WHERE id = 8`)
-		.get() as { password_hash: string; email_verified_at: string | null }
+	const user = (await db.sql.get(
+		`SELECT password_hash, email_verified_at FROM users WHERE id = 8`,
+	)) as { password_hash: string; email_verified_at: string | null }
 	expect(user.email_verified_at).toBeTruthy()
 	expect(user.password_hash).toBe(unusablePasswordHash.reclaimedUnverified)
 	expect(await verifyPassword('test-password', user.password_hash)).toBe(false)
 	expect(
-		sqlite
-			.prepare(`SELECT COUNT(*) AS count FROM verifications WHERE target = '8'`)
-			.get(),
+		await db.sql.get(
+			`SELECT COUNT(*) AS count FROM verifications WHERE target = '8'`,
+		),
 	).toEqual({ count: 0 })
 	expect(
-		sqlite
-			.prepare(`SELECT COUNT(*) AS count FROM passkeys WHERE user_id = 8`)
-			.get(),
+		await db.sql.get(
+			`SELECT COUNT(*) AS count FROM passkeys WHERE user_id = 8`,
+		),
 	).toEqual({ count: 0 })
 	expect(
-		sqlite.prepare(`SELECT COUNT(*) AS count FROM password_resets`).get(),
+		await db.sql.get(`SELECT COUNT(*) AS count FROM password_resets`),
 	).toEqual({ count: 0 })
-	const connections = sqlite
-		.prepare(
-			`SELECT provider_name, provider_id FROM oauth_connections WHERE user_id = 8`,
-		)
-		.all() as Array<{ provider_name: string; provider_id: string }>
+	const connections = (await db.sql.all(
+		`SELECT provider_name, provider_id FROM oauth_connections WHERE user_id = 8`,
+	)) as Array<{ provider_name: string; provider_id: string }>
 	expect(connections).toEqual([
 		{ provider_name: 'google', provider_id: 'google-victim-sub' },
 	])
@@ -481,7 +471,7 @@ test('google sign-in reclaims an unverified password account matching the provid
 })
 
 test('discord sign-in creates a verified account and assigns the guild role', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db, {
 		DISCORD_BOT_TOKEN: 'bot-token-test',
 		DISCORD_GUILD_ID: '111111111111111111',
@@ -559,17 +549,16 @@ test('discord sign-in creates a verified account and assigns the guild role', as
 	expect(callbackResponse.headers.get('Location')).toBe(
 		'/onboarding?accountCreated=1',
 	)
-	const user = sqlite
-		.prepare(`SELECT * FROM users WHERE email = ?`)
-		.get('koala-fan@example.com') as Record<string, unknown>
+	const user = (await db.sql.get(
+		`SELECT * FROM users WHERE email = ?`,
+		'koala-fan@example.com',
+	)) as Record<string, unknown>
 	expect(user).toBeTruthy()
 	expect(user.username).toBe('koala-fan')
 	expect(user.email_verified_at).toBeTruthy()
-	const connection = sqlite
-		.prepare(
-			`SELECT * FROM oauth_connections WHERE provider_name = 'discord' AND provider_id = '333333333333333333'`,
-		)
-		.get() as Record<string, unknown>
+	const connection = (await db.sql.get(
+		`SELECT * FROM oauth_connections WHERE provider_name = 'discord' AND provider_id = '333333333333333333'`,
+	)) as Record<string, unknown>
 	expect(connection.user_id).toBe(user.id)
 	expect(guildJoins).toEqual([
 		{
@@ -588,7 +577,20 @@ test('discord sign-in creates a verified account and assigns the guild role', as
 		.find((pair) => pair.startsWith('kody_session='))
 	expect(sessionCookiePair).toBeTruthy()
 
-	const connectionsHandler = createAccountConnectionsApiHandler(env)
+	// Account pages run on the signed-in account's writer.
+	const connectionsHandler = createAccountConnectionsApiHandler(
+		createAppEnv(
+			db,
+			{
+				DISCORD_BOT_TOKEN: 'bot-token-test',
+				DISCORD_GUILD_ID: '111111111111111111',
+				DISCORD_MEMBER_ROLE_ID: '222222222222222222',
+				DISCORD_STANDARD_ROLE_ID: '444444444444444444',
+				DISCORD_PRO_ROLE_ID: '555555555555555555',
+			},
+			{ sessionUserId: String(user.stable_user_id) },
+		),
+	)
 	const syncResponse = await runHandler(
 		connectionsHandler,
 		new Request('http://example.com/account/connections.json', {
@@ -612,10 +614,11 @@ test('discord sign-in creates a verified account and assigns the guild role', as
 	expect(rolePuts).toEqual(['222222222222222222', '222222222222222222'])
 	expect(roleDeletes).toHaveLength(4)
 
-	const passwordHash = await createPasswordHash('test-password')
-	sqlite
-		.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`)
-		.run(passwordHash, user.id)
+	await db.sql.all(
+		`UPDATE users SET password_hash = ? WHERE id = ?`,
+		await createPasswordHash('test-password'),
+		user.id,
+	)
 	const disconnectResponse = await runHandler(
 		connectionsHandler,
 		new Request('http://example.com/account/connections.json', {
@@ -643,7 +646,7 @@ test('discord sign-in creates a verified account and assigns the guild role', as
 })
 
 test('discord sign-in without a verified email fails with a helpful error', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db)
 
 	msw.use(
@@ -677,15 +680,23 @@ test('discord sign-in without a verified email fails with a helpful error', asyn
 	expect(callbackResponse.headers.get('Location')).toBe(
 		'/login?oauthError=no-verified-email',
 	)
-	expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM users`).get()).toEqual({
+	expect(await db.sql.get(`SELECT COUNT(*) AS count FROM users`)).toEqual({
 		count: 0,
 	})
 })
 
 test('signed-in discord connect returns to redirectTo instead of /account', async () => {
-	const { sqlite, db } = createMigratedDb()
-	const env = createAppEnv(db)
-	await seedUser(sqlite, {
+	await using db = await createMigratedDb()
+	const env = createAppEnv(
+		db,
+		{},
+		{
+			sessionUserId: await createStableUserIdFromEmail(
+				'discord-page@example.com',
+			),
+		},
+	)
+	await seedUser(db, {
 		id: 21,
 		email: 'discord-page@example.com',
 		username: 'discord-page',
@@ -755,11 +766,9 @@ test('signed-in discord connect returns to redirectTo instead of /account', asyn
 	expect(linkResponse.headers.get('Location')).toBe(
 		'/discord?oauthLinked=discord',
 	)
-	const connection = sqlite
-		.prepare(
-			`SELECT user_id FROM oauth_connections WHERE provider_name = 'discord'`,
-		)
-		.get() as { user_id: number }
+	const connection = (await db.sql.get(
+		`SELECT user_id FROM oauth_connections WHERE provider_name = 'discord'`,
+	)) as { user_id: number }
 	expect(connection.user_id).toBe(21)
 
 	const relinkStart = await startProviderFlow(
@@ -785,7 +794,7 @@ test('signed-in discord connect returns to redirectTo instead of /account', asyn
 })
 
 test('x sign-in without a shared email fails with a helpful error', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db)
 
 	msw.use(
@@ -816,14 +825,14 @@ test('x sign-in without a shared email fails with a helpful error', async () => 
 	expect(callbackResponse.headers.get('Location')).toBe(
 		'/login?oauthError=no-verified-email',
 	)
-	const userCount = sqlite
-		.prepare(`SELECT COUNT(*) AS count FROM users`)
-		.get() as { count: number }
+	const userCount = (await db.sql.get(
+		`SELECT COUNT(*) AS count FROM users`,
+	)) as { count: number }
 	expect(userCount.count).toBe(0)
 })
 
 test('callback rejects a state mismatch', async () => {
-	const { db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db)
 
 	const start = await startProviderFlow(
@@ -848,7 +857,7 @@ test('callback rejects a state mismatch', async () => {
 })
 
 test('JSON start mode returns the authorize URL for client-side navigation', async () => {
-	const { db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db)
 
 	// The first-party UI fetches the start endpoint (Accept: json) and
@@ -890,7 +899,7 @@ test('JSON start mode returns the authorize URL for client-side navigation', asy
 })
 
 test('JSON start consumes the request body for signed-out and signed-in requests', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db)
 	const signedOutRequest = new Request('http://example.com/auth/github', {
 		method: 'POST',
@@ -913,7 +922,7 @@ test('JSON start consumes the request body for signed-out and signed-in requests
 	// Connect Google / Discord from /account posts the same JSON body while
 	// already signed in. Skipping the read left workerd with an unread body
 	// and killed wrangler mid social-login e2e (workers-sdk#14926).
-	await seedUser(sqlite, {
+	await seedUser(db, {
 		id: 21,
 		email: 'connector@example.com',
 		username: 'connector',
@@ -950,12 +959,15 @@ test('JSON start consumes the request body for signed-out and signed-in requests
 })
 
 test('signed-in users link and disconnect providers from their account', async () => {
-	const { sqlite, db } = createMigratedDb()
-	const env = createAppEnv(db, {
+	await using db = await createMigratedDb()
+	const mockGithub = {
 		GITHUB_CLIENT_ID: 'MOCK_GITHUB_CLIENT_ID',
 		GITHUB_CLIENT_SECRET: 'MOCK_GITHUB_CLIENT_SECRET',
+	}
+	const env = createAppEnv(db, mockGithub, {
+		sessionUserId: await createStableUserIdFromEmail('linker@example.com'),
 	})
-	await seedUser(sqlite, {
+	await seedUser(db, {
 		id: 11,
 		email: 'linker@example.com',
 		username: 'linker',
@@ -991,11 +1003,9 @@ test('signed-in users link and disconnect providers from their account', async (
 	expect(linkResponse.headers.get('Location')).toBe(
 		'/account?oauthLinked=github',
 	)
-	const connection = sqlite
-		.prepare(
-			`SELECT user_id FROM oauth_connections WHERE provider_name = 'github'`,
-		)
-		.get() as { user_id: number }
+	const connection = (await db.sql.get(
+		`SELECT user_id FROM oauth_connections WHERE provider_name = 'github'`,
+	)) as { user_id: number }
 	expect(connection.user_id).toBe(11)
 
 	// Re-linking the same identity is a no-op success.
@@ -1017,7 +1027,7 @@ test('signed-in users link and disconnect providers from their account', async (
 
 	// The same provider identity linked to a different signed-in user is a
 	// conflict surfaced on the account page, never an account switch.
-	await seedUser(sqlite, {
+	await seedUser(db, {
 		id: 12,
 		email: 'other@example.com',
 		username: 'other-user',
@@ -1039,7 +1049,11 @@ test('signed-in users link and disconnect providers from their account', async (
 		'http://example.com/auth/github',
 	)
 	const conflictResponse = await runHandler(
-		callbackHandler,
+		createAuthProviderCallbackHandler(
+			createAppEnv(db, mockGithub, {
+				sessionUserId: await createStableUserIdFromEmail('other@example.com'),
+			}),
+		),
 		new Request(conflictStart.location, {
 			headers: {
 				Cookie: `${conflictStart.stateCookie}; ${otherSessionCookiePair}`,
@@ -1095,12 +1109,12 @@ test('signed-in users link and disconnect providers from their account', async (
 	expect(disconnectPayload.ok).toBe(true)
 	expect(disconnectPayload.connections).toHaveLength(0)
 	expect(
-		sqlite.prepare(`SELECT COUNT(*) AS count FROM oauth_connections`).get(),
+		await db.sql.get(`SELECT COUNT(*) AS count FROM oauth_connections`),
 	).toEqual({ count: 0 })
 })
 
 test('disconnect is refused when the connection is the only sign-in method', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db, {
 		GITHUB_CLIENT_ID: 'MOCK_GITHUB_CLIENT_ID',
 		GITHUB_CLIENT_SECRET: 'MOCK_GITHUB_CLIENT_SECRET',
@@ -1122,8 +1136,20 @@ test('disconnect is refused when the connection is the only sign-in method', asy
 		.map(getCookiePair)
 		.find((pair) => pair.startsWith('kody_session='))
 	expect(sessionCookiePair).toBeTruthy()
+	const created = (await db.sql.get(`SELECT stable_user_id FROM users`)) as {
+		stable_user_id: string
+	}
 
-	const connectionsHandler = createAccountConnectionsApiHandler(env)
+	const connectionsHandler = createAccountConnectionsApiHandler(
+		createAppEnv(
+			db,
+			{
+				GITHUB_CLIENT_ID: 'MOCK_GITHUB_CLIENT_ID',
+				GITHUB_CLIENT_SECRET: 'MOCK_GITHUB_CLIENT_SECRET',
+			},
+			{ sessionUserId: created.stable_user_id },
+		),
+	)
 	const listResponse = await runHandler(
 		connectionsHandler,
 		new Request('http://example.com/account/connections.json', {
@@ -1147,12 +1173,12 @@ test('disconnect is refused when the connection is the only sign-in method', asy
 	)
 	expect(disconnectResponse.status).toBe(400)
 	expect(
-		sqlite.prepare(`SELECT COUNT(*) AS count FROM oauth_connections`).get(),
+		await db.sql.get(`SELECT COUNT(*) AS count FROM oauth_connections`),
 	).toEqual({ count: 1 })
 })
 
 test('MOCK_ client ids run the whole flow in-worker without network access', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	// onUnhandledRequest: 'error' in the shared MSW server means any real
 	// provider call would fail this test.
 	const env = createAppEnv(db, {
@@ -1181,9 +1207,10 @@ test('MOCK_ client ids run the whole flow in-worker without network access', asy
 	expect(callbackResponse.headers.get('Location')).toBe(
 		'/onboarding?accountCreated=1',
 	)
-	const user = sqlite
-		.prepare(`SELECT * FROM users WHERE email = ?`)
-		.get('mock-github-user@example.com') as Record<string, unknown>
+	const user = (await db.sql.get(
+		`SELECT * FROM users WHERE email = ?`,
+		'mock-github-user@example.com',
+	)) as Record<string, unknown>
 	expect(user).toBeTruthy()
 	expect(user.username).toBe('mock-octo')
 })
@@ -1208,8 +1235,8 @@ function mockGithubProfileExchange(email = 'octo@example.com') {
 }
 
 test('OAuth signup is open and existing connections sign in', async () => {
-	const openSignup = createMigratedDb()
-	const openSignupEnv = createAppEnv(openSignup.db)
+	await using openSignup = await createMigratedDb()
+	const openSignupEnv = createAppEnv(openSignup)
 	mockGithubProfileExchange()
 	const openStart = await startProviderFlow(
 		openSignupEnv,
@@ -1229,17 +1256,17 @@ test('OAuth signup is open and existing connections sign in', async () => {
 		'/onboarding?accountCreated=1',
 	)
 	expect(
-		openSignup.sqlite.prepare(`SELECT COUNT(*) AS count FROM users`).get(),
+		await openSignup.sql.get(`SELECT COUNT(*) AS count FROM users`),
 	).toEqual({ count: 1 })
 
-	const existingLogin = createMigratedDb()
-	const existingEnv = createAppEnv(existingLogin.db)
-	await seedUser(existingLogin.sqlite, {
+	await using existingLogin = await createMigratedDb()
+	const existingEnv = createAppEnv(existingLogin)
+	await seedUser(existingLogin, {
 		id: 11,
 		email: 'existing-oauth@example.com',
 		username: 'existing-oauth',
 	})
-	existingLogin.sqlite.exec(`
+	await existingLogin.sql.exec(`
 		INSERT INTO oauth_connections (provider_name, provider_id, user_id, provider_display_name)
 		VALUES ('github', '99001', 11, 'existing-oauth');
 	`)
@@ -1265,13 +1292,13 @@ test('OAuth signup is open and existing connections sign in', async () => {
 			.some((cookie) => cookie.startsWith('kody_session=')),
 	).toBe(true)
 	expect(
-		existingLogin.sqlite.prepare(`SELECT COUNT(*) AS count FROM users`).get(),
+		await existingLogin.sql.get(`SELECT COUNT(*) AS count FROM users`),
 	).toEqual({ count: 1 })
 })
 
 test('OAuth signup persists first-touch UTMs from the start URL through login state', async () => {
 	lifecycleMocks.scheduleUserCreatedEvent.mockClear()
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db)
 	mockGithubProfileExchange('utm-oauth@example.com')
 
@@ -1292,12 +1319,11 @@ test('OAuth signup persists first-touch UTMs from the start URL through login st
 	expect(callbackResponse.headers.get('Location')).toBe(
 		'/onboarding?accountCreated=1',
 	)
-	const user = sqlite
-		.prepare(
-			`SELECT utm_source, utm_medium, utm_campaign, first_touch_landing_path
+	const user = (await db.sql.get(
+		`SELECT utm_source, utm_medium, utm_campaign, first_touch_landing_path
 			 FROM users WHERE email = ?`,
-		)
-		.get('utm-oauth@example.com') as Record<string, unknown>
+		'utm-oauth@example.com',
+	)) as Record<string, unknown>
 	expect(user).toEqual({
 		utm_source: 'youtube',
 		utm_medium: 'video',
@@ -1317,9 +1343,9 @@ test('OAuth signup persists first-touch UTMs from the start URL through login st
 })
 
 test('OAuth signup returns a controlled error when stable_user_id already exists', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const victimEmail = 'victim-oauth@example.com'
-	await seedUser(sqlite, {
+	await seedUser(db, {
 		id: 1,
 		email: 'attacker-oauth@example.com',
 		username: 'attacker-oauth',
@@ -1345,7 +1371,7 @@ test('OAuth signup returns a controlled error when stable_user_id already exists
 	expect(callback.headers.get('Location')).toBe(
 		'/login?oauthError=email-claimed',
 	)
-	expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM users`).get()).toEqual({
+	expect(await db.sql.get(`SELECT COUNT(*) AS count FROM users`)).toEqual({
 		count: 1,
 	})
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
@@ -1359,7 +1385,7 @@ test('OAuth signup returns a controlled error when stable_user_id already exists
 })
 
 test('github signup skips a KV-reserved provider handle', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using db = await createMigratedDb()
 	const env = createAppEnv(db, {
 		BUNDLE_ARTIFACTS_KV: createMemoryKv({
 			[reservedUsernamesKvKey]: JSON.stringify({
@@ -1404,9 +1430,10 @@ test('github signup skips a KV-reserved provider handle', async () => {
 		{ provider: 'github' },
 	)
 	expect(callbackResponse.status).toBe(302)
-	const user = sqlite
-		.prepare(`SELECT username FROM users WHERE email = ?`)
-		.get('octo-reserved@example.com') as { username: string }
+	const user = (await db.sql.get(
+		`SELECT username FROM users WHERE email = ?`,
+		'octo-reserved@example.com',
+	)) as { username: string }
 	expect(user.username).not.toBe('octo-cat')
 	expect(user.username.includes('octocat')).toBe(false)
 	expect(getUsernameValidationError(user.username)).toBeNull()

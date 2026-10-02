@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { normalizeEmail } from '#worker/identity/normalize-email.ts'
 
 /**
@@ -8,7 +9,7 @@ import { normalizeEmail } from '#worker/identity/normalize-email.ts'
  * needing the token pipeline.
  */
 export async function isAccountEmailVerified(input: {
-	db: D1Database
+	db: Pick<SqlDatabase, 'prepare'>
 	email?: string | null
 	stableUserId?: string | null
 }) {
@@ -51,7 +52,7 @@ export const emailVerificationRequiredMessage =
 	'Account email is not verified. Open the verification link sent to your account email, or resend it from /pending-verification or /account.'
 
 export async function assertAccountEmailVerified(input: {
-	db: D1Database
+	db: Pick<SqlDatabase, 'prepare'>
 	email?: string | null
 	stableUserId?: string | null
 }) {

@@ -2,7 +2,9 @@ import {
 	AccountDeletionInProgressError,
 	withAccountWriteLease,
 } from '#worker/account/deletion-state.ts'
-import { stripePlanRefreshDurableObjectName } from '#worker/user-scoped-durable-object-name.ts'
+import { WorkflowNotFoundError } from '@temporalio/client'
+import { taskQueues, workflowIds } from '#worker/temporal/ids.ts'
+import { rescheduleStripeRefresh } from '#worker/temporal/workflows/stripe-plan-refresh.ts'
 
 export const stripePlanRefreshBackstopDelayMs = 60 * 60 * 1000
 
@@ -17,19 +19,21 @@ export async function scheduleStripePlanRefreshBackstop(input: {
 		const activityAt = input.now?.getTime() ?? Date.now()
 		const refreshAt =
 			Math.max(activityAt, Date.now()) + stripePlanRefreshBackstopDelayMs
-		const id = input.env.STRIPE_PLAN_REFRESH.idFromName(
-			stripePlanRefreshDurableObjectName(userId),
-		)
-		const stub = input.env.STRIPE_PLAN_REFRESH.get(id)
 		await withAccountWriteLease({
 			db: input.env.APP_DB,
 			stableUserId: userId,
 			holder: 'stripe_plan_refresh_schedule',
 			env: input.env,
 			write: async () => {
-				await stub.schedule({
-					userId,
-					refreshAt,
+				if (!input.env.TEMPORAL)
+					throw new Error('Missing TEMPORAL binding for Stripe plan refresh.')
+				const client = await input.env.TEMPORAL.client(taskQueues.platform)
+				await client.workflow.signalWithStart('StripePlanRefresh', {
+					workflowId: workflowIds.stripePlanRefresh(userId),
+					taskQueue: taskQueues.platform,
+					args: [{ userId, refreshAt }],
+					signal: rescheduleStripeRefresh,
+					signalArgs: [refreshAt],
 				})
 			},
 		})
@@ -45,10 +49,14 @@ export async function purgeStripePlanRefreshForUser(input: {
 	env: Env
 	userId: string
 }) {
-	const namespace = (input.env as Partial<Env>).STRIPE_PLAN_REFRESH
-	if (!namespace) return { purged: false }
-	const userId = input.userId.trim()
-	const id = namespace.idFromName(stripePlanRefreshDurableObjectName(userId))
-	await namespace.get(id).purgeUser({ userId })
+	if (!input.env.TEMPORAL) return { purged: false }
+	const client = await input.env.TEMPORAL.client(taskQueues.platform)
+	try {
+		await client.workflow
+			.getHandle(workflowIds.stripePlanRefresh(input.userId.trim()))
+			.cancel()
+	} catch (error) {
+		if (!(error instanceof WorkflowNotFoundError)) throw error
+	}
 	return { purged: true }
 }

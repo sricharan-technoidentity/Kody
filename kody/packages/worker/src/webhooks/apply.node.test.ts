@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
@@ -246,7 +247,7 @@ function createEnv(userId: string) {
 		env: {
 			APP_DB: db,
 			APP_BASE_URL: 'https://heykody.dev',
-			SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+			SECRET_KMS: testSecretKms,
 		} as Env,
 		db,
 		userId,

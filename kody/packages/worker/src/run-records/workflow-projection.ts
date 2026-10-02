@@ -1,12 +1,5 @@
-/**
- * Workflow run projections stored in the per-user RunLog Durable Object.
- *
- * Per-user RunLog `workflow_projections` rows (DO identity is the user; no
- * `user_id` column) plus the Cloudflare Workflow binding name so a user with
- * multiple bindings can be projected correctly. This is correctness state for
- * idempotency and concurrent-workflow entitlements; it must never be derived
- * from pruned run-history rows.
- */
+/** Owner-scoped Temporal workflow projections. Serialized reservations enforce concurrency;
+ * Visibility supplies execution status independently of pruned run history. */
 
 import {
 	activeWorkflowStatusValues,
@@ -14,7 +7,7 @@ import {
 } from '#worker/package-runtime/workflow-statuses.ts'
 
 /**
- * Cloudflare Workflow binding names Kody may project. Expand the union when a
+ * Published workflow binding names retained for package compatibility. Expand the union when a
  * second binding ships; resolvers must stay exhaustive.
  */
 export const workflowBindingNames = ['DYNAMIC_CALLABLE_WORKFLOWS'] as const
@@ -85,7 +78,7 @@ export const creatingWorkflowProjectionStatus = 'creating'
 
 /**
  * Stale `creating` reservations older than this are pruned before reserve/count
- * and by retention alarms. Active/running projections are never TTL-pruned.
+ * and filtered on reads. Active/running projections are never TTL-pruned.
  */
 export const workflowProjectionCreatingTtlMs = 10 * 60 * 1000
 

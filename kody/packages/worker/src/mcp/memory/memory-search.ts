@@ -4,16 +4,16 @@ import {
 	getCapabilityVectorIndex,
 	isCapabilitySearchOffline,
 	type EmbedTextFn,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import {
 	CAPABILITY_SEARCH_RRF_K,
 	cosineSimilarity,
 	lexicalScore,
 	reciprocalRankFusion,
 	sortIdsByScore,
-} from '#worker/vectorize/scoring.ts'
-import { userVectorNamespace } from '#worker/vectorize/vector-namespaces.ts'
-import { getRawIdFromPassthroughVectorId } from '#worker/vectorize/vector-ids.ts'
+} from '#worker/search-index/scoring.ts'
+import { userVectorNamespace } from '#worker/search-index/vector-namespaces.ts'
+import { getRawIdFromPassthroughVectorId } from '#worker/search-index/vector-ids.ts'
 import { parseJsonStringArray } from '@kody-internal/shared/json-parsing.ts'
 import { buildMemoryEmbedTextFromRow } from './memory-embed.ts'
 import { type McpMemoryRow, type MemorySearchMatch } from './types.ts'

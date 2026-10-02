@@ -1,4 +1,5 @@
 import { shouldRunEmailVerificationStallAlertCron } from '@kody-internal/shared/jobs/scheduled-lanes.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { joinAppUrl } from '#worker/app-base-url.ts'
 import {
 	emailVerificationStallAfterMinutes,
@@ -34,7 +35,7 @@ type StallScanCursor = {
 }
 
 type EmailVerificationStallAlertEnv = {
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 	APP_BASE_URL?: string
 	BUNDLE_ARTIFACTS_KV?: KVNamespace
 }
@@ -116,7 +117,7 @@ export async function checkEmailVerificationStallsAndNotify(input: {
 }
 
 async function listStalledVerificationPage(input: {
-	db: D1Database
+	db: SqlDatabase
 	cutoff: string
 	scanLimit: number
 	cursor: StallScanCursor | null
@@ -133,7 +134,7 @@ async function listStalledVerificationPage(input: {
 }
 
 async function queryStalledVerificationRows(input: {
-	db: D1Database
+	db: SqlDatabase
 	cutoff: string
 	scanLimit: number
 	cursor: StallScanCursor | null

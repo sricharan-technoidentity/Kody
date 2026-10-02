@@ -1,4 +1,5 @@
 import { toHex } from '@kody-internal/shared/hex.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { normalizeRedirectTo } from '#universal/safe-redirect.ts'
 import { AccountDeletionInProgressError } from '#worker/account/deletion-state.ts'
 
@@ -33,7 +34,7 @@ export function buildEmailVerificationUrl(input: {
 }
 
 export async function insertEmailVerificationToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	now?: Date
 }) {
@@ -68,7 +69,7 @@ export async function discardEmailVerificationToken(
 }
 
 export async function retireOtherEmailVerificationTokens(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 	tokenHash: string,
 ) {
@@ -84,7 +85,7 @@ export async function retireOtherEmailVerificationTokens(
 }
 
 export async function deleteEmailVerificationsForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ) {
 	await db

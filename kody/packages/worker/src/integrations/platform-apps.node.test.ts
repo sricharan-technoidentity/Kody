@@ -1,7 +1,8 @@
-import { DatabaseSync } from 'node:sqlite'
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import {
 	countConnectionsForPlatformApp,
 	deletePlatformOauthApp,
@@ -14,16 +15,22 @@ import {
 	upsertPlatformOauthApp,
 } from './platform-apps.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
+/** Platform OAuth apps are written by the operator (`kody_admin`). */
+async function createHarness() {
+	const database = await createTestDb()
+	const db = createPgDatabase({
+		connection: database.pg,
+		role: 'kody_admin',
+	}) as unknown as D1Database
 	const env = {
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
-	} as Pick<Env, 'SECRET_STORE_KEY'>
-	return { sqlite, db, env }
+		SECRET_KMS: testSecretKms,
+	} as Pick<Env, 'SECRET_KMS'>
+	return {
+		db,
+		env,
+		q: pgQuery(database.pg),
+		[Symbol.asyncDispose]: () => database[Symbol.asyncDispose](),
+	}
 }
 
 const baseGithubApp = {
@@ -40,7 +47,8 @@ const baseGithubApp = {
 }
 
 test('upsert lifecycle encrypts secrets, omits retain fields, null clears, and partial disable preserves data', async () => {
-	const { sqlite, db, env } = createHarness()
+	await using harness = await createHarness()
+	const { db, env, q } = harness
 	await upsertPlatformOauthApp({
 		db,
 		env,
@@ -50,11 +58,10 @@ test('upsert lifecycle encrypts secrets, omits retain fields, null clears, and p
 		},
 	})
 
-	const row = sqlite
-		.prepare(
-			'SELECT client_secret_encrypted FROM platform_oauth_apps WHERE slug = ?',
-		)
-		.get('github') as { client_secret_encrypted: string }
+	const row = (await q.get(
+		'SELECT client_secret_encrypted FROM platform_oauth_apps WHERE slug = ?',
+		'github',
+	)) as { client_secret_encrypted: string }
 	expect(row.client_secret_encrypted).toBeTruthy()
 	expect(row.client_secret_encrypted).not.toContain(
 		'platform-github-client-secret-value',
@@ -166,7 +173,8 @@ test('upsert lifecycle encrypts secrets, omits retain fields, null clears, and p
 })
 
 test('confidential flow requires a client secret only while enabled', async () => {
-	const { db, env } = createHarness()
+	await using harness = await createHarness()
+	const { db, env } = harness
 	await expect(
 		upsertPlatformOauthApp({
 			db,
@@ -216,7 +224,8 @@ test('confidential flow requires a client secret only while enabled', async () =
 })
 
 test('allowedScopes always contains defaultScopes and disabled apps hide from the default list', async () => {
-	const { db, env } = createHarness()
+	await using harness = await createHarness()
+	const { db, env } = harness
 	await upsertPlatformOauthApp({
 		db,
 		env,
@@ -243,29 +252,30 @@ test('allowedScopes always contains defaultScopes and disabled apps hide from th
 })
 
 test('deletePlatformOauthApp refuses while user connections reference the app', async () => {
-	const { sqlite, db, env } = createHarness()
+	await using harness = await createHarness()
+	const { db, env, q } = harness
 	await upsertPlatformOauthApp({ db, env, app: baseGithubApp })
-	sqlite
-		.prepare(
-			`INSERT INTO user_integrations (
+	await q.run(
+		`INSERT INTO user_integrations (
 				user_id, name, app_slug, platform_app_slug
 			) VALUES (?, ?, NULL, ?)`,
-		)
-		.run('user-1', 'github', 'github')
+		'user-1',
+		'github',
+		'github',
+	)
 
 	expect(await countConnectionsForPlatformApp({ db, slug: 'github' })).toBe(1)
 	await expect(deletePlatformOauthApp({ db, slug: 'github' })).rejects.toThrow(
 		'still has 1 user connection',
 	)
 
-	sqlite
-		.prepare('DELETE FROM user_integrations WHERE user_id = ?')
-		.run('user-1')
+	await q.run('DELETE FROM user_integrations WHERE user_id = ?', 'user-1')
 	expect(await deletePlatformOauthApp({ db, slug: 'github' })).toBe(true)
 })
 
 test('listTopPlatformAppsByUse orders enabled apps by connection count and hides disabled', async () => {
-	const { sqlite, db, env } = createHarness()
+	await using harness = await createHarness()
+	const { db, env, q } = harness
 	for (const slug of ['github', 'google', 'notion', 'slack']) {
 		await upsertPlatformOauthApp({
 			db,
@@ -277,17 +287,21 @@ test('listTopPlatformAppsByUse orders enabled apps by connection count and hides
 			},
 		})
 	}
-	const insertConnection = sqlite.prepare(
-		`INSERT INTO user_integrations (
-			user_id, name, app_slug, platform_app_slug
-		) VALUES (?, ?, NULL, ?)`,
-	)
-	insertConnection.run('user-1', 'google', 'google')
-	insertConnection.run('user-2', 'google', 'google')
-	insertConnection.run('user-1', 'notion', 'notion')
-	insertConnection.run('user-1', 'slack', 'slack')
-	insertConnection.run('user-2', 'slack', 'slack')
-	insertConnection.run('user-3', 'slack', 'slack')
+	const insertConnection = (userId: string, slug: string) =>
+		q.run(
+			`INSERT INTO user_integrations (
+				user_id, name, app_slug, platform_app_slug
+			) VALUES (?, ?, NULL, ?)`,
+			userId,
+			slug,
+			slug,
+		)
+	await insertConnection('user-1', 'google')
+	await insertConnection('user-2', 'google')
+	await insertConnection('user-1', 'notion')
+	await insertConnection('user-1', 'slack')
+	await insertConnection('user-2', 'slack')
+	await insertConnection('user-3', 'slack')
 
 	const top = await listTopPlatformAppsByUse({ db, limit: 3 })
 	expect(top.map((app) => app.slug)).toEqual(['google', 'notion', 'github'])
@@ -297,25 +311,28 @@ test('listTopPlatformAppsByUse orders enabled apps by connection count and hides
 })
 
 test('renamePlatformOauthApp carries the secret and moves connections atomically', async () => {
-	const { sqlite, db, env } = createHarness()
+	await using harness = await createHarness()
+	const { db, env, q } = harness
 	await upsertPlatformOauthApp({
 		db,
 		env,
 		app: { ...baseGithubApp, description: 'Kody-hosted GitHub app.' },
 	})
-	sqlite
-		.prepare(
-			`UPDATE platform_oauth_apps SET logo_key = ?, logo_content_type = ?
+	await q.run(
+		`UPDATE platform_oauth_apps SET logo_key = ?, logo_content_type = ?
 			WHERE slug = ?`,
-		)
-		.run('platform-logos/github/abc123.png', 'image/png', 'github')
-	sqlite
-		.prepare(
-			`INSERT INTO user_integrations (
+		'platform-logos/github/abc123.png',
+		'image/png',
+		'github',
+	)
+	await q.run(
+		`INSERT INTO user_integrations (
 				user_id, name, app_slug, platform_app_slug
 			) VALUES (?, ?, NULL, ?)`,
-		)
-		.run('user-1', 'github', 'github')
+		'user-1',
+		'github',
+		'github',
+	)
 
 	const renamed = await renamePlatformOauthApp({
 		db,
@@ -349,12 +366,11 @@ test('renamePlatformOauthApp carries the secret and moves connections atomically
 	expect(
 		await countConnectionsForPlatformApp({ db, slug: 'github-platform' }),
 	).toBe(1)
-	const movedConnection = sqlite
-		.prepare(
-			`SELECT name, platform_app_slug FROM user_integrations
+	const movedConnection = (await q.get(
+		`SELECT name, platform_app_slug FROM user_integrations
 			WHERE user_id = ?`,
-		)
-		.get('user-1') as { name: string; platform_app_slug: string }
+		'user-1',
+	)) as { name: string; platform_app_slug: string }
 	expect(movedConnection).toEqual({
 		name: 'github',
 		platform_app_slug: 'github-platform',
@@ -388,26 +404,29 @@ test('renamePlatformOauthApp carries the secret and moves connections atomically
 })
 
 test('user_integrations enforces exactly one of app_slug / platform_app_slug', async () => {
-	const { sqlite, db, env } = createHarness()
+	await using harness = await createHarness()
+	const { db, env, q } = harness
 	await upsertPlatformOauthApp({ db, env, app: baseGithubApp })
 
-	expect(() =>
-		sqlite
-			.prepare(
-				`INSERT INTO user_integrations (
+	await expect(
+		q.run(
+			`INSERT INTO user_integrations (
 					user_id, name, app_slug, platform_app_slug
 				) VALUES (?, ?, ?, ?)`,
-			)
-			.run('user-1', 'github', 'github', 'github'),
-	).toThrow(/CHECK/i)
+			'user-1',
+			'github',
+			'github',
+			'github',
+		),
+	).rejects.toThrow(/check constraint/i)
 
-	expect(() =>
-		sqlite
-			.prepare(
-				`INSERT INTO user_integrations (
+	await expect(
+		q.run(
+			`INSERT INTO user_integrations (
 					user_id, name, app_slug, platform_app_slug
 				) VALUES (?, ?, NULL, NULL)`,
-			)
-			.run('user-1', 'github'),
-	).toThrow(/CHECK/i)
+			'user-1',
+			'github',
+		),
+	).rejects.toThrow(/check constraint/i)
 })

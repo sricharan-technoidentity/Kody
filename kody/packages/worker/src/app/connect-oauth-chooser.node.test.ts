@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
@@ -21,7 +22,7 @@ test('connect chooser includes saved connections and hides unused built-ins', as
 	const env = createEnv()
 	const platformEnv = {
 		...env,
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 	} as Env
 	await upsertPlatformOauthApp({
 		db: env.APP_DB,

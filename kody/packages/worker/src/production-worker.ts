@@ -1,6 +1,5 @@
 import { KodyFetchGateway } from '#mcp/fetch-gateway.ts'
 import { DynamicWorkerUsageTail } from '#worker/usage/dynamic-worker-cpu.ts'
-import { JobsHost } from './jobs/jobs-host.ts'
 import { originWorkerHandler } from './origin-handler.ts'
 
 /**
@@ -40,13 +39,13 @@ import { originWorkerHandler } from './origin-handler.ts'
  *   Cloudflare-measured CPU as `dynamic_worker_cpu`.
  *
  * Everything else `index.ts` exports (MCP, McpClientHub,
- * OAuthPurgeCoordinator, UserMeter, Mailbox, RepoSession, RepoSessionIndex,
+ * UserMeter, Mailbox, RepoSession, RepoSessionIndex,
  * StripePlanRefresh, StorageRunner, RunLog, PackageRealtimeSession,
  * DynamicCallableWorkflow, PackageAppRuntimeBridge) is reached in
  * steady-state production only through cross-script bindings or the
  * `RUNTIME_WORKER` service forward, never through a local export on this
  * script.
  */
-export { KodyFetchGateway, JobsHost, DynamicWorkerUsageTail }
+export { KodyFetchGateway, DynamicWorkerUsageTail }
 
 export default originWorkerHandler

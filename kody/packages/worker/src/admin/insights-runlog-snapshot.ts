@@ -3,6 +3,7 @@
  * reads this instead of fanning out per-user Durable Object RPCs.
  */
 
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { type RunLogAdminInsightsSnapshot } from '#worker/run-records/admin-insights-snapshot.ts'
 import { getAdminInsightsSnapshot } from '#worker/run-records/service.ts'
 import {
@@ -123,7 +124,7 @@ export async function refreshAdminInsightsRunLogSnapshot(input: {
 	}
 }
 
-async function listNonDeletingInsightsUsers(db: D1Database): Promise<{
+async function listNonDeletingInsightsUsers(db: SqlDatabase): Promise<{
 	users: Array<InsightsUserRow>
 	truncated: boolean
 }> {
@@ -168,7 +169,7 @@ async function aggregateRunLogInsights(input: {
 				})
 				return { user, snapshot }
 			} catch (error) {
-				// Missing RUN_LOG or a single-user RPC failure must not take down
+				// Missing RUN_RECORDS or a single-user RPC failure must not take down
 				// the hourly snapshot — degrade run-derived charts for that user only.
 				console.warn('admin-insights-run-log-unavailable', {
 					userId: user.stable_user_id,

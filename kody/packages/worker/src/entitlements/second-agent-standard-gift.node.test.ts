@@ -1,8 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
-import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
 import { getUserEntitlement } from './service.ts'
 import {
 	evaluateSecondAgentStandardGift,
@@ -17,32 +15,29 @@ const giftExpiresAt = new Date(
 	now.getTime() + secondAgentStandardGiftDurationMs,
 ).toISOString()
 
+/** One account on PGlite; the gift runs on that account's own writer. */
 async function createGiftTestDb(input: {
 	email: string
 	plan?: string
 	stripePlan?: string | null
 }) {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureUsersTestSchema({
-		db,
-		columns: ['stripe_plan'],
-	})
+	const database = await createTestDb()
 	const stableUserId = testStableUserIdFromEmail(input.email)
-	await db
-		.prepare(
-			`INSERT INTO users (username, email, password_hash, stable_user_id, plan, stripe_plan)
-			 VALUES (?, ?, 'hash', ?, ?, ?)`,
-		)
-		.bind(
+	await database.pg.query(
+		`INSERT INTO users (username, email, password_hash, stable_user_id, plan, stripe_plan)
+		 VALUES ($1, $2, 'hash', $3, $4, $5)`,
+		[
 			input.email.split('@')[0],
 			input.email,
 			stableUserId,
 			input.plan ?? 'free',
 			input.stripePlan ?? null,
-		)
-		.run()
-	return { db, stableUserId }
+		],
+	)
+	return {
+		db: database.forUser(stableUserId).db as unknown as D1Database,
+		stableUserId,
+	}
 }
 
 test('first second-ecosystem grant gives 14-day Standard; later events and paid tiers do not', async () => {

@@ -1,14 +1,22 @@
+import { type KodyTemporal } from '#worker/temporal/client.ts'
+import { startQueueMessage } from '#worker/temporal/start.ts'
+
 export type CommunityListingPublishedDispatchQueueMessage = {
 	eventId: string
 	listingId: string
 }
 
 export async function enqueueCommunityListingPublishedDispatch(input: {
-	queue: Pick<Queue<CommunityListingPublishedDispatchQueueMessage>, 'send'>
+	env: { TEMPORAL?: KodyTemporal }
 	listingId: string
 }) {
-	await input.queue.send({
+	const body: CommunityListingPublishedDispatchQueueMessage = {
 		eventId: crypto.randomUUID(),
 		listingId: input.listingId,
+	}
+	await startQueueMessage(input.env, {
+		queue: 'community-listing-published-dispatch',
+		key: body.eventId,
+		body,
 	})
 }

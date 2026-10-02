@@ -1,11 +1,8 @@
-import { quoteSqlIdentifier } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
 	AccountDeletionCleanupError,
 	AccountDeletionInventoryError,
 	deleteUserAccount,
-	getAccountDeletionD1UserColumnCoverage,
 } from './account-deletion.ts'
 import { AccountDeletionWritersActiveError } from '#worker/account/deletion-state.ts'
 import { userMeterRpc } from '#worker/entitlements/user-meter-client.ts'
@@ -17,8 +14,8 @@ import {
 	insertRepoSession,
 	listRepoSessionsByUser,
 } from '#worker/repo/repo-sessions.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb as createPgTestDb } from '#worker/test-support/aws/test-db.ts'
 import { accountUserOwnedVectorizeSurfaces } from '#worker/account/user-owned-surfaces.ts'
 import {
 	createTestDb,
@@ -26,36 +23,34 @@ import {
 	createSuccessfulDeletionEnv,
 } from '#worker/test-support/account-deletion.ts'
 
-const appMigrationsDir = new URL('../../migrations/', import.meta.url)
-
-function listSqliteTables(db: DatabaseSync) {
-	return (
-		db
-			.prepare(
-				`SELECT name
-				FROM sqlite_schema
-				WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-				ORDER BY name`,
-			)
-			.all() as Array<{ name: string }>
-	).map((row) => row.name)
+/** Public tables and their user-owner columns in the PostgreSQL schema. */
+async function listPgSchema(store: Awaited<ReturnType<typeof createPgTestDb>>) {
+	const { rows } = await store.pg.query<{
+		table_name: string
+		column_name: string
+	}>(
+		`SELECT table_name, column_name FROM information_schema.columns
+		 WHERE table_schema = 'public'
+		 ORDER BY table_name, column_name`,
+	)
+	return rows
 }
 
-test('vectorize surface sources match the migrated APP_DB schema', () => {
-	const db = new DatabaseSync(':memory:')
-	applyAllMigrations(db, appMigrationsDir)
-	const tables = new Set(listSqliteTables(db))
+test('vectorize surface sources match the PostgreSQL APP_DB schema', async () => {
+	await using store = await createPgTestDb()
+	const tables = new Set(
+		(await listPgSchema(store)).map((row) => row.table_name),
+	)
 
-	// Jobs moved to the jobs worker's D1 (migration 0010 dropped the APP_DB
-	// copies), so the job surface must be sourced over the JOBS binding rather
-	// than an APP_DB table scan.
-	expect(tables.has('jobs')).toBe(false)
+	// The POC schema squashes the jobs tables into the same database, but job
+	// rows stay owned by the jobs service (ADR 0016): the job surface is
+	// sourced over the JOBS binding, never an APP_DB table scan (below).
 	for (const surface of accountUserOwnedVectorizeSurfaces) {
 		switch (surface.source.kind) {
 			case 'app_db': {
 				expect(
 					tables.has(surface.source.table),
-					`vectorize surface ${surface.id} reads APP_DB table ${surface.source.table}, which the migrated schema does not define`,
+					`vectorize surface ${surface.id} reads APP_DB table ${surface.source.table}, which the schema does not define`,
 				).toBe(true)
 				break
 			}
@@ -73,28 +68,34 @@ test('vectorize surface sources match the migrated APP_DB schema', () => {
 	}
 })
 
-test('deleteUserAccount enumerates job vectors through JOBS against the real post-0010 APP_DB schema', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, appMigrationsDir)
-	const db = createD1FromSqlite(sqlite)
+test('deleteUserAccount enumerates job vectors through JOBS and deletes through the subject purger', async () => {
+	await using store = await createPgTestDb()
 	const userId = 'user-post-0010'
-	const inserted = await db
-		.prepare(
-			`INSERT INTO users (
-				username, email, password_hash, stable_user_id,
-				email_verified_at, account_type, created_at
-			) VALUES ('post0010', 'post0010@example.com', 'hash', ?, ?, 'person', ?)`,
-		)
-		.bind(userId, '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
-		.run()
-	const dbUserId = Number(inserted.meta.last_row_id)
-	await db
-		.prepare(
-			`INSERT INTO mcp_memories (id, user_id, subject, summary)
-			VALUES ('mem-post-0010', ?, 'subject', 'summary')`,
-		)
-		.bind(userId)
-		.run()
+	const bystanderId = 'user-bystander'
+	const { rows } = await store.pg.query<{ id: number }>(
+		`INSERT INTO users (
+			username, email, password_hash, stable_user_id,
+			email_verified_at, account_type, created_at
+		) VALUES
+			('post0010', 'post0010@example.com', 'hash', $1, $3, 'person', $3),
+			('bystander', 'bystander@example.com', 'hash', $2, $3, 'person', $3)
+		RETURNING id`,
+		[userId, bystanderId, '2026-09-01T00:00:00.000Z'],
+	)
+	const dbUserId = Number(rows[0]?.id)
+	await store.pg.query(
+		`INSERT INTO mcp_memories (id, user_id, subject, summary)
+		 VALUES ('mem-post-0010', $1, 'subject', 'summary'),
+		        ('mem-bystander', $2, 'subject', 'summary')`,
+		[userId, bystanderId],
+	)
+	// Deletion reads the inventory and deletes it as the subject's purger,
+	// which sees exactly that account's rows.
+	const db = createPgDatabase({
+		connection: store.pg,
+		role: 'kody_subject_purger',
+		userId,
+	})
 
 	const deleteVectorsMock = vi.fn(async () => undefined)
 	const listJobIdsForUser = vi.fn(async (_input: { userId: string }) => [
@@ -106,14 +107,17 @@ test('deleteUserAccount enumerates job vectors through JOBS against the real pos
 		userId: input.userId,
 		purged: true,
 	}))
-	const env = createSuccessfulDeletionEnv(db, {
-		CAPABILITY_VECTOR_INDEX: { deleteByIds: deleteVectorsMock },
-		JOBS: {
-			listJobIdsForUser,
-			listJobStorageIdsForUser: async () => [] as Array<string>,
-			purgeUser: purgeJobsUser,
-		},
-	} as unknown as Partial<Env>)
+	const env = createSuccessfulDeletionEnv(
+		db as unknown as D1Database,
+		{
+			CAPABILITY_VECTOR_INDEX: { deleteByIds: deleteVectorsMock },
+			JOBS: {
+				listJobIdsForUser,
+				listJobStorageIdsForUser: async () => [] as Array<string>,
+				purgeUserJobsData: purgeJobsUser,
+			},
+		} as unknown as Partial<Env>,
+	)
 
 	const result = await deleteUserAccount({ env, dbUserId, mcpUserId: userId })
 
@@ -126,73 +130,30 @@ test('deleteUserAccount enumerates job vectors through JOBS against the real pos
 	expect(result.deletedVectors).toBe(3)
 	expect(purgeJobsUser).toHaveBeenCalledWith({ userId })
 	expect(result.warnings).toEqual([])
-	expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM users`).get()).toEqual({
-		count: 0,
-	})
-	expect(
-		sqlite.prepare(`SELECT COUNT(*) AS count FROM mcp_memories`).get(),
-	).toEqual({ count: 0 })
+	const remaining = await store.pg.query<{ owner: string }>(
+		`SELECT stable_user_id AS owner FROM users
+		 UNION ALL SELECT user_id FROM mcp_memories ORDER BY 1`,
+	)
+	expect(remaining.rows).toEqual([
+		{ owner: bystanderId },
+		{ owner: bystanderId },
+	])
 })
 
-test('deleteUserAccount fails inventory loudly when JOBS is unbound instead of scanning APP_DB for jobs', async () => {
+test('deleteUserAccount reads job inventory from Aurora when the legacy jobs binding is absent', async () => {
 	const { db, rows } = createTestDb({
 		users: [{ id: 1, email: 'a@example.com' }],
 	})
 	const env = createSuccessfulDeletionEnv(db, {
 		JOBS: undefined,
-	} as unknown as Partial<Env>)
-
-	await expect(
-		deleteUserAccount({ env, dbUserId: 1, mcpUserId: 'user-aaa' }),
-	).rejects.toSatisfy(
-		(error: unknown) =>
-			error instanceof AccountDeletionInventoryError &&
-			error.inventoryErrors.some((message) =>
-				message.includes(
-					'JOBS service binding is required to enumerate job vector ids',
-				),
-			),
-	)
-	expect(rows.users).toEqual([
-		expect.objectContaining({ id: 1, deleting_at: null }),
-	])
-})
-
-test('account deletion D1 coverage includes every live user-owned schema column', () => {
-	const migrationsDir = new URL('../../migrations/', import.meta.url)
-	const db = new DatabaseSync(':memory:')
-	applyAllMigrations(db, migrationsDir)
-	const tables = db
-		.prepare(
-			`SELECT name
-			FROM sqlite_schema
-			WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-			ORDER BY name`,
-		)
-		.all() as Array<{ name: string }>
-	const liveUserColumns = new Set<string>()
-	for (const table of tables) {
-		const columns = db
-			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
-			.all() as Array<{ name: string }>
-		for (const column of columns) {
-			if (column.name === 'user_id' || column.name.endsWith('_user_id')) {
-				liveUserColumns.add(`${table.name}.${column.name}`)
-			}
-		}
-	}
-	const coveredColumns = getAccountDeletionD1UserColumnCoverage()
-	const missing = [...liveUserColumns].filter(
-		(column) => !coveredColumns.has(column),
-	)
-	const stale = [...coveredColumns].filter(
-		(column) => !liveUserColumns.has(column),
-	)
-	expect(
-		missing,
-		'user-owned D1 columns missing from account deletion',
-	).toEqual([])
-	expect(stale, 'account deletion references stale D1 columns').toEqual([])
+	} as Partial<Env>)
+	const result = await deleteUserAccount({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+	})
+	expect(result.warnings).toEqual([])
+	expect(rows.users).toEqual([])
 })
 
 test('account deletion preserves operator-owned system email configuration', async () => {
@@ -620,10 +581,10 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	const clearStorageMock = vi.fn(async () => ({ ok: true as const }))
 	const clearRunLogMock = vi.fn(async () => ({ ok: true as const }))
 	const purgeUserMeterMock = vi.fn(async () => ({ ok: true as const }))
-	const purgeStripePlanRefreshMock = vi.fn(async () => ({ ok: true as const }))
-	const stripePlanRefreshIdFromNameMock = vi.fn(
-		(name: string) => name as unknown as DurableObjectId,
-	)
+	const cancelStripeWorkflow = vi.fn(async () => undefined)
+	const stripeWorkflowHandle = vi.fn((_id: string) => ({
+		cancel: cancelStripeWorkflow,
+	}))
 	const purgeMailboxMock = vi.fn(async () => {
 		mailboxCleanupOrder.push('purge-mailbox')
 		return { ok: true as const }
@@ -679,23 +640,24 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 			idFromName: (name: string) => name as unknown as DurableObjectId,
 			get: () => ({ clearStorage: clearStorageMock }),
 		},
-		RUN_LOG: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({
-				clearAll: clearRunLogMock,
-				listStorageIds: async () => [] as Array<string>,
-			}),
-		},
-		USER_METER: {
-			idFromName: (name: string) => userMeter.env.USER_METER!.idFromName(name),
-			get: (id: DurableObjectId) => ({
-				...userMeter.env.USER_METER!.get(id),
+		RUN_STATE: { forUser: () => ({ clear: clearRunLogMock }) },
+		USER_METERS: {
+			forUser: (id: string) => ({
+				...userMeter.forUser(id),
 				purge: async () => purgeUserMeterMock(),
 			}),
 		},
-		STRIPE_PLAN_REFRESH: {
-			idFromName: stripePlanRefreshIdFromNameMock,
-			get: () => ({ purgeUser: purgeStripePlanRefreshMock }),
+		TEMPORAL: {
+			client: async () => ({
+				workflow: {
+					getHandle: stripeWorkflowHandle,
+					async *list() {},
+				},
+				schedule: {
+					async *list() {},
+					getHandle: () => ({ delete: async () => undefined }),
+				},
+			}),
 		},
 		MAILBOX: {
 			idFromName: (name: string) => name as unknown as DurableObjectId,
@@ -1009,8 +971,10 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	})
 	expect(clearRunLogMock).toHaveBeenCalledTimes(1)
 	expect(purgeUserMeterMock).toHaveBeenCalledTimes(1)
-	expect(stripePlanRefreshIdFromNameMock).toHaveBeenCalledWith(userAaa)
-	expect(purgeStripePlanRefreshMock).toHaveBeenCalledWith({ userId: userAaa })
+	expect(stripeWorkflowHandle).toHaveBeenCalledWith(
+		`${userAaa}:stripe-plan-refresh`,
+	)
+	expect(cancelStripeWorkflow).toHaveBeenCalledOnce()
 	expect(listBlobReferencesMock).toHaveBeenCalledTimes(1)
 	expect(purgeMailboxMock).toHaveBeenCalledTimes(1)
 	expect(mailboxCleanupOrder[0]).toBe('list-blob-references')

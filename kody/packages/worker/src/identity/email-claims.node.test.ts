@@ -1,8 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import {
 	allocateSignupIdentity,
@@ -13,50 +11,45 @@ import {
 	resolveReleasableEmailClaim,
 } from './email-claims.ts'
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
 async function insertUser(
-	sqlite: DatabaseSync,
-	input: {
-		id: number
-		email: string
-		username: string
-		stableUserId?: string
-	},
+	pg: Awaited<ReturnType<typeof createTestDb>>['pg'],
+	input: { id: number; email: string; username: string; stableUserId?: string },
 ) {
 	const stableUserId =
 		input.stableUserId ?? (await createStableUserIdFromEmail(input.email))
-	sqlite.exec(`
-		INSERT INTO users (id, username, email, stable_user_id, password_hash)
-		VALUES (
-			${input.id},
-			${quoteSqlString(input.username)},
-			${quoteSqlString(input.email)},
-			${quoteSqlString(stableUserId)},
-			'hash'
-		);
-	`)
+	await pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash)
+		VALUES ($1, $2, $3, $4, 'hash')`,
+		[input.id, input.username, input.email, stableUserId],
+	)
 	return stableUserId
 }
 
 test('email claims reserve former addresses without reminting identity', async () => {
-	const { sqlite, db } = createMigratedDb()
-	const originalStableUserId = await insertUser(sqlite, {
+	await using store = await createTestDb()
+	const { pg } = store
+	const db = createPgDatabase({ connection: pg, role: 'kody_admin' })
+	const originalStableUserId = await insertUser(pg, {
 		id: 1,
 		email: 'first@example.com',
 		username: 'jamie',
 	})
-	await claimAccountEmail(db, { userId: 1, email: 'first@example.com' })
+	await claimAccountEmail(store.forUser(originalStableUserId).db, {
+		userId: 1,
+		email: 'first@example.com',
+	})
 
-	sqlite.exec(`UPDATE users SET email = 'work@example.com' WHERE id = 1`)
-	await claimAccountEmail(db, { userId: 1, email: 'work@example.com' })
+	await store
+		.forUser(originalStableUserId)
+		.db.prepare("UPDATE users SET email = 'work@example.com' WHERE id = 1")
+		.run()
+	await claimAccountEmail(store.forUser(originalStableUserId).db, {
+		userId: 1,
+		email: 'work@example.com',
+	})
 
 	expect(
-		await listFormerEmailClaims(db, {
+		await listFormerEmailClaims(store.forUser(originalStableUserId).reader, {
 			userId: 1,
 			currentEmail: 'work@example.com',
 		}),
@@ -83,12 +76,12 @@ test('email claims reserve former addresses without reminting identity', async (
 	})
 	expect(implicit).toEqual({ ok: true, email: 'first@example.com' })
 
-	await releaseAccountEmailClaim(db, {
+	await releaseAccountEmailClaim(store.forUser(originalStableUserId).db, {
 		userId: 1,
 		email: 'first@example.com',
 	})
 	expect(
-		await listFormerEmailClaims(db, {
+		await listFormerEmailClaims(store.forUser(originalStableUserId).reader, {
 			userId: 1,
 			currentEmail: 'work@example.com',
 		}),
@@ -104,9 +97,10 @@ test('email claims reserve former addresses without reminting identity', async (
 	expect(allocated.stableUserId).toMatch(/^[a-f0-9]{64}$/)
 
 	expect(
-		sqlite.prepare(`SELECT stable_user_id FROM users WHERE id = 1`).get() as {
-			stable_user_id: string
-		},
+		await store
+			.forUser(originalStableUserId)
+			.reader.prepare('SELECT stable_user_id FROM users WHERE id = 1')
+			.first(),
 	).toEqual({ stable_user_id: originalStableUserId })
 
 	expect(
@@ -130,9 +124,11 @@ test('email claims reserve former addresses without reminting identity', async (
 })
 
 test('implicit sha256 reservation is releasable before a claim row exists', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using store = await createTestDb()
+	const { pg } = store
+	const db = createPgDatabase({ connection: pg, role: 'kody_admin' })
 	const originalEmail = 'legacy@example.com'
-	const stableUserId = await insertUser(sqlite, {
+	const stableUserId = await insertUser(pg, {
 		id: 2,
 		email: 'now@example.com',
 		username: 'legacy',

@@ -1,9 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import {
 	addReservedUsernames,
@@ -46,12 +44,6 @@ function createEnv(kv?: KVNamespace) {
 		BUNDLE_ARTIFACTS_KV: kv,
 		APP_DB: {} as D1Database,
 	} as unknown as Env
-}
-
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
 }
 
 test('reserved username KV overrides, fallback, memo, permanent lock, and conflicts', async () => {
@@ -213,29 +205,27 @@ test('reserved username KV overrides, fallback, memo, permanent lock, and confli
 		}),
 	).rejects.toBeInstanceOf(PermanentlyReservedUsernameError)
 
-	const { sqlite, db } = createMigratedDb()
+	await using fixture = await createTestDb()
+	const db = createPgDatabase({ connection: fixture.pg, role: 'kody_admin' })
 	const conflictEmail = 'holder@example.com'
 	const conflictStableId = await createStableUserIdFromEmail(conflictEmail)
-	sqlite.exec(`
-		INSERT INTO users (username, email, stable_user_id, password_hash)
-		VALUES (
-			'brandnew',
-			${quoteSqlString(conflictEmail)},
-			${quoteSqlString(conflictStableId)},
-			'oauth_created_no_usable_password'
-		);
-	`)
+	await db
+		.prepare(`INSERT INTO users (username, email, stable_user_id, password_hash)
+		VALUES ('brandnew', ?, ?, 'oauth_created_no_usable_password')`)
+		.bind(conflictEmail, conflictStableId)
+		.run()
 	const collideEmail = 'collide@example.com'
 	const collideStableId = await createStableUserIdFromEmail(collideEmail)
-	sqlite.exec(`
-		INSERT INTO users (username, email, stable_user_id, password_hash)
-		VALUES (
-			'fuckyou',
-			${quoteSqlString(collideEmail)},
-			${quoteSqlString(collideStableId)},
-			'oauth_created_no_usable_password'
-		);
-	`)
+	await db
+		.prepare(`INSERT INTO users (username, email, stable_user_id, password_hash)
+		VALUES ('fuckyou', ?, ?, 'oauth_created_no_usable_password')`)
+		.bind(collideEmail, collideStableId)
+		.run()
+	// Put the second conflict beyond the first 200-user page.
+	await fixture.pg
+		.query(`INSERT INTO users (username, email, stable_user_id, password_hash)
+		SELECT 'filler-' || n, 'filler-' || n || '@example.com', 'filler-' || n, 'hash'
+		FROM generate_series(1, 201) AS n`)
 	const conflicts = await findReservedUsernameConflicts(
 		db,
 		new Set(['brandnew', 'faq', 'fuck']),

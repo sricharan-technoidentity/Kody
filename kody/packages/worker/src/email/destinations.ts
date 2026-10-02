@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { AccountDeletionInProgressError } from '#worker/account/deletion-state.ts'
 import { normalizeEmailAddress } from './address.ts'
 import { normalizeEmail } from '#worker/identity/normalize-email.ts'
@@ -452,7 +453,7 @@ export async function deleteEmailNotificationDestinationRow(input: {
  * drop that extra row so the address is owned only by the identity flow.
  */
 export async function reconcileDestinationsAfterIdentityEmailChange(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	newEmail: string
 }) {

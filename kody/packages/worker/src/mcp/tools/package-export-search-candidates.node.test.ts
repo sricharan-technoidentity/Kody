@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import { buildCapabilityRegistry } from '#mcp/capabilities/build-capability-registry.ts'
-import { deterministicEmbedding } from '#worker/vectorize/embedding.ts'
+import { deterministicEmbedding } from '#worker/search-index/embedding.ts'
 
 import { searchUnified, type PackageSearchRow } from './search.ts'
 import {

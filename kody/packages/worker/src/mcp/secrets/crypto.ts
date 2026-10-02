@@ -1,101 +1,52 @@
-import {
-	base64UrlToBytes,
-	bytesToBase64Url,
-} from '@kody-internal/shared/base64.ts'
+import { type KmsEnvelope } from '#worker/aws/kms-envelope.ts'
 
-const ivBytes = 12
+/** KMS encryption context naming the owner of one ciphertext. */
+export type SecretContext = Record<string, string>
 
-/**
- * Ciphertext format version. Payloads are `v2.<iv>.<ciphertext>` bound to an
- * AES-GCM additional-authenticated-data (AAD) string built from the purpose
- * plus an identity context (e.g. the owning user), so a ciphertext copied
- * into another row fails to decrypt.
- */
-const ciphertextVersion = 'v2'
+/** Env surface for every Kody-held secret: the KMS envelope port. */
+export type SecretCryptoEnv = { SECRET_KMS: KmsEnvelope }
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
-const derivedEncryptionKeyCache = new Map<string, Promise<CryptoKey>>()
-
-function buildAad(purpose: string, context: string) {
-	return textEncoder.encode(`kody.${ciphertextVersion}|${purpose}|${context}`)
-}
-
-function deriveEncryptionKey(secret: string, purpose: string) {
-	const cacheKey = `${purpose}:${secret}`
-	const cached = derivedEncryptionKeyCache.get(cacheKey)
-	if (cached) return cached
-
-	const derivationPromise = crypto.subtle
-		.digest('SHA-256', textEncoder.encode(`${purpose}:${secret}`))
-		.then((digest) =>
-			crypto.subtle.importKey('raw', digest, 'AES-GCM', false, [
-				'encrypt',
-				'decrypt',
-			]),
-		)
-		.catch((error) => {
-			derivedEncryptionKeyCache.delete(cacheKey)
-			throw error
-		})
-	derivedEncryptionKeyCache.set(cacheKey, derivationPromise)
-	return derivationPromise
-}
-
-async function encryptWithKey(
-	keySecret: string,
+/**
+ * KMS envelope encryption. The purpose and the identity context (e.g. the
+ * owning user) form the KMS encryption context, which binds both the data
+ * key and the AES-GCM payload, so a ciphertext copied into another row or
+ * purpose fails to decrypt. Ciphertext is stored as the envelope's text.
+ */
+async function encryptWithKms(
+	env: SecretCryptoEnv,
 	purpose: string,
-	context: string,
+	context: SecretContext,
 	value: string,
 ) {
-	const key = await deriveEncryptionKey(keySecret, purpose)
-	const iv = crypto.getRandomValues(new Uint8Array(ivBytes))
-	const ciphertext = await crypto.subtle.encrypt(
-		{
-			name: 'AES-GCM',
-			iv,
-			additionalData: buildAad(purpose, context),
-		},
-		key,
-		textEncoder.encode(value),
+	return textDecoder.decode(
+		await env.SECRET_KMS.encrypt(textEncoder.encode(value), {
+			...context,
+			purpose,
+		}),
 	)
-	return `${ciphertextVersion}.${bytesToBase64Url(iv)}.${bytesToBase64Url(
-		new Uint8Array(ciphertext),
-	)}`
 }
 
-async function decryptWithKey(
-	keySecret: string,
+async function decryptWithKms(
+	env: SecretCryptoEnv,
 	purpose: string,
-	context: string,
+	context: SecretContext,
 	payload: string,
 ) {
-	const parts = payload.split('.')
-	const key = await deriveEncryptionKey(keySecret, purpose)
-	if (parts.length !== 3) {
-		throw new Error('Invalid encrypted secret payload.')
-	}
-	const [version, ivPart, ciphertextPart] = parts
-	if (version !== ciphertextVersion || !ivPart || !ciphertextPart) {
-		throw new Error('Invalid encrypted secret payload.')
-	}
-	const plaintext = await crypto.subtle.decrypt(
-		{
-			name: 'AES-GCM',
-			iv: base64UrlToBytes(ivPart),
-			additionalData: buildAad(purpose, context),
-		},
-		key,
-		base64UrlToBytes(ciphertextPart),
+	return textDecoder.decode(
+		await env.SECRET_KMS.decrypt(textEncoder.encode(payload), {
+			...context,
+			purpose,
+		}),
 	)
-	return textDecoder.decode(plaintext)
 }
 
 const secretStorePurpose = 'mcp-secret-store'
 
 /**
- * Platform OAuth client secrets share the SECRET_STORE_KEY KEK but use a
+ * Platform OAuth client secrets share the KMS key but use a
  * dedicated purpose so their ciphertext is never interchangeable with
  * `secret_entries` payloads. They live outside the user secret store on
  * purpose: nothing in the `{{secret:...}}` placeholder namespace can name
@@ -107,50 +58,48 @@ const userOauthRefreshTokenPurpose = 'user-oauth-refresh-token'
 const userOauthClientSecretPurpose = 'user-oauth-client-secret'
 const webhookUrlSecretPurpose = 'webhook-url-secret'
 
-/** AAD context for a user-owned secret ciphertext. */
-export function userSecretContext(userId: string) {
-	return `user:${userId}`
+/** KMS context for a user-owned secret ciphertext (was AAD `user:<userId>`). */
+export function userSecretContext(userId: string): SecretContext {
+	return { userId }
 }
 
-/** AAD context for a platform OAuth app client secret ciphertext. */
-export function platformOauthAppContext(slug: string) {
-	return `app:${slug}`
+/** KMS context for a platform OAuth app client secret ciphertext. */
+export function platformOauthAppContext(slug: string): SecretContext {
+	return { app: slug }
 }
 
-/** AAD context for a user-lane OAuth connection token ciphertext. */
+/** KMS context for a user-lane OAuth connection token ciphertext. */
 export function userIntegrationCredentialContext(
 	userId: string,
 	integrationName: string,
-) {
-	return `user:${userId}:integration:${integrationName}`
+): SecretContext {
+	return { userId, integration: integrationName }
 }
 
-/** AAD context for a user-lane OAuth app client secret ciphertext. */
-export function userOauthAppCredentialContext(userId: string, slug: string) {
-	return `user:${userId}:oauth-app:${slug}`
+/** KMS context for a user-lane OAuth app client secret ciphertext. */
+export function userOauthAppCredentialContext(
+	userId: string,
+	slug: string,
+): SecretContext {
+	return { userId, oauthApp: slug }
 }
 
 export async function encryptPlatformOauthClientSecret(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	value: string,
-	context: string,
+	context: SecretContext,
 ) {
-	return encryptWithKey(
-		env.SECRET_STORE_KEY,
-		platformOauthClientSecretPurpose,
-		context,
-		value,
-	)
+	return encryptWithKms(env, platformOauthClientSecretPurpose, context, value)
 }
 
 export async function decryptPlatformOauthClientSecret(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	payload: string,
-	context: string,
+	context: SecretContext,
 ) {
 	try {
-		return await decryptWithKey(
-			env.SECRET_STORE_KEY,
+		return await decryptWithKms(
+			env,
 			platformOauthClientSecretPurpose,
 			context,
 			payload,
@@ -161,26 +110,21 @@ export async function decryptPlatformOauthClientSecret(
 }
 
 export async function encryptUserOauthAccessToken(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	value: string,
-	context: string,
+	context: SecretContext,
 ) {
-	return encryptWithKey(
-		env.SECRET_STORE_KEY,
-		userOauthAccessTokenPurpose,
-		context,
-		value,
-	)
+	return encryptWithKms(env, userOauthAccessTokenPurpose, context, value)
 }
 
 export async function decryptUserOauthAccessToken(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	payload: string,
-	context: string,
+	context: SecretContext,
 ) {
 	try {
-		return await decryptWithKey(
-			env.SECRET_STORE_KEY,
+		return await decryptWithKms(
+			env,
 			userOauthAccessTokenPurpose,
 			context,
 			payload,
@@ -191,26 +135,21 @@ export async function decryptUserOauthAccessToken(
 }
 
 export async function encryptUserOauthRefreshToken(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	value: string,
-	context: string,
+	context: SecretContext,
 ) {
-	return encryptWithKey(
-		env.SECRET_STORE_KEY,
-		userOauthRefreshTokenPurpose,
-		context,
-		value,
-	)
+	return encryptWithKms(env, userOauthRefreshTokenPurpose, context, value)
 }
 
 export async function decryptUserOauthRefreshToken(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	payload: string,
-	context: string,
+	context: SecretContext,
 ) {
 	try {
-		return await decryptWithKey(
-			env.SECRET_STORE_KEY,
+		return await decryptWithKms(
+			env,
 			userOauthRefreshTokenPurpose,
 			context,
 			payload,
@@ -221,26 +160,21 @@ export async function decryptUserOauthRefreshToken(
 }
 
 export async function encryptUserOauthClientSecret(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	value: string,
-	context: string,
+	context: SecretContext,
 ) {
-	return encryptWithKey(
-		env.SECRET_STORE_KEY,
-		userOauthClientSecretPurpose,
-		context,
-		value,
-	)
+	return encryptWithKms(env, userOauthClientSecretPurpose, context, value)
 }
 
 export async function decryptUserOauthClientSecret(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	payload: string,
-	context: string,
+	context: SecretContext,
 ) {
 	try {
-		return await decryptWithKey(
-			env.SECRET_STORE_KEY,
+		return await decryptWithKms(
+			env,
 			userOauthClientSecretPurpose,
 			context,
 			payload,
@@ -250,69 +184,49 @@ export async function decryptUserOauthClientSecret(
 	}
 }
 
-/** AAD context for a minted webhook URL secret ciphertext. */
+/** KMS context for a minted webhook URL secret ciphertext. */
 export function userWebhookUrlSecretContext(
 	userId: string,
 	endpointId: string,
-) {
-	return `user:${userId}:webhook-endpoint:${endpointId}`
+): SecretContext {
+	return { userId, webhookEndpoint: endpointId }
 }
 
 export async function encryptWebhookUrlSecret(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	value: string,
-	context: string,
+	context: SecretContext,
 ) {
-	return encryptWithKey(
-		env.SECRET_STORE_KEY,
-		webhookUrlSecretPurpose,
-		context,
-		value,
-	)
+	return encryptWithKms(env, webhookUrlSecretPurpose, context, value)
 }
 
 export async function decryptWebhookUrlSecret(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	payload: string,
-	context: string,
+	context: SecretContext,
 ) {
 	try {
-		return await decryptWithKey(
-			env.SECRET_STORE_KEY,
-			webhookUrlSecretPurpose,
-			context,
-			payload,
-		)
+		return await decryptWithKms(env, webhookUrlSecretPurpose, context, payload)
 	} catch {
 		throw new Error('Unable to decrypt webhook URL secret.')
 	}
 }
 
 export async function encryptSecretValue(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	value: string,
-	context: string,
+	context: SecretContext,
 ) {
-	return encryptWithKey(
-		env.SECRET_STORE_KEY,
-		secretStorePurpose,
-		context,
-		value,
-	)
+	return encryptWithKms(env, secretStorePurpose, context, value)
 }
 
 export async function decryptSecretValue(
-	env: Pick<Env, 'SECRET_STORE_KEY'>,
+	env: SecretCryptoEnv,
 	payload: string,
-	context: string,
+	context: SecretContext,
 ) {
 	try {
-		return await decryptWithKey(
-			env.SECRET_STORE_KEY,
-			secretStorePurpose,
-			context,
-			payload,
-		)
+		return await decryptWithKms(env, secretStorePurpose, context, payload)
 	} catch {
 		throw new Error('Unable to decrypt secret value.')
 	}

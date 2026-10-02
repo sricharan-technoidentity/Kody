@@ -1,4 +1,5 @@
 export * from './jobs-service-mocks.ts'
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { repoMockModule } from './jobs-service-mocks.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import {
@@ -942,8 +943,9 @@ export function createJobServiceTestEnv(
 ) {
 	const userMeter = meter ?? createInMemoryUserMeterEnv()
 	return {
+		SECRET_KMS: testSecretKms,
 		...bindings,
-		USER_METER: userMeter.env.USER_METER,
+		USER_METERS: userMeter.env.USER_METERS,
 	} as Env
 }
 

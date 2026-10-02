@@ -1,7 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { platformFeedbackTestSchemaSql } from './test-schema.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	getPlatformFeedbackByIdForAdmin,
 	updatePlatformFeedbackStatusForAdmin,
@@ -13,21 +12,33 @@ import {
 	updatePlatformFeedbackForAdmin,
 } from './service.ts'
 
-function createPlatformFeedbackDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(platformFeedbackTestSchemaSql)
+async function createPlatformFeedbackDb() {
+	const database = await createTestDb()
+	const operator = createPgDatabase({
+		connection: database.pg,
+		role: 'kody_admin',
+	})
 	const queries: Array<string> = []
 	return {
-		sqlite,
-		db: createD1FromSqlite(sqlite, { queries }),
+		...database,
 		queries,
+		// Operator review runs only after the application permission check.
+		admin: {
+			...operator,
+			prepare(sql: string) {
+				queries.push(sql.trim())
+				return operator.prepare(sql)
+			},
+		},
+		submitter: (userId: string) => database.forUser(userId).db,
 	}
 }
 
 test('platform feedback workflow submits, lists, reads, transitions, and preserves submitter attribution', async () => {
-	const { sqlite, db, queries } = createPlatformFeedbackDb()
+	await using database = await createPlatformFeedbackDb()
+	const { admin: db, queries, submitter } = database
 	const first = await submitPlatformFeedback({
-		db,
+		db: submitter('user-a'),
 		submitterUserId: 'user-a',
 		submitterUsername: 'user-a-name',
 		submitterEmail: 'user-a@example.com',
@@ -36,7 +47,7 @@ test('platform feedback workflow submits, lists, reads, transitions, and preserv
 		details: '  The setup flow does not explain the next action.  ',
 	})
 	const second = await submitPlatformFeedback({
-		db,
+		db: submitter('user-b'),
 		submitterUserId: 'user-b',
 		submitterUsername: 'user-b-name',
 		submitterEmail: 'user-b@example.com',
@@ -45,7 +56,7 @@ test('platform feedback workflow submits, lists, reads, transitions, and preserv
 		details: 'The save button leaves the form unchanged.',
 	})
 	const third = await submitPlatformFeedback({
-		db,
+		db: submitter('user-a'),
 		submitterUserId: 'user-a',
 		submitterUsername: 'user-a-name',
 		submitterEmail: 'user-a@example.com',
@@ -65,6 +76,32 @@ test('platform feedback workflow submits, lists, reads, transitions, and preserv
 	})
 	expect(second.submitterUserId).toBe('user-b')
 	expect(third.submitterUserId).toBe('user-a')
+
+	// Submitters cannot attribute feedback to someone else or read other rows,
+	// and the operator role reviews feedback without being able to author it.
+	const forged = {
+		submitterUserId: 'user-b',
+		submitterUsername: 'user-b-name',
+		submitterEmail: 'user-b@example.com',
+		category: 'bug' as const,
+		summary: 'Forged',
+		details: 'Attributed to another account.',
+	}
+	await expect(
+		submitPlatformFeedback({ db: submitter('user-a'), ...forged }),
+	).rejects.toThrow('row-level security')
+	await expect(submitPlatformFeedback({ db, ...forged })).rejects.toThrow(
+		'permission denied',
+	)
+	expect(
+		await getPlatformFeedbackForAdmin({
+			db: submitter('user-b'),
+			feedbackId: first.id,
+		}),
+	).toBeNull()
+	expect(
+		(await listPlatformFeedbackForAdmin({ db: submitter('user-a') })).total,
+	).toBe(2)
 
 	const page = await listPlatformFeedbackForAdmin({
 		db,
@@ -246,19 +283,24 @@ test('platform feedback workflow submits, lists, reads, transitions, and preserv
 			action: 'triage',
 		}),
 	).rejects.toThrow('Platform feedback "missing-feedback" was not found.')
+	// Review metadata is the operator's only writable surface.
+	await expect(
+		db
+			.prepare('UPDATE platform_feedback SET summary = ? WHERE id = ?')
+			.bind('Rewritten', second.id)
+			.run(),
+	).rejects.toThrow('permission denied')
 
-	const rows = sqlite
-		.prepare(
-			`SELECT id, submitter_user_id, submitter_username, submitter_email
-			 FROM platform_feedback
-			 ORDER BY submitter_user_id, id`,
-		)
-		.all() as Array<{
+	const { rows } = await database.pg.query<{
 		id: string
 		submitter_user_id: string
 		submitter_username: string
 		submitter_email: string
-	}>
+	}>(
+		`SELECT id, submitter_user_id, submitter_username, submitter_email
+		 FROM platform_feedback
+		 ORDER BY submitter_user_id, id`,
+	)
 	expect(rows.filter((row) => row.submitter_user_id === 'user-a')).toHaveLength(
 		2,
 	)
@@ -277,9 +319,10 @@ test('platform feedback workflow submits, lists, reads, transitions, and preserv
 })
 
 test('platform feedback admin note updates reject the same stale revision', async () => {
-	const { db } = createPlatformFeedbackDb()
+	await using database = await createPlatformFeedbackDb()
+	const { admin: db } = database
 	const submitted = await submitPlatformFeedback({
-		db,
+		db: database.submitter('user-a'),
 		submitterUserId: 'user-a',
 		submitterUsername: 'user-a-name',
 		submitterEmail: 'user-a@example.com',
@@ -328,152 +371,100 @@ test('platform feedback admin note updates reject the same stale revision', asyn
 })
 
 test('platform feedback submission enforces the rolling rate limit and atomic active queue cap', async () => {
-	const rateLimited = createPlatformFeedbackDb()
-	for (let index = 0; index < 10; index += 1) {
-		await submitPlatformFeedback({
-			db: rateLimited.db,
-			submitterUserId: 'rate-limited-user',
-			submitterUsername: 'rate-limited-user',
-			submitterEmail: 'rate-limited-user@example.com',
-			category: 'friction',
-			summary: `Feedback ${index}`,
-			details: `Feedback details ${index}`,
-		})
+	await using database = await createPlatformFeedbackDb()
+	const { pg, submitter } = database
+	const countFeedback = async (userId: string, statuses?: string) => {
+		const { rows } = await pg.query<{ total: number }>(
+			`SELECT COUNT(*)::int AS total FROM platform_feedback
+			 WHERE submitter_user_id = $1 ${statuses ? `AND status IN (${statuses})` : ''}`,
+			[userId],
+		)
+		return rows[0]?.total
 	}
-	await expect(
+	const submit = (userId: string, summary: string) =>
 		submitPlatformFeedback({
-			db: rateLimited.db,
-			submitterUserId: 'rate-limited-user',
-			submitterUsername: 'rate-limited-user',
-			submitterEmail: 'rate-limited-user@example.com',
+			db: submitter(userId),
+			submitterUserId: userId,
+			submitterUsername: userId,
+			submitterEmail: `${userId}@example.com`,
 			category: 'friction',
-			summary: 'Feedback 11',
-			details: 'This submission exceeds the rolling limit.',
-		}),
-	).rejects.toThrow(
+			summary,
+			details: `${summary} details`,
+		})
+	for (let index = 0; index < 10; index += 1) {
+		await submit('rate-limited-user', `Feedback ${index}`)
+	}
+	await expect(submit('rate-limited-user', 'Feedback 11')).rejects.toThrow(
 		'Platform feedback is limited to 10 submissions per rolling 24 hours. Retry after 86400 seconds.',
 	)
-	expect(
-		rateLimited.sqlite
-			.prepare(`SELECT COUNT(*) AS total FROM platform_feedback`)
-			.get(),
-	).toEqual({ total: 10 })
+	expect(await countFeedback('rate-limited-user')).toBe(10)
 
-	vi.useFakeTimers()
+	const insertFeedback = (input: {
+		id: string
+		userId: string
+		status: string
+		createdAt: string
+	}) =>
+		pg.query(
+			`INSERT INTO platform_feedback (
+				id, submitter_user_id, submitter_username, submitter_email,
+				category, summary, details, status, created_at, updated_at
+			) VALUES ($1, $2, $2, $2 || '@example.com', 'friction', $1, $1, $3, $4, $4)`,
+			[input.id, input.userId, input.status, input.createdAt],
+		)
+	// Only Date is faked: PGlite schedules its own work on real timers.
+	vi.useFakeTimers({ toFake: ['Date'] })
 	try {
 		const now = new Date('2026-07-19T12:00:00.000Z')
 		vi.setSystemTime(now)
-		const { sqlite, db } = createPlatformFeedbackDb()
 		const createdAt = new Date(
 			now.getTime() - 23 * 60 * 60 * 1_000,
 		).toISOString()
-		const insertFeedback = sqlite.prepare(
-			`INSERT INTO platform_feedback (
-				id, submitter_user_id, submitter_username, submitter_email,
-				category, summary, details, created_at, updated_at
-			) VALUES (?, 'rate-limited-user', 'rate-limited-user',
-				'rate-limited-user@example.com', 'friction', ?, ?, ?, ?)`,
-		)
 		for (let index = 0; index < 10; index += 1) {
-			insertFeedback.run(
-				`feedback-${index}`,
-				`Feedback ${index}`,
-				`Feedback details ${index}`,
+			await insertFeedback({
+				id: `feedback-${index}`,
+				userId: 'windowed-user',
+				status: 'open',
 				createdAt,
-				createdAt,
-			)
+			})
 		}
-
-		await expect(
-			submitPlatformFeedback({
-				db,
-				submitterUserId: 'rate-limited-user',
-				submitterUsername: 'rate-limited-user',
-				submitterEmail: 'rate-limited-user@example.com',
-				category: 'friction',
-				summary: 'Feedback 11',
-				details: 'This submission exceeds the rolling limit.',
-			}),
-		).rejects.toThrow(
+		await expect(submit('windowed-user', 'Feedback 11')).rejects.toThrow(
 			'Platform feedback is limited to 10 submissions per rolling 24 hours. Retry after 3600 seconds.',
 		)
 	} finally {
 		vi.useRealTimers()
 	}
 
-	const queueLimited = createPlatformFeedbackDb()
-	const insertQueued = queueLimited.sqlite.prepare(
-		`INSERT INTO platform_feedback (
-			id, submitter_user_id, submitter_username, submitter_email,
-			category, summary, details, status, created_at, updated_at
-		) VALUES (?, 'queue-limited-user', 'queue-limited-user',
-			'queue-limited-user@example.com', 'friction', ?, ?, ?, ?, ?)`,
-	)
 	const createdAt = new Date(Date.now() - 48 * 60 * 60 * 1_000).toISOString()
 	for (let index = 0; index < 99; index += 1) {
-		insertQueued.run(
-			`queued-${index}`,
-			`Queued feedback ${index}`,
-			`Queued feedback details ${index}`,
-			index % 2 === 0 ? 'open' : 'triaged',
+		await insertFeedback({
+			id: `queued-${index}`,
+			userId: 'queue-limited-user',
+			status: index % 2 === 0 ? 'open' : 'triaged',
 			createdAt,
-			createdAt,
-		)
+		})
 	}
-	await submitPlatformFeedback({
-		db: queueLimited.db,
-		submitterUserId: 'queue-limited-user',
-		submitterUsername: 'queue-limited-user',
-		submitterEmail: 'queue-limited-user@example.com',
-		category: 'bug',
-		summary: 'One hundredth active submission',
-		details: 'This reaches the active queue boundary.',
-	})
+	await submit('queue-limited-user', 'One hundredth active submission')
 	await expect(
-		submitPlatformFeedback({
-			db: queueLimited.db,
-			submitterUserId: 'queue-limited-user',
-			submitterUsername: 'queue-limited-user',
-			submitterEmail: 'queue-limited-user@example.com',
-			category: 'bug',
-			summary: 'One over the active queue boundary',
-			details: 'This must be rejected atomically.',
-		}),
+		submit('queue-limited-user', 'One over the active queue boundary'),
 	).rejects.toThrow(
 		'You already have 100 open or triaged platform feedback submissions.',
 	)
-	queueLimited.sqlite
-		.prepare(
-			`UPDATE platform_feedback
-			SET status = 'resolved', updated_at = ?
-			WHERE id = 'queued-0'`,
-		)
-		.run(createdAt)
-	await submitPlatformFeedback({
-		db: queueLimited.db,
-		submitterUserId: 'queue-limited-user',
-		submitterUsername: 'queue-limited-user',
-		submitterEmail: 'queue-limited-user@example.com',
-		category: 'bug',
-		summary: 'Replacement active submission',
-		details: 'A resolved active row makes room for this submission.',
-	})
-	expect(
-		queueLimited.sqlite
-			.prepare(
-				`SELECT COUNT(*) AS total
-				FROM platform_feedback
-				WHERE submitter_user_id = 'queue-limited-user'
-					AND status IN ('open', 'triaged')`,
-			)
-			.get(),
-	).toEqual({ total: 100 })
+	await pg.query(
+		`UPDATE platform_feedback SET status = 'resolved', updated_at = $1
+		 WHERE id = 'queued-0'`,
+		[createdAt],
+	)
+	await submit('queue-limited-user', 'Replacement active submission')
+	expect(await countFeedback('queue-limited-user', `'open', 'triaged'`)).toBe(
+		100,
+	)
 })
 
 test('platform feedback accepts the cancellation category', async () => {
-	const { db, sqlite } = createPlatformFeedbackDb()
+	await using database = await createPlatformFeedbackDb()
 	const submitted = await submitPlatformFeedback({
-		db,
+		db: database.submitter('user-c'),
 		submitterUserId: 'user-c',
 		submitterUsername: 'user-c-name',
 		submitterEmail: 'user-c@example.com',
@@ -483,8 +474,11 @@ test('platform feedback accepts the cancellation category', async () => {
 	})
 	expect(submitted.category).toBe('cancellation')
 	expect(
-		sqlite
-			.prepare(`SELECT category FROM platform_feedback WHERE id = ?`)
-			.get(submitted.id),
-	).toEqual({ category: 'cancellation' })
+		(
+			await database.pg.query(
+				'SELECT category FROM platform_feedback WHERE id = $1',
+				[submitted.id],
+			)
+		).rows,
+	).toEqual([{ category: 'cancellation' }])
 })

@@ -191,7 +191,7 @@ export async function setPlatformOauthAppLogo(input: {
 			casLogoKey
 				? `UPDATE platform_oauth_apps
 			SET logo_key = ?, logo_content_type = ?, updated_at = ?
-			WHERE slug = ? AND logo_key IS ?`
+			WHERE slug = ? AND logo_key IS NOT DISTINCT FROM ?`
 				: `UPDATE platform_oauth_apps
 			SET logo_key = ?, logo_content_type = ?, updated_at = ?
 			WHERE slug = ?`,

@@ -198,6 +198,11 @@ function createAdminCapabilityTestDb(input: {
 			const normalizedQuery = normalizeQuery(query)
 			const createStatement = (params: Array<unknown>) => ({
 				async first<T>() {
+					if (normalizedQuery.startsWith('insert into users')) {
+						const result = await this.run()
+						return { id: result.meta.last_row_id } as T
+					}
+
 					if (
 						normalizedQuery.includes(
 							'select authority, graph_mismatch_count, provider_link_count from system_email_graph_authority',
@@ -268,9 +273,7 @@ function createAdminCapabilityTestDb(input: {
 						normalizedQuery.startsWith(
 							'select id, stable_user_id, username, email',
 						) &&
-						normalizedQuery.includes(
-							'from users where email = ? collate nocase',
-						)
+						normalizedQuery.includes('from users where lower(email) = lower(?)')
 					) {
 						const email = String(params[0]).toLowerCase()
 						return (users.find((user) => user.email.toLowerCase() === email) ??
@@ -281,7 +284,7 @@ function createAdminCapabilityTestDb(input: {
 							'select id, stable_user_id, username, email',
 						) &&
 						normalizedQuery.includes(
-							'from users where username = ? collate nocase',
+							'from users where lower(username) = lower(?)',
 						)
 					) {
 						const username = String(params[0]).toLowerCase()
@@ -492,7 +495,7 @@ function createAdminCapabilityTestDb(input: {
 						users.push(user)
 						return { meta: { changes: 1, last_row_id: user.id } }
 					}
-					if (normalizedQuery.includes('insert or ignore into user_roles')) {
+					if (normalizedQuery.includes('insert into user_roles')) {
 						const userId = Number(params[0])
 						const roleName = String(params[1])
 						if (

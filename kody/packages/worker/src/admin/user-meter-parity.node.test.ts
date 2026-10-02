@@ -1,15 +1,14 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { userMeterRpc } from '#worker/entitlements/user-meter-client.ts'
-import { dailyEntitlementResources } from '#worker/entitlements/user-meter-do.ts'
+import { dailyEntitlementResources } from '#worker/entitlements/user-meter-client.ts'
 import type * as EntitlementsService from '#worker/entitlements/service.ts'
 
 const mockModule = vi.hoisted(() => ({
-	/** Physical D1 payload recompute; the minimal test DB has no payload tables. */
+	/** Physical payload recompute is entitlements-owned and still SQLite-dialect. */
 	calculateUserD1StorageBytes: vi.fn(async () => 0),
 }))
 
@@ -29,39 +28,19 @@ const stableUserId = testStableUserIdFromEmail('parity@example.com')
 const now = new Date('2026-08-01T12:00:00.000Z')
 const day = utcDayKey(now)
 
-function createParityTestDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE users (
-			id INTEGER PRIMARY KEY,
-			stable_user_id TEXT UNIQUE NOT NULL,
-			username TEXT NOT NULL,
-			email TEXT NOT NULL,
-			password_hash TEXT,
-			deleting_at TEXT,
-			created_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00.000Z',
-			updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00.000Z'
-		);
-	`)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
-function insertUser(
-	sqlite: DatabaseSync,
-	input: { stableUserId: string; deletingAt?: string | null },
-) {
-	sqlite
-		.prepare(
-			`INSERT INTO users (
-				stable_user_id, username, email, deleting_at
-			) VALUES (?, ?, ?, ?)`,
-		)
-		.run(
-			input.stableUserId,
-			'parity-user',
-			'parity@example.com',
-			input.deletingAt ?? null,
-		)
+async function createParityTestDb(input: { deletingAt?: string | null } = {}) {
+	const database = await createTestDb()
+	await database.pg.query(
+		`INSERT INTO users (stable_user_id, username, email, password_hash, deleting_at)
+		 VALUES ($1, 'parity-user', 'parity@example.com', 'x', $2)`,
+		[stableUserId, input.deletingAt ?? null],
+	)
+	return {
+		...database,
+		// The operator capability reads one account through that account's scoped reader.
+		readerFor: (userId: string) =>
+			database.forUser(userId).reader as unknown as D1Database,
+	}
 }
 
 async function initializeDailyCounters(input: {
@@ -86,10 +65,10 @@ function assertNoLeaseSecrets(value: unknown) {
 }
 
 test('loadAdminUserMeterParityReport verifies daily, storage, and deletion state without liveness D1 tables', async () => {
-	const { sqlite, db } = createParityTestDb()
+	await using database = await createParityTestDb()
+	const db = database.readerFor(stableUserId)
 	const meter = createInMemoryUserMeterEnv()
 	const meterStub = userMeterRpc({ env: meter.env, userId: stableUserId })
-	insertUser(sqlite, { stableUserId })
 	mockModule.calculateUserD1StorageBytes.mockResolvedValue(4096)
 	await initializeDailyCounters({
 		meter,
@@ -150,13 +129,12 @@ test('loadAdminUserMeterParityReport verifies daily, storage, and deletion state
 })
 
 test('loadAdminUserMeterParityReport surfaces bootstrap and tombstone mismatch without writing meter state', async () => {
-	const { sqlite, db } = createParityTestDb()
-	const meter = createInMemoryUserMeterEnv()
-	const meterStub = userMeterRpc({ env: meter.env, userId: stableUserId })
-	insertUser(sqlite, {
-		stableUserId,
+	await using database = await createParityTestDb({
 		deletingAt: '2026-08-01T08:00:00.000Z',
 	})
+	const db = database.readerFor(stableUserId)
+	const meter = createInMemoryUserMeterEnv()
+	const meterStub = userMeterRpc({ env: meter.env, userId: stableUserId })
 	mockModule.calculateUserD1StorageBytes.mockResolvedValue(100)
 	await meterStub.initialize({
 		resource: 'email_sends_per_day',
@@ -198,14 +176,24 @@ test('loadAdminUserMeterParityReport surfaces bootstrap and tombstone mismatch w
 	})
 })
 
-test('loadAdminUserMeterParityReport returns null for missing users', async () => {
-	const { db } = createParityTestDb()
+test('loadAdminUserMeterParityReport returns null for missing users and other scopes', async () => {
+	await using database = await createParityTestDb()
 	const meter = createInMemoryUserMeterEnv()
+	const missing = testStableUserIdFromEmail('missing@example.com')
 	await expect(
 		loadAdminUserMeterParityReport({
-			db,
+			db: database.readerFor(missing),
 			env: meter.env,
-			stableUserId: testStableUserIdFromEmail('missing@example.com'),
+			stableUserId: missing,
+			now,
+		}),
+	).resolves.toBeNull()
+	// Another account's reader cannot see the target row under RLS.
+	await expect(
+		loadAdminUserMeterParityReport({
+			db: database.readerFor(missing),
+			env: meter.env,
+			stableUserId,
 			now,
 		}),
 	).resolves.toBeNull()

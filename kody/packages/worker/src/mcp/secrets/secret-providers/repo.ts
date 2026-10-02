@@ -1,3 +1,4 @@
+import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 import {
 	type SecretProviderBindingRecord,
 	type SecretProviderGrantRecord,
@@ -100,12 +101,12 @@ export async function upsertSecretProviderBinding(
 			`INSERT INTO secret_provider_bindings (
 				user_id, provider_id, package_id, door_secret_name, config_json,
 				created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(user_id, provider_id) DO UPDATE SET
 				package_id = excluded.package_id,
 				door_secret_name = excluded.door_secret_name,
 				config_json = excluded.config_json,
-				updated_at = CURRENT_TIMESTAMP`,
+				updated_at = excluded.updated_at`,
 		)
 		.bind(
 			input.userId,
@@ -113,6 +114,8 @@ export async function upsertSecretProviderBinding(
 			input.packageId,
 			input.doorSecretName,
 			input.configJson,
+			utcSqliteTimestamp(),
+			utcSqliteTimestamp(),
 		)
 		.run()
 }
@@ -177,10 +180,16 @@ export async function insertSecretProviderGrant(
 		.prepare(
 			`INSERT INTO secret_provider_grants (
 				user_id, provider_id, canonical_ref, package_id, created_at
-			) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+			) VALUES (?, ?, ?, ?, ?)
 			ON CONFLICT(user_id, provider_id, canonical_ref, package_id) DO NOTHING`,
 		)
-		.bind(input.userId, input.providerId, input.canonicalRef, input.packageId)
+		.bind(
+			input.userId,
+			input.providerId,
+			input.canonicalRef,
+			input.packageId,
+			utcSqliteTimestamp(),
+		)
 		.run()
 }
 

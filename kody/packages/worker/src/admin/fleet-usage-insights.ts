@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 import {
 	estimateDynamicWorkerUsd,
@@ -126,7 +127,7 @@ export type FleetEntitlementCrossingSnapshot = {
 }
 
 export async function loadFleetUsageInsights(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Env
 	now: Date
 }): Promise<{
@@ -160,7 +161,7 @@ export async function loadFleetUsageInsights(input: {
 }
 
 export async function loadFleetEntitlementCrossingSnapshots(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Env
 	now: Date
 }): Promise<Array<FleetEntitlementCrossingSnapshot>> {
@@ -228,7 +229,7 @@ export async function loadFleetEntitlementCrossingSnapshots(input: {
 }
 
 export async function detectFleetUsagePressure(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Env
 	now: Date
 	runtimeDurationThresholdMs?: number
@@ -280,7 +281,7 @@ export async function detectFleetUsagePressure(input: {
 }
 
 async function queryTopRuntimeDurationConsumers(
-	db: D1Database,
+	db: SqlDatabase,
 	currentMonth: string,
 ): Promise<Array<AdminInsightsDurationConsumer>> {
 	const metricPlaceholders = adminFleetRuntimeDurationMetrics
@@ -316,7 +317,7 @@ async function queryTopRuntimeDurationConsumers(
 }
 
 async function queryTopEventCountConsumers(
-	db: D1Database,
+	db: SqlDatabase,
 	currentMonth: string,
 ): Promise<Array<AdminInsightsEventCountConsumer>> {
 	const rows = await db
@@ -345,7 +346,7 @@ async function queryTopEventCountConsumers(
 }
 
 async function queryDynamicWorkerCost(
-	db: D1Database,
+	db: SqlDatabase,
 	env: Env,
 	currentMonth: string,
 ): Promise<AdminInsightsDynamicWorkerCost> {
@@ -404,7 +405,7 @@ async function queryDynamicWorkerCost(
 }
 
 async function queryTopDurationConsumersByMetric(
-	db: D1Database,
+	db: SqlDatabase,
 	currentMonth: string,
 ): Promise<Array<AdminInsightsMetricDurationConsumers>> {
 	const metricPlaceholders = adminFleetRuntimeDurationMetrics
@@ -460,7 +461,7 @@ async function queryTopDurationConsumersByMetric(
 }
 
 async function buildEntitlementPressurePanel(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Env
 	now: Date
 }): Promise<Array<AdminInsightsEntitlementPressureUser>> {
@@ -517,7 +518,7 @@ async function buildEntitlementPressurePanel(input: {
 }
 
 async function listActiveUsersForEntitlementSweep(
-	db: D1Database,
+	db: SqlDatabase,
 	currentMonth: string,
 ): Promise<Array<ActiveUserRow>> {
 	const rows = await db
@@ -541,7 +542,7 @@ async function listActiveUsersForEntitlementSweep(
 	return rows.results ?? []
 }
 
-async function listAdminStableUserIds(db: D1Database) {
+async function listAdminStableUserIds(db: SqlDatabase) {
 	const rows = await db
 		.prepare(
 			`SELECT u.stable_user_id
@@ -556,7 +557,7 @@ async function listAdminStableUserIds(db: D1Database) {
 }
 
 async function queryUniqueWorkerDaysByUserIds(
-	db: D1Database,
+	db: SqlDatabase,
 	currentMonth: string,
 	userIds: ReadonlyArray<string>,
 ): Promise<Map<string, number>> {
@@ -580,7 +581,7 @@ async function queryUniqueWorkerDaysByUserIds(
 }
 
 async function queryCombinedRuntimeDurationByUserIds(
-	db: D1Database,
+	db: SqlDatabase,
 	currentMonth: string,
 	userIds: ReadonlyArray<string>,
 	metrics: ReadonlyArray<AdminUsageMetric> = adminFleetRuntimeDurationMetrics,

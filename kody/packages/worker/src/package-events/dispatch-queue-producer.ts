@@ -1,3 +1,10 @@
+import { canonicalJsonStringify } from '@kody-internal/shared/canonical-json.ts'
+import { sha256Base64Url } from '@kody-internal/shared/sha256.ts'
+import { type KodyEvent } from '#worker/temporal/activities/types.ts'
+import { type KodyTemporal } from '#worker/temporal/client.ts'
+import { taskQueues, workflowIds } from '#worker/temporal/ids.ts'
+import { startKodyWorkflow } from '#worker/temporal/start.ts'
+
 export type PackageEventsDispatchQueueMessage = {
 	userId: string
 	topic: string
@@ -64,4 +71,40 @@ export function parsePackageEventsDispatchQueueMessage(
 		source: { packageId: packageId.trim(), kodyId: kodyId.trim() },
 		invokeDepth,
 	}
+}
+
+/**
+ * Fan a package-emitted event out through `EventFanout`
+ * (`{topic}:{eventId}`); the event id is derived from the emitter and its
+ * idempotency key, so a repeated `events.dispatch` starts nothing new.
+ */
+export async function startPackageEventFanout(
+	env: { TEMPORAL?: KodyTemporal },
+	message: PackageEventsDispatchQueueMessage,
+) {
+	const eventId = await sha256Base64Url(
+		canonicalJsonStringify([
+			message.userId,
+			message.source.packageId,
+			message.idempotencyKey,
+		]),
+	)
+	const event: KodyEvent = {
+		userId: message.userId,
+		topic: message.topic,
+		eventId,
+		payload: message.payload,
+		detail: message,
+	}
+	const workflowId = workflowIds.eventFanout(message.topic, eventId)
+	const outcome = await startKodyWorkflow(env.TEMPORAL, {
+		workflowType: 'EventFanout',
+		workflowId,
+		taskQueue: taskQueues.platform,
+		args: [event],
+		userId: message.userId,
+		surface: 'event',
+		packageId: message.source.packageId,
+	})
+	return { outcome, workflowId }
 }

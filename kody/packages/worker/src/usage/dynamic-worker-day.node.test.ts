@@ -56,7 +56,7 @@ test('recordUniqueDynamicWorkerDay records the first claim and skips repeats', a
 	recordUsageSpy.mockRestore()
 })
 
-test('recordUniqueDynamicWorkerDay skips when USER_METER is missing', async () => {
+test('recordUniqueDynamicWorkerDay skips when USER_METERS is missing', async () => {
 	const usageModule = await import('#worker/usage/record-usage.ts')
 	const spy = vi.spyOn(usageModule, 'recordUsage').mockResolvedValue(undefined)
 
@@ -87,14 +87,11 @@ test('recordUniqueDynamicWorkerDay skips anonymous runs and never throws', async
 	})
 	await recordUniqueDynamicWorkerDay({
 		env: {
-			USER_METER: {
-				idFromName() {
+			USER_METERS: {
+				forUser() {
 					throw new Error('meter exploded')
 				},
-				get() {
-					throw new Error('meter exploded')
-				},
-			} as unknown as DurableObjectNamespace,
+			},
 		},
 		userId: 'user-1',
 		workerId: 'kody-worker-a',

@@ -13,33 +13,12 @@ vi.mock('./package-subscriptions.ts', () => ({
 		mocks.processCloudflareArtifactsRepoEvent,
 }))
 
-const { handleArtifactsRepoEventsQueue } =
+const { processArtifactsRepoEventMessage } =
 	await import('./artifacts-event-queue.ts')
 
-function createQueueMessage(id: string, body: unknown) {
-	return {
-		id,
-		timestamp: new Date('2026-05-18T20:00:00.000Z'),
-		body,
-		attempts: 1,
-		ack: vi.fn(),
-		retry: vi.fn(),
-	}
-}
-
-test('artifacts repo events queue acks terminal outcomes and retries unmatched creates', async () => {
+test('artifacts repo events ack terminal outcomes and retry unmatched creates', async () => {
 	consoleWarn.mockImplementation(() => {})
 	consoleError.mockImplementation(() => {})
-	const dispatched = createQueueMessage('q-dispatched', { kind: 'dispatched' })
-	const ignored = createQueueMessage('q-ignored', { kind: 'ignored' })
-	const invalid = createQueueMessage('q-invalid', { kind: 'invalid' })
-	const unmatchedPush = createQueueMessage('q-unmatched-push', {
-		kind: 'unmatched-push',
-	})
-	const unmatchedDeleted = createQueueMessage('q-unmatched-deleted', {
-		kind: 'unmatched-deleted',
-	})
-	const failed = createQueueMessage('q-failed', { kind: 'failed' })
 
 	mocks.processCloudflareArtifactsRepoEvent.mockImplementation(
 		async (input) => {
@@ -82,28 +61,24 @@ test('artifacts repo events queue acks terminal outcomes and retries unmatched c
 		},
 	)
 
-	await handleArtifactsRepoEventsQueue(
-		{
-			queue: 'kody-artifacts-repo-events',
-			messages: [
-				dispatched,
-				ignored,
-				invalid,
-				unmatchedPush,
-				unmatchedDeleted,
-				failed,
-			],
-			ackAll: vi.fn(),
-			retryAll: vi.fn(),
-		} as unknown as MessageBatch<unknown>,
-		{} as Env,
-		{ waitUntil: vi.fn() } as unknown as ExecutionContext,
-	)
+	const outcomes = []
+	for (const kind of [
+		'dispatched',
+		'ignored',
+		'invalid',
+		'unmatched-push',
+		'unmatched-deleted',
+		'failed',
+	]) {
+		outcomes.push(
+			await processArtifactsRepoEventMessage({ kind }, {} as Env, vi.fn()),
+		)
+	}
 
-	expect(dispatched.ack).toHaveBeenCalledTimes(1)
-	expect(ignored.ack).toHaveBeenCalledTimes(1)
-	expect(invalid.ack).toHaveBeenCalledTimes(1)
-	expect(unmatchedPush.retry).toHaveBeenCalledWith({ delaySeconds: 30 })
-	expect(unmatchedDeleted.ack).toHaveBeenCalledTimes(1)
-	expect(failed.retry).toHaveBeenCalledWith({ delaySeconds: 30 })
+	expect(outcomes).toEqual(['ack', 'ack', 'ack', 'retry', 'ack', 'retry'])
+	expect(consoleWarn).toHaveBeenCalledWith('artifacts-repo-event-unmatched', {
+		type: 'cf.artifacts.repo.pushed',
+		repoName: 'repo-1',
+		namespace: 'production',
+	})
 })

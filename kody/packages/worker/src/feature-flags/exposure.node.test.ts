@@ -1,3 +1,4 @@
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { expect, test, vi } from 'vitest'
 import { recordFeatureFlagExposures } from './exposure.ts'
 import { recordPaidRankedSearchFlagExposure } from './paid-ranked-search-exposure.ts'
@@ -122,4 +123,37 @@ test('recordPaidRankedSearchFlagExposure writes the caller evaluation for paid u
 	expect(writeDataPoint.mock.calls[0]?.[0]).toMatchObject({
 		blobs: expect.arrayContaining([jevSearchRerankFlagKey, 'on', 'global']),
 	})
+})
+
+test('Postgres exposure upserts increment only the current user rollup', async () => {
+	await using database = await createTestDb({ userId: 'alice' })
+	const input = {
+		stableUserId: 'alice',
+		evaluations: {
+			'compact-mcp-server-instructions': {
+				enabled: true,
+				source: 'global' as const,
+			},
+		},
+		timestamp: '2026-09-30T00:00:00.000Z',
+	}
+	await recordFeatureFlagExposures({ APP_DB: database.db }, input)
+	await recordFeatureFlagExposures({ APP_DB: database.db }, input)
+	expect(
+		(
+			await database.reader
+				.prepare(
+					'SELECT user_id, exposure_count FROM feature_flag_exposure_rollups',
+				)
+				.all()
+		).results,
+	).toEqual([{ user_id: 'alice', exposure_count: 2 }])
+	expect(
+		(
+			await database
+				.forUser('bob')
+				.reader.prepare('SELECT * FROM feature_flag_exposure_rollups')
+				.all()
+		).results,
+	).toEqual([])
 })

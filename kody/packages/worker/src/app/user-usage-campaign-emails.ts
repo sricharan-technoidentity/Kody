@@ -1,3 +1,4 @@
+import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
 import {
 	buildAdvocateReferralEmail,
@@ -143,7 +144,9 @@ export async function sendUserUsageCampaignEmails(input: {
 		usageCampaignSweepConcurrency,
 		async (user) => {
 			const sent = await evaluateAndMaybeSendOneUser({
-				env: input.env,
+				// Candidates come from the operator listing; each one's campaign
+				// rows are read and written on that account's own writer.
+				env: getAccountEnv(input.env, user.stable_user_id),
 				emailConfig,
 				user,
 				now,

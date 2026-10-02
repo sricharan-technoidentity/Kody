@@ -19,13 +19,14 @@ import {
 // v1 traversed D1 email rows, so its continuation cannot be translated to the
 // Mailbox keyset without risking duplicate bytes. Signed v1 cursors fail with
 // an explicit restart instruction instead.
-const accountR2CursorVersion = 3
+// v4: primary-key keyset cursors.
+const accountR2CursorVersion = 4
 const accountR2ChunkBytes = 256 * 1024
 
 type R2ScanState =
 	| { stage: 'avatar' }
-	| { stage: 'community_icon'; afterRowid: number }
-	| { stage: 'identity_icon'; afterRowid: number }
+	| { stage: 'community_icon'; afterId: string }
+	| { stage: 'identity_icon'; afterId: string }
 	| { stage: 'mailbox_email_blob'; startAfter: string | null }
 	| { stage: 'done' }
 
@@ -33,13 +34,12 @@ type R2ObjectSource =
 	| { kind: 'avatar' }
 	| {
 			kind: 'community_icon'
-			rowid: number
 			listingId: string
 			commitSlot: 'pinned' | 'icon'
 	  }
 	| {
 			kind: 'identity_icon'
-			rowid: number
+			sourceId: string
 			repoId: string
 	  }
 	| AccountMailboxEmailObjectSource
@@ -115,9 +115,8 @@ function isScanState(value: unknown): value is R2ScanState {
 	}
 	return (
 		(stage === 'community_icon' || stage === 'identity_icon') &&
-		'afterRowid' in value &&
-		Number.isSafeInteger((value as { afterRowid: unknown }).afterRowid) &&
-		(value as { afterRowid: number }).afterRowid >= 0
+		'afterId' in value &&
+		typeof (value as { afterId: unknown }).afterId === 'string'
 	)
 }
 
@@ -184,7 +183,7 @@ async function findNextRef(input: {
 					.first<{ avatar_key: string | null }>()
 				cursor = {
 					v: accountR2CursorVersion,
-					state: { stage: 'community_icon', afterRowid: 0 },
+					state: { stage: 'community_icon', afterId: '' },
 					...(row?.avatar_key
 						? {
 								current: {
@@ -203,8 +202,7 @@ async function findNextRef(input: {
 			}
 			case 'community_icon': {
 				const row = await input.env.APP_DB.prepare(
-					`SELECT community_listings.rowid AS source_rowid,
-						community_listings.id, community_listings.pinned_commit,
+					`SELECT community_listings.id, community_listings.pinned_commit,
 						entity_sources.published_commit AS source_published_commit
 					FROM community_listings
 					LEFT JOIN entity_sources
@@ -213,13 +211,12 @@ async function findNextRef(input: {
 						AND entity_sources.entity_kind = 'package'
 						AND entity_sources.entity_id = community_listings.package_id
 					WHERE community_listings.owner_user_id = ?
-						AND community_listings.rowid > ?
-					ORDER BY community_listings.rowid
+						AND community_listings.id > ?
+					ORDER BY community_listings.id
 					LIMIT 1`,
 				)
-					.bind(input.userId, cursor.state.afterRowid)
+					.bind(input.userId, cursor.state.afterId)
 					.first<{
-						source_rowid: number
 						id: string
 						pinned_commit: string
 						source_published_commit: string | null
@@ -227,7 +224,7 @@ async function findNextRef(input: {
 				if (!row) {
 					cursor = {
 						v: accountR2CursorVersion,
-						state: { stage: 'identity_icon', afterRowid: 0 },
+						state: { stage: 'identity_icon', afterId: '' },
 					}
 					break
 				}
@@ -246,7 +243,6 @@ async function findNextRef(input: {
 					}),
 					source: {
 						kind: 'community_icon',
-						rowid: row.source_rowid,
 						listingId: row.id,
 						commitSlot: index === 0 ? 'pinned' : 'icon',
 					},
@@ -255,7 +251,7 @@ async function findNextRef(input: {
 					v: accountR2CursorVersion,
 					state: {
 						stage: 'community_icon',
-						afterRowid: row.source_rowid,
+						afterId: row.id,
 					},
 					current: { ref: refs[0]!, offset: 0 },
 					...(refs[1] ? { pending: refs[1] } : {}),
@@ -264,20 +260,20 @@ async function findNextRef(input: {
 			}
 			case 'identity_icon': {
 				const row = await input.env.APP_DB.prepare(
-					`SELECT entity_sources.rowid AS source_rowid,
+					`SELECT entity_sources.id,
 						entity_sources.repo_id,
 						entity_sources.entity_kind,
 						entity_sources.published_commit,
 						entity_sources.indexed_commit
 					FROM entity_sources
 					WHERE entity_sources.user_id = ?
-						AND entity_sources.rowid > ?
-					ORDER BY entity_sources.rowid
+						AND entity_sources.id > ?
+					ORDER BY entity_sources.id
 					LIMIT 1`,
 				)
-					.bind(input.userId, cursor.state.afterRowid)
+					.bind(input.userId, cursor.state.afterId)
 					.first<{
-						source_rowid: number
+						id: string
 						repo_id: string
 						entity_kind: EntityKind
 						published_commit: string | null
@@ -299,7 +295,7 @@ async function findNextRef(input: {
 					v: accountR2CursorVersion,
 					state: {
 						stage: 'identity_icon',
-						afterRowid: row.source_rowid,
+						afterId: row.id,
 					},
 					...(iconCommit
 						? {
@@ -313,7 +309,7 @@ async function findNextRef(input: {
 										}),
 										source: {
 											kind: 'identity_icon' as const,
-											rowid: row.source_rowid,
+											sourceId: row.id,
 											repoId: row.repo_id,
 										},
 									},
@@ -406,10 +402,9 @@ async function resolveCurrentRef(input: {
 					AND entity_sources.entity_kind = 'package'
 					AND entity_sources.entity_id = community_listings.package_id
 				WHERE community_listings.owner_user_id = ?
-					AND community_listings.rowid = ?
 					AND community_listings.id = ?`,
 			)
-				.bind(input.userId, input.ref.source.rowid, input.ref.source.listingId)
+				.bind(input.userId, input.ref.source.listingId)
 				.first<{
 					pinned_commit: string
 					source_published_commit: string | null
@@ -434,10 +429,10 @@ async function resolveCurrentRef(input: {
 					entity_sources.indexed_commit
 				FROM entity_sources
 				WHERE entity_sources.user_id = ?
-					AND entity_sources.rowid = ?
+					AND entity_sources.id = ?
 					AND entity_sources.repo_id = ?`,
 			)
-				.bind(input.userId, input.ref.source.rowid, input.ref.source.repoId)
+				.bind(input.userId, input.ref.source.sourceId, input.ref.source.repoId)
 				.first<{
 					repo_id: string
 					entity_kind: EntityKind

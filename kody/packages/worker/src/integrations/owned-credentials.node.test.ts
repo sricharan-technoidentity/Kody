@@ -1,13 +1,14 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import {
 	listSecrets,
 	listUserSecretsForSearch,
 	resolveSecret,
 } from '#mcp/secrets/service.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import {
+	createUserTestEnv,
+	pgQuery,
+	seedSavedPackage,
+} from '#worker/test-support/aws/user-test-env.ts'
 import {
 	persistIntegrationTokens,
 	persistUserOauthAppClientSecret,
@@ -29,38 +30,11 @@ import {
 	upsertIntegration,
 } from './service.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
 const storageContext = { sessionId: null, appId: null, packageId: null }
 
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
-		...createInMemoryUserMeterEnv().env,
-	} as Env
-	return { sqlite, env }
-}
-
-function seedPackage(
-	sqlite: DatabaseSync,
-	input: { id: string; userId: string; kodyId: string },
-) {
-	sqlite
-		.prepare(
-			`INSERT INTO saved_packages (
-				id, user_id, name, kody_id, description, source_id
-			) VALUES (?, ?, ?, ?, ?, ?)`,
-		)
-		.run(
-			input.id,
-			input.userId,
-			input.kodyId,
-			input.kodyId,
-			'',
-			`source-${input.id}`,
-		)
+async function createHarness(userId: string) {
+	const harness = await createUserTestEnv({ userId })
+	return { ...harness, q: pgQuery(harness.pg) }
 }
 
 const googleConfig = {
@@ -79,10 +53,11 @@ const googleConfig = {
 }
 
 test('integration-owned credentials persist as ciphertext, stay off secret lists, and survive sibling disconnect', async () => {
-	const { sqlite, env } = createHarness()
 	const userId = 'user-owned-creds'
-	seedPackage(sqlite, { id: 'pkg-mail', userId, kodyId: 'mail' })
-	seedPackage(sqlite, { id: 'pkg-docs', userId, kodyId: 'docs' })
+	await using harness = await createHarness(userId)
+	const { env, q } = harness
+	await seedSavedPackage(harness.pg, { id: 'pkg-mail', userId, kodyId: 'mail' })
+	await seedSavedPackage(harness.pg, { id: 'pkg-docs', userId, kodyId: 'docs' })
 
 	await upsertIntegration({ env, userId, config: googleConfig })
 	await persistIntegrationTokens({
@@ -99,29 +74,29 @@ test('integration-owned credentials persist as ciphertext, stay off secret lists
 		value: 'client-secret-live',
 	})
 
-	const ciphertexts = sqlite
-		.prepare(
-			`SELECT access_token_encrypted, refresh_token_encrypted
+	const ciphertexts = (await q.get(
+		`SELECT access_token_encrypted, refresh_token_encrypted
 			FROM user_integrations
 			WHERE user_id = ? AND name = ?`,
-		)
-		.get(userId, 'google') as {
+		userId,
+		'google',
+	)) as {
 		access_token_encrypted: string
 		refresh_token_encrypted: string
 	}
-	expect(ciphertexts.access_token_encrypted.startsWith('v2.')).toBe(true)
-	expect(ciphertexts.refresh_token_encrypted.startsWith('v2.')).toBe(true)
+	expect(ciphertexts.access_token_encrypted).not.toContain('access-live')
+	expect(ciphertexts.refresh_token_encrypted).not.toContain('refresh-live')
 	expect(
 		(
-			sqlite
-				.prepare(
-					`SELECT client_secret_encrypted
+			(await q.get(
+				`SELECT client_secret_encrypted
 					FROM user_oauth_apps
 					WHERE user_id = ? AND slug = ?`,
-				)
-				.get(userId, 'google') as { client_secret_encrypted: string }
-		).client_secret_encrypted.startsWith('v2.'),
-	).toBe(true)
+				userId,
+				'google',
+			)) as { client_secret_encrypted: string }
+		).client_secret_encrypted,
+	).not.toContain('client-secret-live')
 
 	expect(
 		await resolveIntegrationAccessToken({
@@ -145,13 +120,13 @@ test('integration-owned credentials persist as ciphertext, stay off secret lists
 		}),
 	).toBe('client-secret-live')
 
-	sqlite
-		.prepare(
-			`UPDATE user_integrations
+	await q.run(
+		`UPDATE user_integrations
 			SET access_token_encrypted = NULL, refresh_token_encrypted = NULL
 			WHERE user_id = ? AND name = ?`,
-		)
-		.run(userId, 'google')
+		userId,
+		'google',
+	)
 	expect(
 		await resolveIntegrationAccessToken({
 			env,
@@ -311,8 +286,9 @@ test('integration-owned credentials persist as ciphertext, stay off secret lists
 })
 
 test('disconnecting the last user-lane connection deletes the leftover client secret', async () => {
-	const { env } = createHarness()
 	const userId = 'user-last-disconnect'
+	await using harness = await createHarness(userId)
+	const { env, q } = harness
 
 	await upsertIntegration({ env, userId, config: googleConfig })
 	await persistIntegrationTokens({
@@ -348,9 +324,14 @@ test('disconnecting the last user-lane connection deletes the leftover client se
 })
 
 test('lockIntegrationToPackage switches any-context usage to packages and rejects unknown packages', async () => {
-	const { sqlite, env } = createHarness()
 	const userId = 'user-lock-usage'
-	seedPackage(sqlite, { id: 'pkg-drafts', userId, kodyId: 'gmail-drafts' })
+	await using harness = await createHarness(userId)
+	const { env, q } = harness
+	await seedSavedPackage(harness.pg, {
+		id: 'pkg-drafts',
+		userId,
+		kodyId: 'gmail-drafts',
+	})
 	await upsertIntegration({ env, userId, config: googleConfig })
 
 	const grantedWhileAny = await grantIntegrationPackage({

@@ -4,6 +4,8 @@
  * `guild-role.ts` so this probe does not pull that graph into MCP Waiting.
  */
 
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+
 export const DISCORD_MEMBERSHIP_REQUEST_TIMEOUT_MS = 8_000
 
 export type DiscordMembershipEnv = {
@@ -39,7 +41,10 @@ function guildMemberUrl(guildId: string, discordUserId: string) {
 	return `${discordApiBaseUrl}/guilds/${guildId}/members/${discordUserId}`
 }
 
-async function readDiscordConnectionUserIds(db: D1Database, userId: number) {
+async function readDiscordConnectionUserIds(
+	db: Pick<SqlDatabase, 'prepare'>,
+	userId: number,
+) {
 	const result = await db
 		.prepare(
 			`SELECT provider_id FROM oauth_connections
@@ -112,7 +117,7 @@ export async function readOfficialDiscordGuildMembership(input: {
  * API blip, or a storage error — so Waiting must not invent a card.
  */
 export async function readOfficialDiscordMembershipForUser(input: {
-	env: DiscordMembershipEnv & { APP_DB: D1Database }
+	env: DiscordMembershipEnv & { APP_DB: Pick<SqlDatabase, 'prepare'> }
 	userId: number
 	fetchImpl?: typeof fetch
 	timeoutMs?: number

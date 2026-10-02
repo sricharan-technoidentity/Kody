@@ -95,7 +95,7 @@ function createDispatchedHandle(input: {
 }
 
 async function findAlreadyDispatchedWorkflowRunByIdempotencyKey(input: {
-	env: Pick<Env, 'RUN_LOG'>
+	env: Pick<Env, 'RUN_STATE'>
 	userId: string
 	idempotencyKey: string
 }): Promise<{
@@ -177,7 +177,7 @@ type SettledInlineRun<T> =
  * silently disagree with projection ownership.
  */
 export async function runWithDurableEscalation<T>(input: {
-	env: Pick<Env, 'APP_DB' | 'DYNAMIC_CALLABLE_WORKFLOWS' | 'RUN_LOG'>
+	env: Pick<Env, 'APP_DB' | 'TEMPORAL' | 'RUN_STATE'>
 	userId: string
 	userEmail?: string | null
 	budgetMs?: number

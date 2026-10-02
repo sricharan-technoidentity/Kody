@@ -7,27 +7,8 @@ import {
 	highlightSnippets,
 	uniqueHighlightSnippets,
 } from '#app/highlight-code.ts'
-import { highlightCacheHeaderName } from '#universal/highlight-cache-header.ts'
-import {
-	highlightSnippetKey,
-	plainHighlightedCode,
-	type HighlightedCode,
-} from '#universal/highlighted-code.ts'
+import { highlightSnippetKey } from '#universal/highlighted-code.ts'
 import { type ServerTimingEntry } from '#worker/server-timing.ts'
-
-function highlightedFixture(
-	code: string,
-	lang = 'typescript',
-): HighlightedCode {
-	return {
-		code,
-		lang,
-		plain: false,
-		lines: [
-			[{ content: code, style: { color: '#111', '--shiki-dark': '#eee' } }],
-		],
-	}
-}
 
 test('collectMarkdownFences walks top-level and nested code tokens', () => {
 	expect(
@@ -45,87 +26,40 @@ test('collectMarkdownFences walks top-level and nested code tokens', () => {
 	).toEqual([{ code: '{"ok": true}', lang: 'json' }])
 })
 
-test('highlightSnippets covers fallback, worker timings, key mapping, and worker errors', async () => {
-	const fallbackTiming: Array<ServerTimingEntry> = []
-	const fallback = await highlightSnippets(
-		{},
-		[{ code: 'const x = 1', lang: 'ts' }],
-		{ serverTiming: fallbackTiming },
-	)
-	expect(fallback).toEqual([plainHighlightedCode('const x = 1', 'ts')])
-	expect(fallbackTiming).toEqual([
-		expect.objectContaining({ name: 'highlight', desc: 'fallback' }),
-	])
-
+test('highlightSnippets tokenizes directly and keeps timing and key mapping', async () => {
 	const snippet = { code: 'const x = 1', lang: 'ts' as const }
-	const fixture = highlightedFixture(snippet.code)
-	const workerTiming: Array<ServerTimingEntry> = []
-	const workerEnv = {
-		HIGHLIGHT: {
-			fetch: async () =>
-				Response.json(
-					{ results: [fixture] },
-					{ headers: { [highlightCacheHeaderName]: 'hit' } },
-				),
-		} as unknown as Fetcher,
-	}
-	const workerResults = await highlightSnippets(workerEnv, [snippet], {
-		serverTiming: workerTiming,
+	const timing: Array<ServerTimingEntry> = []
+	const results = await highlightSnippets({}, [snippet], {
+		serverTiming: timing,
 	})
-	expect(workerResults).toEqual([fixture])
-	expect(workerTiming).toEqual([
-		expect.objectContaining({ name: 'highlight', desc: 'worker' }),
+	expect(results).toHaveLength(1)
+	expect(results[0]).toMatchObject({
+		code: snippet.code,
+		lang: 'ts',
+		plain: false,
+	})
+	expect(results[0]?.lines.flat().length).toBeGreaterThan(0)
+	expect(timing).toEqual([
+		expect.objectContaining({ name: 'highlight', desc: 'library' }),
 	])
-	expect(highlightResultsByKey([snippet], workerResults)).toEqual({
-		[highlightSnippetKey(snippet)]: fixture,
+	expect(highlightResultsByKey([snippet], results)).toEqual({
+		[highlightSnippetKey(snippet)]: results[0],
 	})
 	expect(
 		uniqueHighlightSnippets([snippet, snippet, { code: 'x', lang: 'txt' }]),
 	).toEqual([snippet, { code: 'x', lang: 'txt' }])
-
-	const missTiming: Array<ServerTimingEntry> = []
-	const missEnv = {
-		HIGHLIGHT: {
-			fetch: async () =>
-				Response.json(
-					{ results: [fixture] },
-					{ headers: { [highlightCacheHeaderName]: 'miss' } },
-				),
-		} as unknown as Fetcher,
-	}
 	expect(
-		await highlightSnippets(missEnv, [snippet], { serverTiming: missTiming }),
-	).toEqual([fixture])
-	expect(missTiming).toEqual([
-		expect.objectContaining({ name: 'highlight', desc: 'miss' }),
-	])
-
-	const errorEnv = {
-		HIGHLIGHT: {
-			fetch: async () => new Response('nope', { status: 503 }),
-		} as unknown as Fetcher,
-	}
-	expect(
-		await highlightSnippets(errorEnv, [{ code: 'const x = 1', lang: 'ts' }]),
-	).toEqual([plainHighlightedCode('const x = 1', 'ts')])
+		await highlightSnippets({}, [{ code: 'x', lang: 'unknown' }]),
+	).toMatchObject([{ code: 'x', plain: true }])
 })
 
-test('highlightMarkdownFences and highlightJsonValue use the worker', async () => {
-	const markdownFixture = highlightedFixture('const x = 1')
-	const jsonFixture = highlightedFixture('{\n  "ok": true\n}', 'json')
-	let calls = 0
-	const env = {
-		HIGHLIGHT: {
-			fetch: async () => {
-				calls += 1
-				return Response.json({
-					results: calls === 1 ? [markdownFixture] : [jsonFixture],
-				})
-			},
-		} as unknown as Fetcher,
-	}
-	expect(await highlightMarkdownFences(env, '```ts\nconst x = 1\n```')).toEqual(
-		[markdownFixture],
-	)
-	expect(await highlightJsonValue(env, { ok: true })).toEqual(jsonFixture)
+test('highlightMarkdownFences and highlightJsonValue tokenize code', async () => {
+	const markdown = await highlightMarkdownFences({}, '```ts\nconst x = 1\n```')
+	expect(markdown).toMatchObject([{ code: 'const x = 1', plain: false }])
+	const json = await highlightJsonValue({}, { ok: true })
+	expect(json).toMatchObject({
+		code: '{\n  "ok": true\n}',
+		lang: 'json',
+		plain: false,
+	})
 })

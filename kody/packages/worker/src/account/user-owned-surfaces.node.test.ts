@@ -137,7 +137,7 @@ test('account deletion and export consume the out-of-band surface registry', () 
 		accountUserOwnedDurableObjectSurfaces.find(
 			(surface) => surface.id === 'run_log',
 		)?.notes,
-	).toMatch(/There are no D1 tables workflow_runs/)
+	).toMatch(/RUN_RECORDS \(DynamoDB owner partitions and S3 logs\)/)
 	expect(accountDeletionSource).toContain(
 		"from '#worker/account/user-owned-surfaces.ts'",
 	)

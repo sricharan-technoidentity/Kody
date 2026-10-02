@@ -1,48 +1,20 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import {
+	createUserTestEnv,
+	seedSavedPackage,
+} from '#worker/test-support/aws/user-test-env.ts'
 import { lockSecretToPackage, saveSecret } from './service.ts'
 
-const migrationsDirectory = new URL('../../../migrations/', import.meta.url)
-
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
-		...createInMemoryUserMeterEnv().env,
-	} as Env
-	return { sqlite, env }
-}
-
-function seedPackage(
-	sqlite: DatabaseSync,
-	input: { id: string; userId: string; kodyId: string },
-) {
-	sqlite
-		.prepare(
-			`INSERT INTO saved_packages (
-				id, user_id, name, kody_id, description, source_id
-			) VALUES (?, ?, ?, ?, ?, ?)`,
-		)
-		.run(
-			input.id,
-			input.userId,
-			input.kodyId,
-			input.kodyId,
-			'',
-			`source-${input.id}`,
-		)
-}
-
 test('lockSecretToPackage adds a package grant and rejects unknown packages', async () => {
-	const { sqlite, env } = createHarness()
 	const userId = 'user-secret-lock'
-	seedPackage(sqlite, { id: 'pkg-notes', userId, kodyId: 'notes' })
-	seedPackage(sqlite, { id: 'pkg-mail', userId, kodyId: 'mail' })
+	await using harness = await createUserTestEnv({ userId })
+	const { env } = harness
+	await seedSavedPackage(harness.pg, {
+		id: 'pkg-notes',
+		userId,
+		kodyId: 'notes',
+	})
+	await seedSavedPackage(harness.pg, { id: 'pkg-mail', userId, kodyId: 'mail' })
 
 	await saveSecret({
 		env,

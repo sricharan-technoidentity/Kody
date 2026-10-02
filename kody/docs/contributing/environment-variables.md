@@ -326,13 +326,18 @@ Required Worker configuration for MCP OAuth OpenID Connect ID tokens (RS256):
 
 Public JWKS is derived from the private key at `/.well-known/jwks.json`.
 
-## Saved-secret encryption (`SECRET_STORE_KEY`)
+## Saved-secret encryption (`SECRET_KMS`)
 
-Required Worker secret used to derive the AES-GCM key for encrypting saved
-secrets at rest in D1.
+Required binding: the KMS envelope port (`createKmsEnvelope` over `KMS_KEY_ID`
+in production, `createFakeKms()` in tests). Every Kody-held secret — saved
+secrets, integration tokens, OAuth app client secrets, webhook URL secrets and
+MCP refresh-family snapshots — is envelope-encrypted with the KMS encryption
+context `{ purpose, userId, ... }`, which replaces the old AAD strings
+(`user:<userId>`, ...). The migration POC replaced the derived
+`SECRET_STORE_KEY` key; re-encrypting existing rows is cutover work.
 
-- **Every environment must set `SECRET_STORE_KEY`**, including local dev and CI,
-  so saved secrets can be encrypted and decrypted.
+- **Every environment must bind `SECRET_KMS`**, including local dev and CI, so
+  saved secrets can be encrypted and decrypted.
 - See [`docs/contributing/secret-rotation.md`](./secret-rotation.md) for
   rotation procedures.
 
@@ -340,19 +345,18 @@ secrets at rest in D1.
 
 Worker bindings (see `packages/worker/wrangler.jsonc`):
 
-- **`CAPABILITY_VECTOR_INDEX`** — Cloudflare Vectorize index for semantic
-  retrieval (`kody-capabilities-prod` / `kody-capabilities-preview`). Create
-  indexes with **`--dimensions=384 --metric=cosine`** to match
-  `@cf/baai/bge-small-en-v1.5` with `cls` pooling (see
-  `packages/worker/src/vectorize/embedding.ts`). The **`test`** Wrangler
-  environment omits this binding so `npm run test` and e2e use the deterministic
-  offline fusion path (`offline: true` in search results).
-- **`AI`** — Workers AI binding used by production and preview capability,
-  memory, job, and saved-package embedding calls, and by ranked MCP search Jev
-  Score (`typesafe/jev`) when `jev-search-rerank` is on. Local dev and tests do
-  not require it because `WRANGLER_IS_LOCAL_DEV`, `SENTRY_ENVIRONMENT=test`, or
-  a missing non-production binding keeps search on the deterministic offline
-  path.
+- **`CAPABILITY_VECTOR_INDEX`** — legacy Cloudflare Vectorize index
+  (`kody-capabilities-prod` / `kody-capabilities-preview`). The migration POC
+  reads `SEARCH_INDEX` (pgvector) first and embeds with **`BEDROCK_EMBEDDINGS`**
+  (Titan v2, 1,024 dimensions; see
+  `packages/worker/src/search-index/embedding.ts`). The **`test`** Wrangler
+  environment omits both so `npm run test` and e2e use the deterministic offline
+  fusion path (`offline: true` in search results).
+- **`AI`** — Workers AI binding used by ranked MCP search Jev Score
+  (`typesafe/jev`) when `jev-search-rerank` is on. Embeddings come from
+  `BEDROCK_EMBEDDINGS`. Local dev and tests do not require it because
+  `WRANGLER_IS_LOCAL_DEV`, `SENTRY_ENVIRONMENT=test`, or a missing
+  non-production binding keeps search on the deterministic offline path.
 
 Worker secrets:
 

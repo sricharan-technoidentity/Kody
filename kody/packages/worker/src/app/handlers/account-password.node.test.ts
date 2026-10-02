@@ -1,5 +1,3 @@
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { beforeAll, expect, test, vi } from 'vitest'
 import {
 	createAuthCookie,
@@ -13,25 +11,18 @@ import {
 	createPasswordHash,
 	verifyPassword,
 } from '@kody-internal/shared/password-hash.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { isCredentialInvalidatedByStoredPasswordChange } from '#worker/password-change-lockout.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../../migrations/', import.meta.url))
-	return {
-		sqlite,
-		db: createD1FromSqlite(sqlite),
-	}
-}
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
 
 async function seedUser(
-	sqlite: DatabaseSync,
+	store: TestDb,
 	input: {
 		id: number
 		email: string
@@ -43,24 +34,16 @@ async function seedUser(
 	const passwordHash =
 		input.passwordHash ?? (await createPasswordHash(input.password ?? ''))
 	const stableUserId = await createStableUserIdFromEmail(input.email)
-	sqlite.exec(`
-		INSERT INTO users (
-			id,
-			username,
-			email,
-			stable_user_id,
-			password_hash,
-			email_verified_at
-		) VALUES (
-			${input.id},
-			${quoteSqlString(input.username)},
-			${quoteSqlString(input.email)},
-			${quoteSqlString(stableUserId)},
-			${quoteSqlString(passwordHash)},
-			CURRENT_TIMESTAMP
-		);
-	`)
+	await store.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
+		 VALUES ($1, $2, $3, $4, $5, '2026-01-01T00:00:00.000Z')`,
+		[input.id, input.username, input.email, stableUserId, passwordHash],
+	)
 	return stableUserId
+}
+
+async function countRows(store: TestDb, sql: string) {
+	return (await store.pg.query<{ count: number }>(sql)).rows[0]!.count
 }
 
 function createTrackingGrantHelpers() {
@@ -80,7 +63,7 @@ function createTrackingGrantHelpers() {
 	}
 }
 
-function createAppEnv(db: D1Database, overrides: Record<string, unknown> = {}) {
+function createAppEnv(db: PgDatabase, overrides: Record<string, unknown> = {}) {
 	return {
 		APP_DB: db,
 		APP_BASE_URL: 'http://example.com',
@@ -121,17 +104,26 @@ beforeAll(() => {
 })
 
 test('signed-in password change requires the current password, revokes MCP grants, and keeps this session', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using store = await createTestDb()
 	const email = 'ada@example.com'
-	await seedUser(sqlite, {
+	const stableUserId = await seedUser(store, {
 		id: 1,
 		email,
 		username: 'ada',
 		password: 'correct-password',
 	})
-	sqlite.exec(`
-		INSERT INTO password_resets (user_id, token_hash, expires_at)
-		VALUES (1, 'pending-reset', ${Date.now() + 60_000});
+	await seedUser(store, {
+		id: 2,
+		email: 'bystander@example.com',
+		username: 'bystander',
+		password: 'bystander-password',
+	})
+	await store.pg.query(
+		`INSERT INTO password_resets (user_id, token_hash, expires_at)
+		 VALUES (1, 'pending-reset', $1), (2, 'bystander-reset', $1)`,
+		[Date.now() + 60_000],
+	)
+	await store.pg.exec(`
 		INSERT INTO verifications (
 			type, target, secret, algorithm, digits, period, char_set
 		) VALUES ('2fa', '1', 'KEEPSECRET', 'SHA-1', 6, 30, '0123456789');
@@ -147,7 +139,7 @@ test('signed-in password change requires the current password, revokes MCP grant
 	`)
 	const { helpers, revokedGrantIds } = createTrackingGrantHelpers()
 	const handler = createAccountPasswordHandler(
-		createAppEnv(db, { OAUTH_PROVIDER: helpers }),
+		createAppEnv(store.forUser(stableUserId).db, { OAUTH_PROVIDER: helpers }),
 	)
 	const session = {
 		stableUserId: testStableUserIdFromEmail(email),
@@ -242,32 +234,35 @@ test('signed-in password change requires the current password, revokes MCP grant
 	expect(payload.ok).toBe(true)
 	expect(payload.message).toContain('Password updated.')
 	expect(revokedGrantIds).toEqual(['grant-1'])
+	// Only the signed-in account's pending reset is cleared.
 	expect(
-		sqlite.prepare(`SELECT COUNT(*) AS count FROM password_resets`).get(),
-	).toEqual({ count: 0 })
-	expect(
-		sqlite
-			.prepare(`SELECT COUNT(*) AS count FROM verifications WHERE target = '1'`)
-			.get(),
-	).toEqual({ count: 1 })
-	expect(
-		sqlite
-			.prepare(`SELECT COUNT(*) AS count FROM passkeys WHERE user_id = 1`)
-			.get(),
-	).toEqual({ count: 1 })
-	expect(
-		sqlite
-			.prepare(
-				`SELECT COUNT(*) AS count FROM oauth_connections WHERE user_id = 1`,
+		(
+			await store.pg.query(
+				`SELECT user_id::int AS user_id FROM password_resets ORDER BY user_id`,
 			)
-			.get(),
-	).toEqual({ count: 1 })
+		).rows,
+	).toEqual([{ user_id: 2 }])
+	for (const sql of [
+		`SELECT COUNT(*)::int AS count FROM verifications WHERE target = '1'`,
+		`SELECT COUNT(*)::int AS count FROM passkeys WHERE user_id = 1`,
+		`SELECT COUNT(*)::int AS count FROM oauth_connections WHERE user_id = 1`,
+	]) {
+		expect(await countRows(store, sql)).toBe(1)
+	}
 
-	const row = sqlite
-		.prepare(
-			`SELECT password_hash, password_changed_at FROM users WHERE id = 1`,
-		)
-		.get() as { password_hash: string; password_changed_at: string }
+	const [row, bystander] = (
+		await store.pg.query<{
+			password_hash: string
+			password_changed_at: string | null
+		}>(`SELECT password_hash, password_changed_at FROM users ORDER BY id`)
+	).rows as [
+		{ password_hash: string; password_changed_at: string },
+		{ password_hash: string; password_changed_at: string | null },
+	]
+	expect(bystander.password_changed_at).toBeNull()
+	expect(
+		await verifyPassword('bystander-password', bystander.password_hash),
+	).toBe(true)
 	expect(await verifyPassword('brand-new-password', row.password_hash)).toBe(
 		true,
 	)
@@ -305,9 +300,9 @@ test('signed-in password change requires the current password, revokes MCP grant
 })
 
 test('oauth-only accounts can set a first password without a current password', async () => {
-	const { sqlite, db } = createMigratedDb()
+	await using store = await createTestDb()
 	const email = 'oauth@example.com'
-	await seedUser(sqlite, {
+	const stableUserId = await seedUser(store, {
 		id: 2,
 		email,
 		username: 'oauth-user',
@@ -315,7 +310,7 @@ test('oauth-only accounts can set a first password without a current password', 
 	})
 	const { helpers } = createTrackingGrantHelpers()
 	const handler = createAccountPasswordHandler(
-		createAppEnv(db, { OAUTH_PROVIDER: helpers }),
+		createAppEnv(store.forUser(stableUserId).db, { OAUTH_PROVIDER: helpers }),
 	)
 	const session = {
 		stableUserId: testStableUserIdFromEmail(email),
@@ -344,9 +339,11 @@ test('oauth-only accounts can set a first password without a current password', 
 		).request,
 	)
 	expect(response.status).toBe(200)
-	const row = sqlite
-		.prepare(`SELECT password_hash FROM users WHERE id = 2`)
-		.get() as { password_hash: string }
+	const row = (
+		await store.pg.query<{ password_hash: string }>(
+			`SELECT password_hash FROM users WHERE id = 2`,
+		)
+	).rows[0]!
 	expect(await verifyPassword('first-password-ok', row.password_hash)).toBe(
 		true,
 	)

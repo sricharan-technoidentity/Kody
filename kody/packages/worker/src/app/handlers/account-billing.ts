@@ -321,7 +321,7 @@ export function createAccountBillingCancellationFeedbackApiHandler(env: Env) {
 				})
 				try {
 					await enqueuePlatformFeedbackDispatch({
-						queue: env.PLATFORM_FEEDBACK_DISPATCH_QUEUE,
+						env,
 						feedbackId: feedback.id,
 					})
 				} catch (error) {

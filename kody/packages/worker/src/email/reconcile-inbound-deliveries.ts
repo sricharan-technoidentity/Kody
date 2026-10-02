@@ -31,7 +31,7 @@ export async function sweepStaleInboundDeliveries(input: {
 		| 'APP_BASE_URL'
 		| 'USAGE_EVENTS'
 		| 'MAILBOX'
-		| 'USER_METER'
+		| 'USER_METERS'
 	>
 	now?: Date
 	clock?: () => number

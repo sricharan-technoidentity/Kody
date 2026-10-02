@@ -1,23 +1,16 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { createAuthCookie, setAuthSessionSecret } from '#app/auth-session.ts'
 import { loadDiscordPageData } from '#app/discord-page-data.ts'
 import { createDiscordApiHandler } from '#app/handlers/discord.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { kodyDiscordInviteUrl } from '#universal/community-links.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createTestDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
 function createAppEnv(
-	db: D1Database,
+	db: PgDatabase,
 	overrides: Record<string, string> = {},
 ): Env {
 	return {
@@ -30,22 +23,23 @@ function createAppEnv(
 }
 
 async function seedUser(
-	sqlite: DatabaseSync,
+	store: Awaited<ReturnType<typeof createTestDb>>,
 	input: { id: number; email: string },
 ) {
 	const stableUserId = await createStableUserIdFromEmail(input.email)
-	sqlite
-		.prepare(
-			`INSERT INTO users (id, username, email, stable_user_id, password_hash)
-			 VALUES (?, ?, ?, ?, ?)`,
-		)
-		.run(input.id, `user-${input.id}`, input.email, stableUserId, 'x')
+	await store.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash)
+		 VALUES ($1, $2, $3, $4, 'x')`,
+		[input.id, `user-${input.id}`, input.email, stableUserId],
+	)
 	return stableUserId
 }
 
 test('discord page reports guest, unconnected, and connected states', async () => {
 	setAuthSessionSecret(testCookieSecret)
-	const { sqlite, db } = createTestDb()
+	const memberId = await createStableUserIdFromEmail('member@example.com')
+	await using store = await createTestDb({ userId: memberId })
+	const db = store.db
 	const env = createAppEnv(db)
 	const handler = createDiscordApiHandler(env)
 
@@ -65,10 +59,11 @@ test('discord page reports guest, unconnected, and connected states', async () =
 		turnstileSiteKey: null,
 	})
 
-	const stableUserId = await seedUser(sqlite, {
+	const stableUserId = await seedUser(store, {
 		id: 7,
 		email: 'member@example.com',
 	})
+	await seedUser(store, { id: 8, email: 'other@example.com' })
 	expect(
 		await loadDiscordPageData({
 			env,
@@ -85,13 +80,17 @@ test('discord page reports guest, unconnected, and connected states', async () =
 		turnstileSiteKey: null,
 	})
 
-	sqlite
-		.prepare(
-			`INSERT INTO oauth_connections (
-				provider_name, provider_id, user_id, provider_display_name
-			) VALUES (?, ?, ?, ?)`,
-		)
-		.run('discord', '333333333333333333', 7, 'Kody Fan')
+	await store.pg.query(
+		`INSERT INTO oauth_connections (
+			provider_name, provider_id, user_id, provider_display_name
+		) VALUES ('discord', '333333333333333333', 7, 'Kody Fan'),
+		         ('discord', '444444444444444444', 8, 'Someone Else')`,
+	)
+	// Another account's link is outside the member's RLS scope.
+	expect(await loadDiscordPageData({ env, userId: 8 })).toMatchObject({
+		discordConnected: false,
+		discordDisplayName: null,
+	})
 
 	expect(
 		await loadDiscordPageData({

@@ -7,18 +7,13 @@ import {
 	deleteWebhookDispatchPayload,
 	hydrateWebhookDispatchQueueMessage,
 } from './dispatch-payload-store.ts'
-import { webhookDispatchQueueName } from './dispatch-queue-names.ts'
-import {
-	parseWebhookDispatchQueueMessage,
-	type WebhookDispatchQueueMessage,
-} from './dispatch-queue-producer.ts'
+import { type WebhookDispatchQueueMessage } from './dispatch-queue-producer.ts'
 import {
 	buildWebhookCallerIdempotencyHashParams,
 	resolveWebhookParamsModeFirstArg,
 } from './params.ts'
 import { stripUntrustedWebhookSyntheticFields } from './synthetic.ts'
 
-const webhookDispatchRetryDelaySeconds = 30
 const retryableInvocationErrorCodes = new Set([
 	'idempotency_lookup_failed',
 	'idempotency_persistence_failed',
@@ -120,84 +115,66 @@ export async function processWebhookDispatch(
 	return 'terminal'
 }
 
-export async function handleWebhookDispatchQueue(
-	batch: MessageBatch<unknown>,
+/**
+ * One acknowledged webhook delivery (the production `invokePackage`
+ * activity of a `WebhookDelivery` workflow): hydrate a spilled payload,
+ * invoke, record, then drop the spilled payload.
+ */
+export async function handleWebhookDispatchMessage(
+	message: WebhookDispatchQueueMessage,
 	env: Env,
-) {
-	for (const queueMessage of batch.messages) {
-		const message = parseWebhookDispatchQueueMessage(queueMessage.body)
-		if (!message) {
-			console.error('webhook-dispatch-message-invalid', {
-				queueMessageId: queueMessage.id,
-			})
-			queueMessage.ack()
-			continue
-		}
-		try {
-			const hydrated = await hydrateWebhookDispatchQueueMessage({
-				message,
-				kv: env.BUNDLE_ARTIFACTS_KV,
-			})
-			if (!hydrated) {
-				console.error('webhook-dispatch-payload-missing', {
-					queueMessageId: queueMessage.id,
-					endpointId: message.endpoint.id,
-					deliveryId: message.deliveryId,
-				})
-				try {
-					await recordWebhookDelivery({
-						env,
-						endpoint: message.endpoint,
-						kodyId: message.packageKodyId,
-						outcome: 'failed',
-						httpStatus: 502,
-						error: 'ack_queue_payload_missing',
-						payloadBytes: message.payloadBytes,
-						invocationId: message.deliveryId,
-						startedAt: message.receivedAt,
-						requirePersistence: true,
-					})
-				} catch (error) {
-					console.error('webhook-dispatch-payload-missing-record-failed', {
-						queueMessageId: queueMessage.id,
-						endpointId: message.endpoint.id,
-						error,
-					})
-					queueMessage.retry({
-						delaySeconds: webhookDispatchRetryDelaySeconds,
-					})
-					continue
-				}
-				queueMessage.ack()
-				continue
-			}
-			const outcome = await processWebhookDispatch(hydrated, env)
-			if (outcome === 'retry') {
-				queueMessage.retry({ delaySeconds: webhookDispatchRetryDelaySeconds })
-			} else {
-				queueMessage.ack()
-				if (message.payloadKvKey) {
-					await deleteWebhookDispatchPayload({
-						kv: env.BUNDLE_ARTIFACTS_KV,
-						key: message.payloadKvKey,
-					}).catch((error) => {
-						console.error('webhook-dispatch-payload-delete-failed', {
-							queueMessageId: queueMessage.id,
-							endpointId: message.endpoint.id,
-							error,
-						})
-					})
-				}
-			}
-		} catch (error) {
-			console.error('webhook-dispatch-queue-processing-failed', {
-				queueMessageId: queueMessage.id,
+): Promise<'ack' | 'retry'> {
+	try {
+		const hydrated = await hydrateWebhookDispatchQueueMessage({
+			message,
+			kv: env.BUNDLE_ARTIFACTS_KV,
+		})
+		if (!hydrated) {
+			console.error('webhook-dispatch-payload-missing', {
 				endpointId: message.endpoint.id,
-				error,
+				deliveryId: message.deliveryId,
 			})
-			queueMessage.retry({ delaySeconds: webhookDispatchRetryDelaySeconds })
+			try {
+				await recordWebhookDelivery({
+					env,
+					endpoint: message.endpoint,
+					kodyId: message.packageKodyId,
+					outcome: 'failed',
+					httpStatus: 502,
+					error: 'ack_queue_payload_missing',
+					payloadBytes: message.payloadBytes,
+					invocationId: message.deliveryId,
+					startedAt: message.receivedAt,
+					requirePersistence: true,
+				})
+			} catch (error) {
+				console.error('webhook-dispatch-payload-missing-record-failed', {
+					endpointId: message.endpoint.id,
+					error,
+				})
+				return 'retry'
+			}
+			return 'ack'
 		}
+		const outcome = await processWebhookDispatch(hydrated, env)
+		if (outcome === 'retry') return 'retry'
+		if (message.payloadKvKey) {
+			await deleteWebhookDispatchPayload({
+				kv: env.BUNDLE_ARTIFACTS_KV,
+				key: message.payloadKvKey,
+			}).catch((error) => {
+				console.error('webhook-dispatch-payload-delete-failed', {
+					endpointId: message.endpoint.id,
+					error,
+				})
+			})
+		}
+		return 'ack'
+	} catch (error) {
+		console.error('webhook-dispatch-queue-processing-failed', {
+			endpointId: message.endpoint.id,
+			error,
+		})
+		return 'retry'
 	}
 }
-
-export { webhookDispatchQueueName }

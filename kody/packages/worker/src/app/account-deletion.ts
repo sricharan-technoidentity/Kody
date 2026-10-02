@@ -25,11 +25,11 @@ import { auditDatabaseFromEnv, logAuditEvent } from '#worker/audit-log.ts'
 import { purgeStripePlanRefreshForUser } from '#worker/billing/stripe-plan-refresh-client.ts'
 import { storageRunnerRpc } from '#worker/storage-runner.ts'
 import { purgeJobManagerForUser } from '#worker/jobs/manager-client.ts'
-import { jobsService } from '#worker/jobs/jobs-data.ts'
+import { jobsData } from '#worker/jobs/jobs-data.ts'
 import { jobVectorId } from '#mcp/jobs-vectorize.ts'
 import { memoryVectorId } from '#mcp/memory/memory-vectorize.ts'
 import { savedPackageVectorId } from '#worker/package-registry/repo.ts'
-import { getCapabilityVectorIndex } from '#worker/vectorize/embedding.ts'
+import { getCapabilityVectorIndex } from '#worker/search-index/embedding.ts'
 import { cleanupAllUserArtifactRepos } from '#worker/repo/artifact-repo-cleanup.ts'
 import { repoSessionRpc } from '#worker/repo/repo-session-rpc.ts'
 import { mcpClientHubDurableObjectName } from '#worker/user-scoped-durable-object-name.ts'
@@ -49,6 +49,7 @@ import {
 } from '#app/account-mcp-oauth-clients.ts'
 import {
 	accountUserDataTargets,
+	accountSubjectAnonymizeSql,
 	buildUserScopedDeleteOrUpdateSql,
 	buildUserScopedTargetMatch,
 	getAccountD1UserColumnCoverage,
@@ -272,13 +273,7 @@ async function listUserVectorSourceRowIds(
 			return (rows.results ?? []).map((row) => row.id)
 		}
 		case 'jobs_rpc': {
-			const jobs = jobsService(env)
-			if (!jobs) {
-				throw new Error(
-					'JOBS service binding is required to enumerate job vector ids (jobs live in the jobs worker D1, not APP_DB).',
-				)
-			}
-			return jobs.listJobIdsForUser({ userId })
+			return jobsData(env).listJobIdsForUser({ userId })
 		}
 		default: {
 			const unknownSource: never = source
@@ -981,9 +976,9 @@ async function clearRunLog(input: {
 	warnings: Array<string>
 }): Promise<number> {
 	try {
-		if (!(input.env as Partial<Env>).RUN_LOG) {
+		if (!(input.env as Partial<Env>).RUN_RECORDS) {
 			input.warnings.push(
-				'RUN_LOG binding was unavailable; the user run log Durable Object was not purged.',
+				'RUN_RECORDS binding was unavailable; the user run records were not purged.',
 			)
 			return 0
 		}
@@ -1004,7 +999,7 @@ async function purgeUserMeter(input: {
 	try {
 		if (!userMeterNamespace(input.env)) {
 			input.warnings.push(
-				'USER_METER binding was unavailable; the user meter Durable Object was not purged.',
+				'USER_METERS binding was unavailable; the user meter was not purged.',
 			)
 			return 0
 		}
@@ -1029,7 +1024,7 @@ async function purgeStripePlanRefresh(input: {
 		})
 		if (!result.purged) {
 			input.warnings.push(
-				'STRIPE_PLAN_REFRESH binding was unavailable; the user Stripe refresh alarm was not purged.',
+				'TEMPORAL binding was unavailable; the user Stripe refresh workflow was not cancelled.',
 			)
 		}
 		return result.purged ? 1 : 0
@@ -1069,7 +1064,7 @@ async function purgeJobManager(input: {
 		})
 		if (!result.purged) {
 			input.warnings.push(
-				'JOBS service binding was unavailable; the user scheduler Durable Object was not purged.',
+				'TEMPORAL binding was unavailable; the user job schedules were not purged.',
 			)
 		}
 		return result.purged ? 1 : 0
@@ -1397,25 +1392,44 @@ async function deleteUserScopedRowsAndUser(input: {
 		updatedRowCounts[tableName] =
 			(updatedRowCounts[tableName] ?? 0) + (changes ?? 0)
 	}
-	const operations = accountUserDataTargets.map((target) => {
-		const match = buildUserScopedTargetMatch({
+	const anonymizeInDatabase =
+		'dialect' in input.env.APP_DB && input.env.APP_DB.dialect === 'postgres'
+	const matches = accountUserDataTargets.map((target) =>
+		buildUserScopedTargetMatch({
 			target,
 			mcpUserId: input.mcpUserId,
 			dbUserId: input.dbUserId,
+		}),
+	)
+	const operations = matches
+		.filter((match) => !anonymizeInDatabase || match.mutation.kind === 'delete')
+		.map((match) => {
+			const { sql, params } = buildUserScopedDeleteOrUpdateSql(match)
+			return {
+				match,
+				statement: input.env.APP_DB.prepare(sql).bind(...params),
+			}
 		})
-		const { sql, params } = buildUserScopedDeleteOrUpdateSql(match)
-		return {
-			match,
-			statement: input.env.APP_DB.prepare(sql).bind(...params),
-		}
-	})
+	const anonymizeStatements = anonymizeInDatabase
+		? [input.env.APP_DB.prepare(accountSubjectAnonymizeSql)]
+		: []
 	const userStatement = input.env.APP_DB.prepare(
 		`DELETE FROM users WHERE id = ?`,
 	).bind(input.dbUserId)
-	const results = await input.env.APP_DB.batch([
+	const batchResults = await input.env.APP_DB.batch<{
+		target_ordinal: number
+		changed_rows: number
+	}>([
+		...anonymizeStatements,
 		...operations.map((operation) => operation.statement),
 		userStatement,
 	])
+	for (const row of anonymizeStatements.length
+		? (batchResults[0]?.results ?? [])
+		: []) {
+		recordUpdated(matches[row.target_ordinal]!.table, row.changed_rows)
+	}
+	const results = batchResults.slice(anonymizeStatements.length)
 	for (const [index, operation] of operations.entries()) {
 		const changes = results[index]?.meta.changes
 		if (operation.match.mutation.kind === 'delete') {

@@ -35,7 +35,7 @@ import {
 } from './delivery.ts'
 import {
 	createWebhookDispatchQueueMessage,
-	enqueueWebhookDispatch,
+	startWebhookDelivery,
 	getWebhookDispatchQueueMessageBytes,
 	webhookDispatchQueueMessageMaxBytes,
 	withSpilledWebhookDispatchPayload,
@@ -854,10 +854,7 @@ export async function handleWebhookIngressRequest(
 			return ackQueueMessageTooLargeResponse()
 		}
 		try {
-			await enqueueWebhookDispatch({
-				queue: env.WEBHOOK_DISPATCH_QUEUE,
-				message,
-			})
+			await startWebhookDelivery({ env, message })
 		} catch (error) {
 			if (message.payloadKvKey) {
 				await deleteWebhookDispatchPayload({

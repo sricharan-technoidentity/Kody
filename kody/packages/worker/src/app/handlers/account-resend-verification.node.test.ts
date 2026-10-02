@@ -9,140 +9,66 @@ import {
 	consoleInfo,
 	consoleWarn,
 } from '#worker/test-support/console-spies.ts'
-import { createAccountResendVerificationHandler } from './account-resend-verification.ts'
+import {
+	createAccountResendVerificationHandler,
+	resendVerificationRateLimitConfig,
+} from './account-resend-verification.ts'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
+const rateLimitKey = 'verification-resend:user:1'
+const cloudflareEmailEnv = {
+	CLOUDFLARE_ACCOUNT_ID: 'cf-account-test',
+	CLOUDFLARE_API_TOKEN: 'cf-token-test',
+	CLOUDFLARE_API_BASE_URL: 'https://cloudflare-api.example.com',
+}
 
-type StatementMeta = { changes: number; last_row_id: number }
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
 
-function createResendTestDb(
+const session: AuthSession = {
+	stableUserId: testStableUserIdFromEmail('resend-user@example.com'),
+	email: 'resend-user@example.com',
+	rememberMe: false,
+}
+
+/** Account 1 (signed in) plus a bystander whose outstanding token must survive. */
+async function createResendStore(
 	options: {
 		emailVerifiedAt?: string | null
 		deliveryClass?: string | null
 		deliveryStatus?: string | null
 		deletingAt?: string | null
-		fenceAfterWritableCheck?: boolean
 	} = {},
 ) {
-	const user = {
-		id: 1,
-		email: 'resend-user@example.com',
-		username: 'resend-user',
-		password_hash: 'unused',
-		stable_user_id: testStableUserIdFromEmail('resend-user@example.com'),
-		email_verified_at: options.emailVerifiedAt ?? null,
-		created_at: new Date(0).toISOString(),
-		updated_at: new Date(0).toISOString(),
-	}
-	const state = {
-		verificationInserts: 0,
-		verificationDeletes: 0,
-		rateLimitAttempts: 0,
-		rateLimitMax: 3,
-		fenceAfterWritableCheck: false,
-	}
-
-	function createStatement(query: string) {
-		const normalized = query.replace(/\s+/g, ' ').trim().toLowerCase()
-		const statement = {
-			query: normalized,
-			bind: () => statement,
-			async all() {
-				if (
-					normalized.startsWith('select') &&
-					normalized.includes('from "users"')
-				) {
-					return {
-						results: [{ ...user }],
-						meta: { changes: 0, last_row_id: 0 } satisfies StatementMeta,
-					}
-				}
-				if (normalized.includes('insert into email_verifications')) {
-					state.verificationInserts += 1
-					return {
-						results: [],
-						meta: { changes: 1, last_row_id: 1 } satisfies StatementMeta,
-					}
-				}
-				return {
-					results: [],
-					meta: { changes: 0, last_row_id: 0 } satisfies StatementMeta,
-				}
-			},
-			async first() {
-				if (normalized.includes('select deleting_at from users')) {
-					if (options.fenceAfterWritableCheck) {
-						state.fenceAfterWritableCheck = true
-					}
-					return { deleting_at: options.deletingAt ?? null }
-				}
-				if (normalized.includes('email_verification_delivery_status')) {
-					return {
-						email_verification_delivery_status: options.deliveryStatus ?? null,
-						email_verification_delivery_class: options.deliveryClass ?? null,
-						email_verification_delivery_at: null,
-					}
-				}
-				const result = await statement.all()
-				return result.results[0] ?? null
-			},
-			async run() {
-				if (/delete from "?email_verifications"?/.test(normalized)) {
-					state.verificationDeletes += 1
-				}
-				if (/insert into "?email_verifications"?/.test(normalized)) {
-					if (state.fenceAfterWritableCheck) {
-						return { meta: { changes: 0, last_row_id: 0 } }
-					}
-					state.verificationInserts += 1
-					return { meta: { changes: 1, last_row_id: 1 } }
-				}
-				if (normalized.includes('delete from _rate_limits')) {
-					state.rateLimitAttempts = Math.max(0, state.rateLimitAttempts - 1)
-				}
-				return { meta: { changes: 1, last_row_id: 1 } }
-			},
-		}
-		return statement
-	}
-
-	const db = {
-		prepare: (query: string) => createStatement(query),
-		async batch(statements: Array<{ query?: string }>) {
-			const allSelect = statements.every((statement) =>
-				/^\s*select\b/i.test(statement.query ?? ''),
-			)
-			if (allSelect) {
-				return await executePreparedD1Batch(statements)
-			}
-			if (
-				statements.some((statement) =>
-					statement.query?.includes('create table'),
-				)
-			) {
-				return statements.map(() => ({
-					meta: { changes: 0, last_row_id: 0 },
-				}))
-			}
-			state.rateLimitAttempts += 1
-			const allowed = state.rateLimitAttempts <= state.rateLimitMax
-			return [
-				{ meta: { changes: 0, last_row_id: 0 } },
-				{ meta: { changes: allowed ? 1 : 0, last_row_id: 0 } },
-			]
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
-
-	return { db, state }
+	const store = await createTestDb()
+	await store.pg.query(
+		`INSERT INTO users (
+			id, email, username, password_hash, stable_user_id, email_verified_at,
+			email_verification_delivery_status, email_verification_delivery_class, deleting_at
+		) VALUES
+			(1, $1, 'resend-user', 'unused', $2, $3, $4, $5, $6),
+			(2, 'bystander@example.com', 'bystander', 'unused', $7, NULL, NULL, NULL, NULL)`,
+		[
+			session.email,
+			session.stableUserId,
+			options.emailVerifiedAt ?? null,
+			options.deliveryStatus ?? null,
+			options.deliveryClass ?? null,
+			options.deletingAt ?? null,
+			testStableUserIdFromEmail('bystander@example.com'),
+		],
+	)
+	await store.pg.query(
+		`INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES (2, 'bystander-token', $1)`,
+		[Date.now() + 60_000],
+	)
+	return store
 }
 
-function createAppEnv(db: D1Database, overrides: Record<string, unknown> = {}) {
+function createAppEnv(db: PgDatabase, overrides: Record<string, unknown> = {}) {
 	return {
 		APP_DB: db,
 		COOKIE_SECRET: testCookieSecret,
@@ -152,7 +78,32 @@ function createAppEnv(db: D1Database, overrides: Record<string, unknown> = {}) {
 	} as unknown as Parameters<typeof createAccountResendVerificationHandler>[0]
 }
 
-async function createResendRequest(session: AuthSession) {
+/** The signed-in account's handler on its own scoped writer. */
+function createHandler(store: TestDb, overrides: Record<string, unknown> = {}) {
+	return createAccountResendVerificationHandler(
+		createAppEnv(store.forUser(session.stableUserId).db, overrides),
+	)
+}
+
+async function readTokenHashes(store: TestDb, userId: number) {
+	return (
+		await store.pg.query<{ token_hash: string }>(
+			`SELECT token_hash FROM email_verifications WHERE user_id = $1 ORDER BY id`,
+			[userId],
+		)
+	).rows.map((row) => row.token_hash)
+}
+
+async function countRateLimitSlots(store: TestDb) {
+	return (
+		await store.pg.query<{ count: number }>(
+			`SELECT COUNT(*)::int AS count FROM _rate_limits WHERE key = $1`,
+			[rateLimitKey],
+		)
+	).rows[0]!.count
+}
+
+async function createResendRequest() {
 	const cookie = await createAuthCookie(session, false)
 	return new Request('http://example.com/account/resend-verification.json', {
 		method: 'POST',
@@ -171,10 +122,63 @@ async function runHandler(
 	} as never)
 }
 
-const session: AuthSession = {
-	stableUserId: testStableUserIdFromEmail('resend-user@example.com'),
-	email: 'resend-user@example.com',
-	rememberMe: false,
+/**
+ * A purge claim (owner stamps `deleting_at`) that lands right after the
+ * handler's session lookup or right after its writable check.
+ */
+function claimPurgeAfter(
+	store: TestDb,
+	db: PgDatabase,
+	step: 'session lookup' | 'writable check',
+) {
+	const claim = () =>
+		store.pg.query(
+			`UPDATE users SET deleting_at = '2026-09-02 12:00:00' WHERE id = 1 AND deleting_at IS NULL`,
+		)
+	return {
+		...db,
+		async batch(statements) {
+			const results = await db.batch(statements)
+			const readsUser = statements.some((statement) =>
+				/from "users"/.test((statement as { query?: string }).query ?? ''),
+			)
+			if (step === 'session lookup' && readsUser) await claim()
+			return results
+		},
+		prepare(sql: string) {
+			const statement = db.prepare(sql)
+			if (
+				step !== 'writable check' ||
+				!/^SELECT deleting_at FROM users\b/.test(sql)
+			)
+				return statement
+			return {
+				...statement,
+				bind(...values: Array<unknown>) {
+					const bound = statement.bind(...values)
+					return {
+						...bound,
+						async first(column?: string) {
+							const row = await bound.first(column)
+							await claim()
+							return row
+						},
+					} as typeof bound
+				},
+			} as typeof statement
+		},
+	} satisfies PgDatabase
+}
+
+function createRacingHandler(
+	store: TestDb,
+	step: 'session lookup' | 'writable check',
+) {
+	return createAccountResendVerificationHandler(
+		createAppEnv(
+			claimPurgeAfter(store, store.forUser(session.stableUserId).db, step),
+		),
+	)
 }
 
 beforeAll(() => {
@@ -182,40 +186,41 @@ beforeAll(() => {
 })
 
 test('resend verification requires an authenticated session', async () => {
-	const testDb = createResendTestDb()
-	const handler = createAccountResendVerificationHandler(
-		createAppEnv(testDb.db),
-	)
+	await using store = await createResendStore()
 
 	const response = await runHandler(
-		handler,
+		createHandler(store),
 		new Request('http://example.com/account/resend-verification.json', {
 			method: 'POST',
 		}),
 	)
 	expect(response.status).toBe(401)
-	expect(testDb.state.verificationInserts).toBe(0)
+	expect(await readTokenHashes(store, 1)).toEqual([])
 })
 
 test('resend verification issues a fresh token for unverified accounts and rate-limits repeats', async () => {
-	const testDb = createResendTestDb({ emailVerifiedAt: null })
-	const handler = createAccountResendVerificationHandler(
-		createAppEnv(testDb.db),
-	)
+	await using store = await createResendStore({ emailVerifiedAt: null })
+	const handler = createHandler(store)
 
-	for (let attempt = 1; attempt <= 3; attempt++) {
-		const response = await runHandler(
-			handler,
-			await createResendRequest(session),
-		)
+	const issued: Array<Array<string>> = []
+	for (
+		let attempt = 1;
+		attempt <= resendVerificationRateLimitConfig.maxRequests;
+		attempt++
+	) {
+		const response = await runHandler(handler, await createResendRequest())
 		expect(response.status).toBe(200)
 		expect(await response.json()).toEqual({
 			ok: true,
 			message: 'Verification email sent. Check your inbox.',
 		})
+		issued.push(await readTokenHashes(store, 1))
 	}
-	expect(testDb.state.verificationInserts).toBe(3)
-	expect(testDb.state.verificationDeletes).toBe(3)
+	// Each resend leaves exactly one live token, and it is a new one.
+	expect(issued.map((hashes) => hashes.length)).toEqual([1, 1, 1])
+	expect(new Set(issued.flat()).size).toBe(3)
+	expect(await readTokenHashes(store, 2)).toEqual(['bystander-token'])
+	expect(await countRateLimitSlots(store)).toBe(3)
 	// No email sender is configured in this test env, so each resend logs
 	// the send as skipped at info level.
 	expect(consoleInfo).toHaveBeenCalledWith(
@@ -225,7 +230,7 @@ test('resend verification issues a fresh token for unverified accounts and rate-
 
 	const rateLimitedResponse = await runHandler(
 		handler,
-		await createResendRequest(session),
+		await createResendRequest(),
 	)
 	expect(rateLimitedResponse.status).toBe(429)
 	expect(rateLimitedResponse.headers.get('Retry-After')).toBeTruthy()
@@ -234,7 +239,7 @@ test('resend verification issues a fresh token for unverified accounts and rate-
 		error: 'Too many verification emails requested. Please try again later.',
 	})
 	// No new token is created for rate-limited requests.
-	expect(testDb.state.verificationInserts).toBe(3)
+	expect(await readTokenHashes(store, 1)).toEqual(issued.at(-1))
 	// Three successful resends plus the rate-limited attempt are audited.
 	expect(logAuditEventSpy).toHaveBeenCalledTimes(4)
 	expect(logAuditEventSpy).toHaveBeenNthCalledWith(
@@ -255,23 +260,73 @@ test('resend verification issues a fresh token for unverified accounts and rate-
 	)
 })
 
+test('resend verification records the provider message id and accepted delivery for each send', async () => {
+	await using store = await createResendStore({
+		emailVerifiedAt: null,
+		deliveryStatus: 'delivery_delayed',
+	})
+	const handler = createHandler(store, cloudflareEmailEnv)
+	const messageIds = ['msg-first', 'msg-second']
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async () =>
+			Response.json({
+				success: true,
+				result: { message_id: messageIds.shift() },
+			}),
+		),
+	)
+	try {
+		for (const _attempt of [1, 2]) {
+			const response = await runHandler(handler, await createResendRequest())
+			expect(response.status).toBe(200)
+		}
+	} finally {
+		vi.unstubAllGlobals()
+	}
+
+	// Latest send wins in the delivery index for this recipient.
+	expect(
+		(
+			await store.pg.query(
+				`SELECT provider_message_id, user_id::int AS user_id, recipient
+				 FROM transactional_email_delivery_index`,
+			)
+		).rows,
+	).toEqual([
+		{
+			provider_message_id: 'msg-second',
+			user_id: 1,
+			recipient: session.email,
+		},
+	])
+	expect(
+		(
+			await store.pg.query(
+				`SELECT email_verification_delivery_status AS status FROM users WHERE id = 1`,
+			)
+		).rows[0],
+	).toEqual({ status: 'accepted' })
+	expect(await readTokenHashes(store, 1)).toHaveLength(1)
+})
+
 test('resend verification refuses a known sender-domain block without sending again', async () => {
-	const testDb = createResendTestDb({
+	await using store = await createResendStore({
 		emailVerifiedAt: null,
 		deliveryStatus: 'bounced',
 		deliveryClass: 'sender_block',
 	})
-	const handler = createAccountResendVerificationHandler(
-		createAppEnv(testDb.db),
-	)
 
-	const response = await runHandler(handler, await createResendRequest(session))
+	const response = await runHandler(
+		createHandler(store),
+		await createResendRequest(),
+	)
 	expect(response.status).toBe(409)
 	expect(await response.json()).toMatchObject({
 		ok: false,
 		code: 'sender_block',
 	})
-	expect(testDb.state.verificationInserts).toBe(0)
+	expect(await readTokenHashes(store, 1)).toEqual([])
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
 		expect.objectContaining({
 			category: 'auth',
@@ -283,33 +338,31 @@ test('resend verification refuses a known sender-domain block without sending ag
 })
 
 test('resend verification rejects already-verified accounts', async () => {
-	const testDb = createResendTestDb({
+	await using store = await createResendStore({
 		emailVerifiedAt: new Date(0).toISOString(),
 	})
-	const handler = createAccountResendVerificationHandler(
-		createAppEnv(testDb.db),
-	)
 
-	const response = await runHandler(handler, await createResendRequest(session))
+	const response = await runHandler(
+		createHandler(store),
+		await createResendRequest(),
+	)
 	expect(response.status).toBe(400)
 	expect(await response.json()).toEqual({
 		ok: false,
 		error: 'Your email is already verified.',
 	})
-	expect(testDb.state.verificationInserts).toBe(0)
+	expect(await readTokenHashes(store, 1)).toEqual([])
 })
 
 test('resend verification surfaces send failures without pretending success', async () => {
 	consoleError.mockImplementation(() => {})
 	consoleWarn.mockImplementation(() => {})
-	const testDb = createResendTestDb({ emailVerifiedAt: null })
-	const handler = createAccountResendVerificationHandler(
-		createAppEnv(testDb.db, {
-			CLOUDFLARE_ACCOUNT_ID: 'cf-account-test',
-			CLOUDFLARE_API_TOKEN: 'cf-token-test',
-			CLOUDFLARE_API_BASE_URL: 'https://cloudflare-api.example.com',
-		}),
+	await using store = await createResendStore({ emailVerifiedAt: null })
+	await store.pg.query(
+		`INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES (1, 'prior-token', $1)`,
+		[Date.now() + 60_000],
 	)
+	const handler = createHandler(store, cloudflareEmailEnv)
 	vi.stubGlobal(
 		'fetch',
 		vi.fn(async () =>
@@ -320,18 +373,18 @@ test('resend verification surfaces send failures without pretending success', as
 		),
 	)
 
-	const response = await runHandler(handler, await createResendRequest(session))
+	const response = await runHandler(handler, await createResendRequest())
+	vi.unstubAllGlobals()
 	expect(response.status).toBe(502)
 	expect(await response.json()).toEqual({
 		ok: false,
 		error: 'Unable to send the verification email. Please try again later.',
 	})
 	// The failed send refunds the consumed rate-limit slot.
-	expect(testDb.state.rateLimitAttempts).toBe(0)
+	expect(await countRateLimitSlots(store)).toBe(0)
 	// The freshly inserted token is discarded again on send failure, so no
 	// net-new token remains and prior tokens stay untouched.
-	expect(testDb.state.verificationInserts).toBe(1)
-	expect(testDb.state.verificationDeletes).toBe(1)
+	expect(await readTokenHashes(store, 1)).toEqual(['prior-token'])
 	expect(consoleError).toHaveBeenCalledWith(
 		expect.any(String),
 		expect.any(Error),
@@ -350,41 +403,47 @@ test('resend verification surfaces send failures without pretending success', as
 			reason: 'send_failed',
 		}),
 	)
-	vi.unstubAllGlobals()
 })
 
 test('resend verification refuses a fenced account without minting a token', async () => {
-	const testDb = createResendTestDb({
+	await using fenced = await createResendStore({
 		emailVerifiedAt: null,
 		deletingAt: '2026-09-02 12:00:00',
 	})
-	const handler = createAccountResendVerificationHandler(
-		createAppEnv(testDb.db),
+	// A deleting account's session no longer authenticates at all.
+	const fencedResponse = await runHandler(
+		createHandler(fenced),
+		await createResendRequest(),
 	)
+	expect(fencedResponse.status).toBe(401)
+	expect(await readTokenHashes(fenced, 1)).toEqual([])
 
-	const response = await runHandler(handler, await createResendRequest(session))
+	// A claim after the session lookup is caught by the writable check.
+	await using racing = await createResendStore({ emailVerifiedAt: null })
+	const response = await runHandler(
+		createRacingHandler(racing, 'session lookup'),
+		await createResendRequest(),
+	)
 	expect(response.status).toBe(409)
 	expect(await response.json()).toMatchObject({
 		ok: false,
 		code: 'account_deleting',
 	})
-	expect(testDb.state.verificationInserts).toBe(0)
+	expect(await readTokenHashes(racing, 1)).toEqual([])
+	expect(await countRateLimitSlots(racing)).toBe(0)
 })
 
 test('resend verification refuses a purge claim that lands after the writable check', async () => {
-	const testDb = createResendTestDb({
-		emailVerifiedAt: null,
-		fenceAfterWritableCheck: true,
-	})
-	const handler = createAccountResendVerificationHandler(
-		createAppEnv(testDb.db),
-	)
+	await using store = await createResendStore({ emailVerifiedAt: null })
 
-	const response = await runHandler(handler, await createResendRequest(session))
+	const response = await runHandler(
+		createRacingHandler(store, 'writable check'),
+		await createResendRequest(),
+	)
 	expect(response.status).toBe(409)
 	expect(await response.json()).toMatchObject({
 		ok: false,
 		code: 'account_deleting',
 	})
-	expect(testDb.state.verificationInserts).toBe(0)
+	expect(await readTokenHashes(store, 1)).toEqual([])
 })

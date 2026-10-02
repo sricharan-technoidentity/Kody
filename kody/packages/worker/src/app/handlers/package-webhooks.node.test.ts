@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { createCommunityPackageWebhooksApiHandler } from '#app/handlers/package-webhooks.ts'
@@ -107,7 +108,7 @@ function createEnv() {
 	return {
 		env: {
 			APP_DB: db,
-			SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+			SECRET_KMS: testSecretKms,
 			SENTRY_ENVIRONMENT: 'test',
 		} as unknown as Env,
 		db,

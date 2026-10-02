@@ -1,8 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { type UsageCampaignSnapshot } from '#worker/usage/campaign-evaluator.ts'
 import {
 	claimUsageCampaignSend,
@@ -39,14 +38,36 @@ const {
 
 const now = new Date('2026-09-07T12:00:00.000Z')
 
-function createDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+/**
+ * The sweep lists candidates as the operator (`kody_admin`) and works on each
+ * account through its own writer; `forUser` is that writer for direct ledger
+ * reads, `userEnv` the per-account request environment.
+ */
+async function createDb() {
+	const store = await createTestDb()
+	const db = createPgDatabase({ connection: store.pg, role: 'kody_admin' })
+	const forUser = (userId: string) =>
+		store.forUser(userId).db as unknown as D1Database
+	const env = {
+		APP_DB: db,
+		APP_DB_FOR_USER: forUser,
+		APP_BASE_URL: 'https://kody.codes/',
+		CLOUDFLARE_ACCOUNT_ID: 'acct',
+		CLOUDFLARE_API_TOKEN: 'token',
+		COOKIE_SECRET: 'campaign-test-cookie-secret',
+	} as unknown as Env
+	return {
+		store,
+		db: db as unknown as D1Database,
+		forUser,
+		env,
+		userEnv: (userId: string) => ({ ...env, APP_DB: forUser(userId) }) as Env,
+		[Symbol.asyncDispose]: () => store[Symbol.asyncDispose](),
+	}
 }
 
 async function insertUser(
-	db: D1Database,
+	campaign: Awaited<ReturnType<typeof createDb>>,
 	input: {
 		id: string
 		email: string
@@ -57,35 +78,22 @@ async function insertUser(
 		stripePlan?: string | null
 	},
 ) {
-	await db
-		.prepare(
-			`INSERT INTO users (
-				username, email, password_hash, email_verified_at, stable_user_id,
-				plan, account_type, first_mcp_connected_at, first_saved_package_at,
-				mcp_client_name, stripe_plan
-			) VALUES (?, ?, 'x', ?, ?, 'free', 'person', ?, ?, ?, ?)`,
-		)
-		.bind(
+	await campaign.store.pg.query(
+		`INSERT INTO users (
+			username, email, password_hash, email_verified_at, stable_user_id,
+			plan, account_type, first_mcp_connected_at, first_saved_package_at,
+			mcp_client_name, stripe_plan
+		) VALUES ($1, $2, 'x', $3, $1, 'free', 'person', $4, $5, $6, $7)`,
+		[
 			input.id,
 			input.email,
 			input.verified === false ? null : '2026-09-01T00:00:00.000Z',
-			input.id,
 			input.mcpAt ?? null,
 			input.packageAt ?? null,
 			input.clientName ?? null,
 			input.stripePlan ?? null,
-		)
-		.run()
-}
-
-function createEnv(db: D1Database) {
-	return {
-		APP_DB: db,
-		APP_BASE_URL: 'https://kody.codes/',
-		CLOUDFLARE_ACCOUNT_ID: 'acct',
-		CLOUDFLARE_API_TOKEN: 'token',
-		COOKIE_SECRET: 'campaign-test-cookie-secret',
-	} as unknown as Env
+		],
+	)
 }
 
 function snapshot(
@@ -108,15 +116,15 @@ function snapshot(
 }
 
 test('campaign sweep seeds without mailing, then event-origin sends are ledger-idempotent and Activated stays silent', async () => {
-	const { db } = createDb()
-	await insertUser(db, { id: 'user-seed', email: 'seed@example.com' })
-	await insertUser(db, { id: 'user-event', email: 'event@example.com' })
-	await insertUser(db, {
+	await using campaign = await createDb()
+	const { forUser, env, userEnv } = campaign
+	await insertUser(campaign, { id: 'user-seed', email: 'seed@example.com' })
+	await insertUser(campaign, { id: 'user-event', email: 'event@example.com' })
+	await insertUser(campaign, {
 		id: 'user-paid',
 		email: 'paid@example.com',
 		stripePlan: 'pro',
 	})
-	const env = createEnv(db)
 
 	gatherUsageCampaignSnapshot.mockImplementation(
 		async (input: { user: UsageCampaignCandidate }) => {
@@ -132,24 +140,30 @@ test('campaign sweep seeds without mailing, then event-origin sends are ledger-i
 		evaluatedUsers: 3,
 	})
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-	expect((await readUsageCampaign(db, 'user-seed'))?.origin).toBe('seed')
-	expect((await readUsageCampaign(db, 'user-paid'))?.state).toBe('Paid')
+	expect(
+		(await readUsageCampaign(forUser('user-seed'), 'user-seed'))?.origin,
+	).toBe('seed')
+	expect(
+		(await readUsageCampaign(forUser('user-paid'), 'user-paid'))?.state,
+	).toBe('Paid')
 
 	expect(
 		await recordVerifiedNoMcpCampaignSend({
-			env,
+			env: userEnv('user-event'),
 			userId: 'user-event',
 			now,
 		}),
 	).toBe(true)
 	expect(
 		await recordVerifiedNoMcpCampaignSend({
-			env,
+			env: userEnv('user-event'),
 			userId: 'user-event',
 			now,
 		}),
 	).toBe(false)
-	expect(await listUsageCampaignSends(db, 'user-event')).toEqual([
+	expect(
+		await listUsageCampaignSends(forUser('user-event'), 'user-event'),
+	).toEqual([
 		expect.objectContaining({
 			state: 'VerifiedNoMcp',
 			template: 'verified_no_mcp',
@@ -192,8 +206,12 @@ test('campaign sweep seeds without mailing, then event-origin sends are ledger-i
 	expect(payload.headers?.['List-Unsubscribe-Post']).toBe(
 		'List-Unsubscribe=One-Click',
 	)
-	expect((await listUsageCampaignSends(db, 'user-event')).length).toBe(2)
-	expect((await readUsageCampaign(db, 'user-event'))?.send_count).toBe(2)
+	expect(
+		(await listUsageCampaignSends(forUser('user-event'), 'user-event')).length,
+	).toBe(2)
+	expect(
+		(await readUsageCampaign(forUser('user-event'), 'user-event'))?.send_count,
+	).toBe(2)
 
 	sendCloudflareEmail.mockClear()
 	expect(await sendUserUsageCampaignEmails({ env, now: later })).toEqual({
@@ -223,20 +241,22 @@ test('campaign sweep seeds without mailing, then event-origin sends are ledger-i
 		status: 'no_sends',
 		evaluatedUsers: 3,
 	})
-	expect((await readUsageCampaign(db, 'user-event'))?.state).toBe('Activated')
+	expect(
+		(await readUsageCampaign(forUser('user-event'), 'user-event'))?.state,
+	).toBe('Activated')
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
 })
 
 test('failed campaign sends release the ledger claim so a later sweep can retry', async () => {
-	const { db } = createDb()
-	await insertUser(db, {
+	await using campaign = await createDb()
+	const { forUser, env, userEnv } = campaign
+	await insertUser(campaign, {
 		id: 'user-retry',
 		email: 'retry@example.com',
 		clientName: 'Cursor',
 	})
-	const env = createEnv(db)
 	await recordVerifiedNoMcpCampaignSend({
-		env,
+		env: userEnv('user-retry'),
 		userId: 'user-retry',
 		now,
 	})
@@ -249,9 +269,9 @@ test('failed campaign sends release the ledger claim so a later sweep can retry'
 	)
 	await sendUserUsageCampaignEmails({ env, now: later })
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-	expect((await readUsageCampaign(db, 'user-retry'))?.state).toBe(
-		'ConnectedNoPackage',
-	)
+	expect(
+		(await readUsageCampaign(forUser('user-retry'), 'user-retry'))?.state,
+	).toBe('ConnectedNoPackage')
 
 	const due = new Date('2026-09-14T12:00:00.000Z')
 	gatherUsageCampaignSnapshot.mockResolvedValue(
@@ -273,7 +293,9 @@ test('failed campaign sends release the ledger claim so a later sweep can retry'
 		'usage-campaign-send-skipped',
 		expect.objectContaining({ reason: 'unconfigured' }),
 	)
-	expect(await listUsageCampaignSends(db, 'user-retry')).toEqual([
+	expect(
+		await listUsageCampaignSends(forUser('user-retry'), 'user-retry'),
+	).toEqual([
 		expect.objectContaining({
 			state: 'VerifiedNoMcp',
 			send_index: 1,
@@ -289,7 +311,9 @@ test('failed campaign sends release the ledger claim so a later sweep can retry'
 	})
 	const keep = sendCloudflareEmail.mock.calls.at(-1)?.[1] as { subject: string }
 	expect(keep.subject).toBe('Keep what Cursor just figured out')
-	expect(await listUsageCampaignSends(db, 'user-retry')).toEqual([
+	expect(
+		await listUsageCampaignSends(forUser('user-retry'), 'user-retry'),
+	).toEqual([
 		expect.objectContaining({ state: 'VerifiedNoMcp', send_index: 1 }),
 		expect.objectContaining({
 			state: 'ConnectedNoPackage',
@@ -300,17 +324,17 @@ test('failed campaign sends release the ledger claim so a later sweep can retry'
 })
 
 test('tips opt-out skips campaign mail and does not consume a send slot', async () => {
-	const { db } = createDb()
-	await insertUser(db, { id: 'user-opted', email: 'opted@example.com' })
-	await db
+	await using campaign = await createDb()
+	const { forUser, env, userEnv } = campaign
+	await insertUser(campaign, { id: 'user-opted', email: 'opted@example.com' })
+	await forUser('user-opted')
 		.prepare(
 			`INSERT INTO user_tips_email_opt_outs (user_id, opted_out_at) VALUES (?, ?)`,
 		)
 		.bind('user-opted', '2026-09-06T00:00:00.000Z')
 		.run()
-	const env = createEnv(db)
 	await recordVerifiedNoMcpCampaignSend({
-		env,
+		env: userEnv('user-opted'),
 		userId: 'user-opted',
 		now,
 	})
@@ -322,7 +346,9 @@ test('tips opt-out skips campaign mail and does not consume a send slot', async 
 		evaluatedUsers: 1,
 	})
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-	expect(await listUsageCampaignSends(db, 'user-opted')).toEqual([
+	expect(
+		await listUsageCampaignSends(forUser('user-opted'), 'user-opted'),
+	).toEqual([
 		expect.objectContaining({
 			state: 'VerifiedNoMcp',
 			send_index: 1,
@@ -331,16 +357,16 @@ test('tips opt-out skips campaign mail and does not consume a send slot', async 
 })
 
 test('a lost send-ledger race does not persist a stale campaign row', async () => {
-	const { db } = createDb()
-	await insertUser(db, {
+	await using campaign = await createDb()
+	const { forUser, env } = campaign
+	await insertUser(campaign, {
 		id: 'user-race',
 		email: 'race@example.com',
 		packageAt: '2026-07-01T00:00:00.000Z',
 	})
-	const env = createEnv(db)
 	const enteredAt = '2026-09-06T11:00:00.000Z'
 	await upsertUsageCampaign({
-		db,
+		db: forUser('user-race'),
 		userId: 'user-race',
 		state: 'Cooling',
 		enteredAt,
@@ -352,7 +378,7 @@ test('a lost send-ledger race does not persist a stale campaign row', async () =
 		now: new Date(enteredAt),
 	})
 	const claimed = await claimUsageCampaignSend({
-		db,
+		db: forUser('user-race'),
 		userId: 'user-race',
 		state: 'Cooling',
 		template: 'cooling',
@@ -360,7 +386,7 @@ test('a lost send-ledger race does not persist a stale campaign row', async () =
 		now: new Date(enteredAt),
 	})
 	expect(claimed).toBe(true)
-	const before = await readUsageCampaign(db, 'user-race')
+	const before = await readUsageCampaign(forUser('user-race'), 'user-race')
 	gatherUsageCampaignSnapshot.mockResolvedValue(
 		snapshot({
 			firstSavedPackageAt: '2026-07-01T00:00:00.000Z',
@@ -374,7 +400,7 @@ test('a lost send-ledger race does not persist a stale campaign row', async () =
 		evaluatedUsers: 1,
 	})
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-	const after = await readUsageCampaign(db, 'user-race')
+	const after = await readUsageCampaign(forUser('user-race'), 'user-race')
 	expect(after?.send_count).toBe(0)
 	expect(after?.last_sent_at).toBeNull()
 	expect(after?.last_evaluated_at).toBe(now.toISOString())
@@ -383,12 +409,15 @@ test('a lost send-ledger race does not persist a stale campaign row', async () =
 })
 
 test('re-entry claim loss persists last_evaluated_at without mailing again', async () => {
-	const { db } = createDb()
-	await insertUser(db, { id: 'user-reentry', email: 'reentry@example.com' })
-	const env = createEnv(db)
+	await using campaign = await createDb()
+	const { forUser, env } = campaign
+	await insertUser(campaign, {
+		id: 'user-reentry',
+		email: 'reentry@example.com',
+	})
 	const firstSentAt = '2026-08-01T00:00:00.000Z'
 	await upsertUsageCampaign({
-		db,
+		db: forUser('user-reentry'),
 		userId: 'user-reentry',
 		state: 'LimitAware',
 		enteredAt: '2026-08-20T00:00:00.000Z',
@@ -400,7 +429,7 @@ test('re-entry claim loss persists last_evaluated_at without mailing again', asy
 		now: new Date('2026-08-20T00:00:00.000Z'),
 	})
 	const claimed = await claimUsageCampaignSend({
-		db,
+		db: forUser('user-reentry'),
 		userId: 'user-reentry',
 		state: 'VerifiedNoMcp',
 		template: 'verified_no_mcp',
@@ -416,7 +445,7 @@ test('re-entry claim loss persists last_evaluated_at without mailing again', asy
 		evaluatedUsers: 1,
 	})
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-	const after = await readUsageCampaign(db, 'user-reentry')
+	const after = await readUsageCampaign(forUser('user-reentry'), 'user-reentry')
 	expect(after).toMatchObject({
 		state: 'VerifiedNoMcp',
 		send_count: 0,
@@ -424,7 +453,9 @@ test('re-entry claim loss persists last_evaluated_at without mailing again', asy
 		last_evaluated_at: later.toISOString(),
 		origin: 'event',
 	})
-	expect(await listUsageCampaignSends(db, 'user-reentry')).toEqual([
+	expect(
+		await listUsageCampaignSends(forUser('user-reentry'), 'user-reentry'),
+	).toEqual([
 		expect.objectContaining({
 			state: 'VerifiedNoMcp',
 			send_index: 1,
@@ -433,17 +464,20 @@ test('re-entry claim loss persists last_evaluated_at without mailing again', asy
 })
 
 test('a later seed persist cannot clobber a verify-time event row', async () => {
-	const { db } = createDb()
-	await insertUser(db, { id: 'user-verify', email: 'verify@example.com' })
-	const env = createEnv(db)
+	await using campaign = await createDb()
+	const { forUser, userEnv } = campaign
+	await insertUser(campaign, { id: 'user-verify', email: 'verify@example.com' })
 	expect(
 		await recordVerifiedNoMcpCampaignSend({
-			env,
+			env: userEnv('user-verify'),
 			userId: 'user-verify',
 			now,
 		}),
 	).toBe(true)
-	const verifyRow = await readUsageCampaign(db, 'user-verify')
+	const verifyRow = await readUsageCampaign(
+		forUser('user-verify'),
+		'user-verify',
+	)
 	expect(verifyRow).toMatchObject({
 		state: 'VerifiedNoMcp',
 		send_count: 1,
@@ -453,7 +487,7 @@ test('a later seed persist cannot clobber a verify-time event row', async () => 
 
 	const sweepAt = new Date('2026-09-07T12:00:05.000Z')
 	await upsertUsageCampaign({
-		db,
+		db: forUser('user-verify'),
 		userId: 'user-verify',
 		state: 'VerifiedNoMcp',
 		enteredAt: sweepAt.toISOString(),
@@ -464,7 +498,10 @@ test('a later seed persist cannot clobber a verify-time event row', async () => 
 		everActivated: false,
 		now: sweepAt,
 	})
-	const afterSweep = await readUsageCampaign(db, 'user-verify')
+	const afterSweep = await readUsageCampaign(
+		forUser('user-verify'),
+		'user-verify',
+	)
 	expect(afterSweep).toMatchObject({
 		state: 'VerifiedNoMcp',
 		send_count: 1,
@@ -475,10 +512,11 @@ test('a later seed persist cannot clobber a verify-time event row', async () => 
 })
 
 test('campaign upsert never clears cooling_terminal or ever_activated', async () => {
-	const { db } = createDb()
-	await insertUser(db, { id: 'user-sticky', email: 'sticky@example.com' })
+	await using campaign = await createDb()
+	const { forUser } = campaign
+	await insertUser(campaign, { id: 'user-sticky', email: 'sticky@example.com' })
 	await upsertUsageCampaign({
-		db,
+		db: forUser('user-sticky'),
 		userId: 'user-sticky',
 		state: 'Cooling',
 		enteredAt: now.toISOString(),
@@ -491,7 +529,7 @@ test('campaign upsert never clears cooling_terminal or ever_activated', async ()
 	})
 	const later = new Date('2026-09-07T12:00:05.000Z')
 	await upsertUsageCampaign({
-		db,
+		db: forUser('user-sticky'),
 		userId: 'user-sticky',
 		state: 'Activated',
 		enteredAt: later.toISOString(),
@@ -502,7 +540,9 @@ test('campaign upsert never clears cooling_terminal or ever_activated', async ()
 		everActivated: false,
 		now: later,
 	})
-	expect(await readUsageCampaign(db, 'user-sticky')).toMatchObject({
+	expect(
+		await readUsageCampaign(forUser('user-sticky'), 'user-sticky'),
+	).toMatchObject({
 		state: 'Activated',
 		cooling_terminal: 1,
 		ever_activated: 1,
@@ -510,12 +550,12 @@ test('campaign upsert never clears cooling_terminal or ever_activated', async ()
 })
 
 test('failed unsubscribe mint releases the claim and does not send campaign mail', async () => {
-	const { db } = createDb()
-	await insertUser(db, { id: 'user-mint', email: 'mint@example.com' })
-	const env = createEnv(db)
+	await using campaign = await createDb()
+	const { forUser, env } = campaign
+	await insertUser(campaign, { id: 'user-mint', email: 'mint@example.com' })
 	env.COOKIE_SECRET = ''
 	await upsertUsageCampaign({
-		db,
+		db: forUser('user-mint'),
 		userId: 'user-mint',
 		state: 'VerifiedNoMcp',
 		enteredAt: '2026-09-01T00:00:00.000Z',
@@ -527,7 +567,7 @@ test('failed unsubscribe mint releases the claim and does not send campaign mail
 		now,
 	})
 	await claimUsageCampaignSend({
-		db,
+		db: forUser('user-mint'),
 		userId: 'user-mint',
 		state: 'VerifiedNoMcp',
 		template: 'verified_no_mcp',
@@ -543,7 +583,9 @@ test('failed unsubscribe mint releases the claim and does not send campaign mail
 		evaluatedUsers: 1,
 	})
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-	expect(await listUsageCampaignSends(db, 'user-mint')).toEqual([
+	expect(
+		await listUsageCampaignSends(forUser('user-mint'), 'user-mint'),
+	).toEqual([
 		expect.objectContaining({
 			state: 'VerifiedNoMcp',
 			send_index: 1,
@@ -556,23 +598,27 @@ test('failed unsubscribe mint releases the claim and does not send campaign mail
 })
 
 test('opening a verify-time event row lets the sweep send after a failed first mail', async () => {
-	const { db } = createDb()
-	await insertUser(db, { id: 'user-open', email: 'open@example.com' })
-	const env = createEnv(db)
+	await using campaign = await createDb()
+	const { forUser, env, userEnv } = campaign
+	await insertUser(campaign, { id: 'user-open', email: 'open@example.com' })
 	expect(
 		await openVerifiedNoMcpCampaignEvent({
-			env,
+			env: userEnv('user-open'),
 			userId: 'user-open',
 			now,
 		}),
 	).toBe(true)
-	expect(await readUsageCampaign(db, 'user-open')).toMatchObject({
+	expect(
+		await readUsageCampaign(forUser('user-open'), 'user-open'),
+	).toMatchObject({
 		state: 'VerifiedNoMcp',
 		origin: 'event',
 		send_count: 0,
 		last_sent_at: null,
 	})
-	expect(await listUsageCampaignSends(db, 'user-open')).toEqual([])
+	expect(
+		await listUsageCampaignSends(forUser('user-open'), 'user-open'),
+	).toEqual([])
 
 	const later = new Date(now.getTime() + usageCampaignFirstSendDwellMs)
 	gatherUsageCampaignSnapshot.mockResolvedValue(snapshot({ now: later }))
@@ -583,18 +629,22 @@ test('opening a verify-time event row lets the sweep send after a failed first m
 		emailedUsers: 1,
 		emailsSent: 1,
 	})
-	expect((await readUsageCampaign(db, 'user-open'))?.send_count).toBe(1)
-	expect((await listUsageCampaignSends(db, 'user-open')).length).toBe(1)
+	expect(
+		(await readUsageCampaign(forUser('user-open'), 'user-open'))?.send_count,
+	).toBe(1)
+	expect(
+		(await listUsageCampaignSends(forUser('user-open'), 'user-open')).length,
+	).toBe(1)
 })
 
 test('advocate one-shot uses the live referral share URL and never repeats', async () => {
-	const { db } = createDb()
-	await insertUser(db, {
+	await using campaign = await createDb()
+	const { forUser, env } = campaign
+	await insertUser(campaign, {
 		id: 'kentcdodds',
 		email: 'advocate@example.com',
 		stripePlan: 'pro',
 	})
-	const env = createEnv(db)
 	gatherUsageCampaignSnapshot.mockImplementation(
 		async (input: { user: UsageCampaignCandidate }) =>
 			snapshot({
@@ -606,9 +656,12 @@ test('advocate one-shot uses the live referral share URL and never repeats', asy
 		status: 'no_sends',
 		evaluatedUsers: 1,
 	})
-	expect((await readUsageCampaign(db, 'kentcdodds'))?.state).toBe('Paid')
 	expect(
-		(await readUsageCampaign(db, 'kentcdodds'))?.advocate_sent_at,
+		(await readUsageCampaign(forUser('kentcdodds'), 'kentcdodds'))?.state,
+	).toBe('Paid')
+	expect(
+		(await readUsageCampaign(forUser('kentcdodds'), 'kentcdodds'))
+			?.advocate_sent_at,
 	).toBeNull()
 
 	const due = new Date('2026-09-14T12:00:00.000Z')
@@ -639,14 +692,16 @@ test('advocate one-shot uses the live referral share URL and never repeats', asy
 	expect(payload.text).toContain(
 		'mailto:me@kentcdodds.com?subject=Kody%20testimonial',
 	)
-	expect(await listUsageCampaignSends(db, 'kentcdodds')).toEqual([
+	expect(
+		await listUsageCampaignSends(forUser('kentcdodds'), 'kentcdodds'),
+	).toEqual([
 		expect.objectContaining({
 			state: 'Paid',
 			template: 'advocate_referral_testimonial',
 			send_index: 1,
 		}),
 	])
-	const afterSend = await readUsageCampaign(db, 'kentcdodds')
+	const afterSend = await readUsageCampaign(forUser('kentcdodds'), 'kentcdodds')
 	expect(afterSend?.send_count).toBe(0)
 	expect(afterSend?.advocate_sent_at).toBe(due.toISOString())
 	expect(afterSend?.last_sent_at).toBeNull()
@@ -657,12 +712,18 @@ test('advocate one-shot uses the live referral share URL and never repeats', asy
 		evaluatedUsers: 1,
 	})
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-	expect((await listUsageCampaignSends(db, 'kentcdodds')).length).toBe(1)
+	expect(
+		(await listUsageCampaignSends(forUser('kentcdodds'), 'kentcdodds')).length,
+	).toBe(1)
 })
 
 test('campaign sweep selects referral overlay expiry for stock-cap plan reads', async () => {
-	const { db } = createDb()
-	await insertUser(db, { id: 'user-overlay', email: 'overlay@example.com' })
+	await using campaign = await createDb()
+	const { db } = campaign
+	await insertUser(campaign, {
+		id: 'user-overlay',
+		email: 'overlay@example.com',
+	})
 	await db
 		.prepare(
 			`UPDATE users

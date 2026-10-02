@@ -149,7 +149,7 @@ export async function setUserOauthAppLogo(input: {
 	}
 	if (casLogoKey) {
 		updateSql += `
-				AND logo_key IS ?`
+				AND logo_key IS NOT DISTINCT FROM ?`
 	}
 	const updated = await input.db
 		.prepare(updateSql)

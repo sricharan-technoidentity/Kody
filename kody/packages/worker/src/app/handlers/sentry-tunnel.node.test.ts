@@ -1,4 +1,3 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
 	buildEnvelopeIngestUrl,
@@ -6,13 +5,9 @@ import {
 } from './sentry-tunnel.ts'
 import { sentryTunnelRateLimitConfig } from '#app/rate-limit.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const configuredDsn = 'https://publickey@o123.ingest.us.sentry.io/456'
-
-function createAppDb() {
-	return createD1FromSqlite(new DatabaseSync(':memory:'))
-}
 
 function buildEnvelope(dsn?: string) {
 	const header = JSON.stringify(dsn ? { dsn } : {})
@@ -61,11 +56,13 @@ test('buildEnvelopeIngestUrl derives the envelope endpoint from the DSN', () => 
 })
 
 test('sentry tunnel forwards matching envelopes and rejects everything else', async () => {
+	// Signed-out traffic: the pre-auth writer, whose rate-limit slots go through definers.
+	await using store = await createTestDb()
 	const forwardMock = vi.fn(async () => new Response(null, { status: 200 }))
 	using _okFetch = stubFetch(forwardMock)
 	const forwardHandler = createSentryTunnelHandler({
 		SENTRY_DSN: configuredDsn,
-		APP_DB: createAppDb(),
+		APP_DB: store.db,
 	})
 	const forwarded = await forwardHandler.handler(
 		tunnelRequest(buildEnvelope(configuredDsn)),
@@ -83,7 +80,7 @@ test('sentry tunnel forwards matching envelopes and rejects everything else', as
 	using _rejectFetch = stubFetch(rejectMock)
 	const rejectHandler = createSentryTunnelHandler({
 		SENTRY_DSN: configuredDsn,
-		APP_DB: createAppDb(),
+		APP_DB: store.db,
 	})
 	expect(
 		(
@@ -102,7 +99,7 @@ test('sentry tunnel forwards matching envelopes and rejects everything else', as
 	).toBe(403)
 	expect(
 		(
-			await createSentryTunnelHandler({ APP_DB: createAppDb() }).handler(
+			await createSentryTunnelHandler({ APP_DB: store.db }).handler(
 				tunnelRequest(buildEnvelope(configuredDsn)),
 			)
 		).status,
@@ -119,7 +116,7 @@ test('sentry tunnel forwards matching envelopes and rejects everything else', as
 	consoleWarn.mockImplementation(() => {})
 	const failHandler = createSentryTunnelHandler({
 		SENTRY_DSN: configuredDsn,
-		APP_DB: createAppDb(),
+		APP_DB: store.db,
 	})
 	expect(
 		(await failHandler.handler(tunnelRequest(buildEnvelope(configuredDsn))))
@@ -128,6 +125,8 @@ test('sentry tunnel forwards matching envelopes and rejects everything else', as
 })
 
 test('sentry tunnel caps forwarding per address and needs a declared length', async () => {
+	// Signed-out traffic: the pre-auth writer, whose rate-limit slots go through definers.
+	await using store = await createTestDb()
 	const forwardMock = vi.fn(async () => new Response(null, { status: 200 }))
 	using _okFetch = stubFetch(forwardMock)
 	const limit = vi.fn(async ({ key }: RateLimitOptions) => {
@@ -136,7 +135,7 @@ test('sentry tunnel caps forwarding per address and needs a declared length', as
 	})
 	const handler = createSentryTunnelHandler({
 		SENTRY_DSN: configuredDsn,
-		APP_DB: createAppDb(),
+		APP_DB: store.db,
 		SENTRY_TUNNEL_RATE_LIMITER: { limit } as unknown as RateLimit,
 	})
 	const flood = () =>
@@ -163,12 +162,14 @@ test('sentry tunnel caps forwarding per address and needs a declared length', as
 	expect(forwardMock).toHaveBeenCalledTimes(2)
 })
 
-test('sentry tunnel falls back to D1 rate limiting without the binding', async () => {
+test('sentry tunnel falls back to database rate limiting without the binding', async () => {
+	// Signed-out traffic: the pre-auth writer, whose rate-limit slots go through definers.
+	await using store = await createTestDb()
 	const forwardMock = vi.fn(async () => new Response(null, { status: 200 }))
 	using _okFetch = stubFetch(forwardMock)
 	const handler = createSentryTunnelHandler({
 		SENTRY_DSN: configuredDsn,
-		APP_DB: createAppDb(),
+		APP_DB: store.db,
 	})
 
 	let throttled: Response | null = null

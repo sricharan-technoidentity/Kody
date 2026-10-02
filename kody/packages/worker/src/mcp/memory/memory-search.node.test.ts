@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import * as embedding from '#worker/vectorize/embedding.ts'
+import * as embedding from '#worker/search-index/embedding.ts'
 import { queryMemoryVectorIds, searchMemories } from './memory-search.ts'
 import { type McpMemoryRow } from './types.ts'
 

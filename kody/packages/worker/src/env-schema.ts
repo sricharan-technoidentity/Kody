@@ -5,6 +5,11 @@ import {
 	string,
 	type InferOutput,
 } from 'remix/data-schema'
+import { type KmsEnvelope } from '#worker/aws/kms-envelope.ts'
+import { type UserMeters } from '#worker/entitlements/user-meter-client.ts'
+import { type RunRecords } from '#worker/run-records/run-log-types.ts'
+import { type RunState } from '#worker/run-records/run-state-types.ts'
+import { type KodyTemporal } from '#worker/temporal/client.ts'
 
 const d1DatabaseSchema = createSchema<unknown, D1Database>((value, context) => {
 	if (value) {
@@ -58,6 +63,34 @@ const optionalFetcherSchema = createSchema<unknown, Fetcher | undefined>(
 	(value, _context) => {
 		if (value === undefined) return { value: undefined }
 		return { value: value as Fetcher }
+	},
+)
+
+// Per-user quota/lease store (DynamoDB `meters`). Optional so routes that
+// never meter can run without it; metering callers fail closed when absent.
+const optionalUserMetersSchema = createSchema<unknown, UserMeters | undefined>(
+	(value, _context) => {
+		if (value === undefined) return { value: undefined }
+		return { value: value as UserMeters }
+	},
+)
+
+// Per-user run history store (DynamoDB `runs` + S3 logs). Optional so local
+// and test envs without it skip run recording, as with the former RUN_LOG DO.
+const optionalRunRecordsSchema = createSchema<unknown, RunRecords | undefined>(
+	(value, _context) => {
+		if (value === undefined) return { value: undefined }
+		return { value: value as RunRecords }
+	},
+)
+
+// Temporal clients (every durable write: queue replacements, schedules,
+// DO-alarm replacements). Optional so local and test envs without it keep
+// the inline fallbacks they used without Queue bindings.
+const optionalTemporalSchema = createSchema<unknown, KodyTemporal | undefined>(
+	(value, _context) => {
+		if (value === undefined) return { value: undefined }
+		return { value: value as KodyTemporal }
 	},
 )
 
@@ -135,28 +168,17 @@ const optionalSentryTracesSampleRateSchema = createSchema<
 	return fail('Expected number or numeric string', context.path)
 })
 
-const secretStoreKeySchema = createSchema<unknown, string>((value, context) => {
-	if (typeof value !== 'string') {
-		return fail(
-			'Missing SECRET_STORE_KEY binding for saved secret encryption.',
-			context.path,
-		)
+// KMS envelope for every Kody-held secret (user secrets, integration
+// tokens, OAuth app client secrets, webhook URL secrets).
+const secretKmsSchema = createSchema<unknown, KmsEnvelope>((value, context) => {
+	const kms = value as Partial<KmsEnvelope> | undefined
+	if (typeof kms?.encrypt === 'function' && typeof kms.decrypt === 'function') {
+		return { value: kms as KmsEnvelope }
 	}
-
-	const trimmed = value.trim()
-	if (!trimmed) {
-		return fail(
-			'Missing SECRET_STORE_KEY binding for saved secret encryption.',
-			context.path,
-		)
-	}
-	if (trimmed.length < 32) {
-		return fail(
-			'SECRET_STORE_KEY must be at least 32 characters for secure key derivation.',
-			context.path,
-		)
-	}
-	return { value: trimmed }
+	return fail(
+		'Missing SECRET_KMS binding for saved secret encryption.',
+		context.path,
+	)
 })
 
 export const EnvSchema = object({
@@ -164,7 +186,7 @@ export const EnvSchema = object({
 		(value) => value.length >= 32,
 		'COOKIE_SECRET must be at least 32 characters for session signing.',
 	),
-	SECRET_STORE_KEY: secretStoreKeySchema,
+	SECRET_KMS: secretKmsSchema,
 	APP_DB: d1DatabaseSchema,
 	BUNDLE_ARTIFACTS_KV: createSchema<unknown, KVNamespace>((value, context) => {
 		if (value) {
@@ -195,6 +217,12 @@ export const EnvSchema = object({
 		'Missing MCP_CLIENT_HUB binding for user-added MCP server connections.',
 	),
 	RUNTIME_WORKER: optionalFetcherSchema,
+	USER_METERS: optionalUserMetersSchema,
+	RUN_RECORDS: optionalRunRecordsSchema,
+	RUN_STATE: createSchema<unknown, RunState | undefined>((value) => ({
+		value: value as RunState | undefined,
+	})),
+	TEMPORAL: optionalTemporalSchema,
 	APP_BASE_URL: optionalUrlStringSchema,
 	// Comma-separated legacy app hostnames the Worker keeps serving alongside
 	// the canonical `APP_BASE_URL` host during a domain migration. The deploy

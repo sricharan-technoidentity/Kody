@@ -1,4 +1,5 @@
 import { type Action } from 'remix/router'
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 import {
 	auditDatabaseFromEnv,
 	getRequestIp,
@@ -43,6 +44,7 @@ export function createVerifyEmailClaimReleaseHandler(env: Env) {
 		async handler({ request, url }) {
 			const result = await verifyEmailClaimReleaseToken({
 				db: env.APP_DB,
+				forUser: getAccountWriterFactory(env),
 				token: url.searchParams.get('token'),
 			})
 			const requestIp = getRequestIp(request) ?? undefined

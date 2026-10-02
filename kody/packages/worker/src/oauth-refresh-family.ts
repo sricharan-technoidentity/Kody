@@ -1,10 +1,9 @@
 import * as Sentry from '@sentry/cloudflare'
-import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import {
 	decryptSecretValue,
 	encryptSecretValue,
 } from '#worker/mcp/secrets/crypto.ts'
-import { isCloudflareKvTransientHttpErrorMessage } from './cloudflare-kv-platform-error.ts'
+import { isDynamoTransientError } from '#worker/aws/dynamo.ts'
 
 /**
  * MCP hosts on one machine often share a stored OAuth client but keep their
@@ -414,10 +413,10 @@ async function persistRefreshFamilyBestEffort(input: {
 		await persistRefreshFamilyFromTokenResponse(input)
 	} catch (error) {
 		// Snapshot writes are best-effort. The provider already minted tokens;
-		// a KV or encrypt failure must not hide that response. Bare Workers KV
-		// 5xx / 429 binding strings are platform blips (KODY-7W); skip Sentry
+		// a KV or encrypt failure must not hide that response. DynamoDB
+		// throttling the SDK already retried is a platform blip; skip Sentry
 		// for those and keep reporting encrypt / unexpected persist failures.
-		if (!isCloudflareKvTransientHttpErrorMessage(getErrorMessage(error))) {
+		if (!isDynamoTransientError(error)) {
 			Sentry.captureException(error)
 		}
 	}
@@ -465,7 +464,7 @@ async function persistRefreshFamilyFromTokenResponse(input: {
 }
 
 function canPersistRefreshFamily(env: Env) {
-	return Boolean(env.BUNDLE_ARTIFACTS_KV && env.SECRET_STORE_KEY)
+	return Boolean(env.BUNDLE_ARTIFACTS_KV && env.SECRET_KMS)
 }
 
 async function readGrantRefreshIds(
@@ -588,7 +587,7 @@ async function writeRefreshFamilyReplay(
 }
 
 function refreshFamilySecretContext(userId: string, grantId: string) {
-	return `mcp-oauth-refresh-family:${userId}:${grantId}`
+	return { userId, mcpOAuthRefreshFamily: grantId }
 }
 
 function createFamilyTokenResponse(snapshot: RefreshFamilySnapshot) {

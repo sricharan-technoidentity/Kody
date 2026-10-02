@@ -1,5 +1,3 @@
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { beforeAll, expect, test } from 'vitest'
 import {
 	createAuthCookie,
@@ -10,34 +8,22 @@ import { verifyEmailChangeToken } from '#app/email-change.ts'
 import { hashVerificationToken } from '#app/email-verification.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	auditEventSummaries,
 	logAuditEventSpy,
 } from '#worker/test-support/audit-log-spy.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { createAccountEmailChangeHandler } from './account-email-change.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function applyMigrations(db: DatabaseSync) {
-	const migrationsDir = new URL('../../../migrations/', import.meta.url)
-	applyAllMigrations(db, migrationsDir)
-}
-
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyMigrations(sqlite)
-	return {
-		sqlite,
-		db: createD1FromSqlite(sqlite),
-	}
-}
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
 
 async function seedUser(
-	sqlite: DatabaseSync,
+	store: TestDb,
 	input: {
 		id: number
 		email: string
@@ -48,27 +34,26 @@ async function seedUser(
 ) {
 	const passwordHash = await createPasswordHash(input.password)
 	const stableUserId = await createStableUserIdFromEmail(input.email)
-	sqlite.exec(`
-		INSERT INTO users (
-			id,
-			username,
-			email,
-			stable_user_id,
-			password_hash,
-			email_verified_at
-		) VALUES (
-			${input.id},
-			${quoteSqlString(input.username)},
-			${quoteSqlString(input.email)},
-			${quoteSqlString(stableUserId)},
-			${quoteSqlString(passwordHash)},
-			${input.verified === false ? 'NULL' : 'CURRENT_TIMESTAMP'}
-		);
-	`)
+	await store.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		[
+			input.id,
+			input.username,
+			input.email,
+			stableUserId,
+			passwordHash,
+			input.verified === false ? null : '2026-01-01T00:00:00.000Z',
+		],
+	)
 	return stableUserId
 }
 
-function createAppEnv(db: D1Database) {
+async function query<T>(store: TestDb, sql: string) {
+	return (await store.pg.query<T>(sql)).rows
+}
+
+function createAppEnv(db: PgDatabase) {
 	return {
 		APP_DB: db,
 		APP_BASE_URL: 'http://example.com',
@@ -115,14 +100,16 @@ test('email change requests require the current password and create a pending ve
 	// No email sender is configured in this test env, so the skipped
 	// verification send logs a warning.
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createMigratedDb()
-	await seedUser(sqlite, {
+	await using store = await createTestDb()
+	const ownerId = await seedUser(store, {
 		id: 1,
 		email: 'old@example.com',
 		username: 'old-user',
 		password: 'correct-password',
 	})
-	const handler = createAccountEmailChangeHandler(createAppEnv(db))
+	const handler = createAccountEmailChangeHandler(
+		createAppEnv(store.forUser(ownerId).db),
+	)
 	const session = {
 		stableUserId: testStableUserIdFromEmail('old@example.com'),
 		email: 'old@example.com',
@@ -144,10 +131,11 @@ test('email change requests require the current password and create a pending ve
 		error: 'Password is incorrect.',
 	})
 	expect(
-		sqlite
-			.prepare(`SELECT COUNT(*) AS count FROM pending_email_changes`)
-			.get() as { count: number },
-	).toEqual({ count: 0 })
+		await query(
+			store,
+			`SELECT COUNT(*)::int AS count FROM pending_email_changes`,
+		),
+	).toEqual([{ count: 0 }])
 
 	const response = await runHandler(
 		handler,
@@ -164,22 +152,20 @@ test('email change requests require the current password and create a pending ve
 		message:
 			'Verification email sent to your new address. After you confirm, your current address stays tied to this account until you release it from Former addresses.',
 	})
-	expect(
-		sqlite
-			.prepare(
-				`SELECT user_id, new_email, token_hash FROM pending_email_changes`,
-			)
-			.get(),
-	).toMatchObject({
+	const [firstPending] = await query<{
+		user_id: number
+		new_email: string
+		token_hash: string
+	}>(
+		store,
+		`SELECT user_id::int AS user_id, new_email, token_hash FROM pending_email_changes`,
+	)
+	expect(firstPending).toMatchObject({
 		user_id: 1,
 		new_email: 'new@example.com',
 		token_hash: expect.any(String),
 	})
-	const firstPendingToken = (
-		sqlite
-			.prepare(`SELECT token_hash FROM pending_email_changes WHERE user_id = 1`)
-			.get() as { token_hash: string }
-	).token_hash
+	const firstPendingToken = firstPending!.token_hash
 
 	const resendResponse = await runHandler(
 		handler,
@@ -190,9 +176,10 @@ test('email change requests require the current password and create a pending ve
 		}),
 	)
 	expect(resendResponse.status).toBe(200)
-	const pendingRows = sqlite
-		.prepare(`SELECT new_email, token_hash FROM pending_email_changes`)
-		.all() as Array<{ new_email: string; token_hash: string }>
+	const pendingRows = await query<{ new_email: string; token_hash: string }>(
+		store,
+		`SELECT new_email, token_hash FROM pending_email_changes`,
+	)
 	expect(pendingRows).toHaveLength(1)
 	expect(pendingRows[0]).toMatchObject({
 		new_email: 'new@example.com',
@@ -203,15 +190,17 @@ test('email change requests require the current password and create a pending ve
 })
 
 test('unverified accounts cannot start an email change', async () => {
-	const { sqlite, db } = createMigratedDb()
-	await seedUser(sqlite, {
+	await using store = await createTestDb()
+	const ownerId = await seedUser(store, {
 		id: 1,
 		email: 'unverified@example.com',
 		username: 'unverified-user',
 		password: 'correct-password',
 		verified: false,
 	})
-	const handler = createAccountEmailChangeHandler(createAppEnv(db))
+	const handler = createAccountEmailChangeHandler(
+		createAppEnv(store.forUser(ownerId).db),
+	)
 
 	const response = await runHandler(
 		handler,
@@ -231,10 +220,11 @@ test('unverified accounts cannot start an email change', async () => {
 		error: 'Verify your current email address before changing it.',
 	})
 	expect(
-		sqlite
-			.prepare(`SELECT COUNT(*) AS count FROM pending_email_changes`)
-			.get() as { count: number },
-	).toEqual({ count: 0 })
+		await query(
+			store,
+			`SELECT COUNT(*)::int AS count FROM pending_email_changes`,
+		),
+	).toEqual([{ count: 0 }])
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
 		expect.objectContaining({
 			category: 'account',
@@ -246,66 +236,115 @@ test('unverified accounts cannot start an email change', async () => {
 	expect(auditEventSummaries()).toEqual(['email_change_request:failure'])
 })
 
-test('email change requests reject emails already owned by another account', async () => {
-	const { sqlite, db } = createMigratedDb()
-	await seedUser(sqlite, {
+test('email change requests reject addresses another account signs in with or still claims', async () => {
+	consoleWarn.mockImplementation(() => {})
+	await using store = await createTestDb()
+	const ownerId = await seedUser(store, {
 		id: 1,
 		email: 'old@example.com',
 		username: 'old-user',
 		password: 'correct-password',
 	})
-	await seedUser(sqlite, {
+	await seedUser(store, {
 		id: 2,
 		email: 'taken@example.com',
 		username: 'taken-user',
 		password: 'taken-password',
 	})
-	const handler = createAccountEmailChangeHandler(createAppEnv(db))
+	await store.pg.exec(`
+		INSERT INTO user_email_claims (user_id, email, status)
+		VALUES (2, 'former@example.com', 'claimed'),
+		       (2, 'released@example.com', 'released')
+	`)
+	// The owner's writer cannot see account 2; the directory definer answers.
+	const handler = createAccountEmailChangeHandler(
+		createAppEnv(store.forUser(ownerId).db),
+	)
+	const session = {
+		stableUserId: testStableUserIdFromEmail('old@example.com'),
+		email: 'old@example.com',
+		rememberMe: false,
+	}
 
-	const response = await runHandler(
+	for (const email of ['taken@example.com', 'Former@Example.com']) {
+		const response = await runHandler(
+			handler,
+			await createRequest({ session, email, password: 'correct-password' }),
+		)
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({
+			ok: false,
+			error: 'Email already registered.',
+		})
+	}
+	await expect(
+		store
+			.forUser(ownerId)
+			.reader.prepare(`SELECT kody_email_reserved_for_other(?, ?) AS reserved`)
+			.bind('taken@example.com', 1)
+			.first(),
+	).rejects.toThrow(/permission denied/)
+	const released = await runHandler(
 		handler,
 		await createRequest({
-			session: {
-				stableUserId: testStableUserIdFromEmail('old@example.com'),
-				email: 'old@example.com',
-				rememberMe: false,
-			},
-			email: 'taken@example.com',
+			session,
+			email: 'released@example.com',
 			password: 'correct-password',
 		}),
 	)
-	expect(response.status).toBe(409)
-	expect(await response.json()).toEqual({
-		ok: false,
-		error: 'Email already registered.',
-	})
+	expect(released.status).toBe(200)
+	expect(
+		await query(store, `SELECT new_email FROM pending_email_changes`),
+	).toEqual([{ new_email: 'released@example.com' }])
 })
 
-test('email change verification updates email and preserves stable user id', async () => {
-	const { sqlite, db } = createMigratedDb()
-	const oldStableUserId = await seedUser(sqlite, {
+test('signed-out email change link resolves its owner, updates email, and preserves stable user id', async () => {
+	await using store = await createTestDb()
+	const oldStableUserId = await seedUser(store, {
 		id: 1,
 		email: 'old@example.com',
 		username: 'old-user',
 		password: 'correct-password',
 		verified: false,
 	})
+	await seedUser(store, {
+		id: 2,
+		email: 'other@example.com',
+		username: 'other-user',
+		password: 'other-password',
+	})
 	const token = 'verify-email-change-token'
-	const tokenHash = await hashVerificationToken(token)
+	const conflictToken = 'conflicting-email-change-token'
 	const now = new Date('2026-07-06T00:00:00.000Z')
 	const expiresAt = now.getTime() + 60_000
-	sqlite.exec(`
-		INSERT INTO email_verifications (user_id, token_hash, expires_at)
-		VALUES (1, 'old-account-token', ${expiresAt});
-		INSERT INTO pending_email_changes (user_id, new_email, token_hash, expires_at)
-		VALUES (1, 'new@example.com', ${quoteSqlString(tokenHash)}, ${expiresAt});
-	`)
+	await store.pg.query(
+		`INSERT INTO email_verifications (user_id, token_hash, expires_at)
+		 VALUES (1, 'old-account-token', $1), (2, 'other-account-token', $1)`,
+		[expiresAt],
+	)
+	await store.pg.query(
+		`INSERT INTO pending_email_changes (user_id, new_email, token_hash, expires_at)
+		 VALUES (1, 'new@example.com', $1, $3), (2, 'old@example.com', $2, $3)`,
+		[
+			await hashVerificationToken(token),
+			await hashVerificationToken(conflictToken),
+			expiresAt,
+		],
+	)
+	// Pre-auth writer: no account context, so RLS shows it no pending changes.
+	const signedOut = {
+		db: store.forUser().db,
+		forUser: (userId: string) => store.forUser(userId).db,
+	}
 
-	const result = await verifyEmailChangeToken({
-		db,
-		token,
-		now,
-	})
+	expect(
+		await verifyEmailChangeToken({ ...signedOut, token: 'unknown', now }),
+	).toEqual({ ok: false, reason: 'invalid_token' })
+	await expect(
+		verifyEmailChangeToken({ db: store.forUser().db, token, now }),
+	).rejects.toThrow("email_change needs the token owner's writer")
+
+	const result = await verifyEmailChangeToken({ ...signedOut, token, now })
 	expect(result).toEqual({
 		ok: true,
 		userId: 1,
@@ -314,30 +353,44 @@ test('email change verification updates email and preserves stable user id', asy
 		newEmail: 'new@example.com',
 	})
 	expect(
-		sqlite
-			.prepare(
-				`SELECT email, stable_user_id, email_verified_at FROM users WHERE id = 1`,
-			)
-			.get(),
-	).toEqual({
-		email: 'new@example.com',
-		stable_user_id: oldStableUserId,
-		email_verified_at: '2026-07-06T00:00:00.000Z',
-	})
+		await query(
+			store,
+			`SELECT email, stable_user_id, email_verified_at FROM users WHERE id = 1`,
+		),
+	).toEqual([
+		{
+			email: 'new@example.com',
+			stable_user_id: oldStableUserId,
+			email_verified_at: '2026-07-06T00:00:00.000Z',
+		},
+	])
 	expect(
-		sqlite.prepare(`SELECT COUNT(*) AS count FROM pending_email_changes`).get(),
-	).toEqual({ count: 0 })
+		await query(
+			store,
+			`SELECT user_id::int AS user_id FROM pending_email_changes`,
+		),
+	).toEqual([{ user_id: 2 }])
 	expect(
-		sqlite.prepare(`SELECT COUNT(*) AS count FROM email_verifications`).get(),
-	).toEqual({ count: 0 })
+		await query(
+			store,
+			`SELECT user_id::int AS user_id FROM email_verifications`,
+		),
+	).toEqual([{ user_id: 2 }])
 	expect(
-		sqlite
-			.prepare(
-				`SELECT email, status FROM user_email_claims WHERE user_id = 1 ORDER BY email`,
-			)
-			.all() as Array<{ email: string; status: string }>,
+		await query(
+			store,
+			`SELECT email, status FROM user_email_claims WHERE user_id = 1 ORDER BY email`,
+		),
 	).toEqual([
 		{ email: 'new@example.com', status: 'claimed' },
 		{ email: 'old@example.com', status: 'claimed' },
+	])
+
+	// Account 2 asked for the address account 1 still claims as a former email.
+	expect(
+		await verifyEmailChangeToken({ ...signedOut, token: conflictToken, now }),
+	).toEqual({ ok: false, reason: 'email_conflict' })
+	expect(await query(store, `SELECT email FROM users WHERE id = 2`)).toEqual([
+		{ email: 'other@example.com' },
 	])
 })

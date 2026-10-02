@@ -1,10 +1,7 @@
 import { expect, test } from 'vitest'
-import { lexicalScore } from '#worker/vectorize/scoring.ts'
-import {
-	CAPABILITY_EMBEDDING_DIMENSIONS,
-	deterministicEmbedding,
-} from '#worker/vectorize/embedding.ts'
-import { BUILTIN_VECTOR_NAMESPACE } from '#worker/vectorize/vector-namespaces.ts'
+import { lexicalScore } from '#worker/search-index/scoring.ts'
+import { deterministicEmbedding } from '#worker/search-index/embedding.ts'
+import { BUILTIN_VECTOR_NAMESPACE } from '#worker/search-index/vector-namespaces.ts'
 import {
 	CAPABILITY_VECTOR_KIND,
 	buildCapabilityVectorMetadataFilter,
@@ -36,17 +33,11 @@ function onlineEnv(matches: Array<{ id: string; score: number }>) {
 	const capturedNamespaces: Array<string | undefined> = []
 	const env = {
 		SENTRY_ENVIRONMENT: 'production',
-		AI: {
-			async run(...args: Array<unknown>) {
-				const input = args[1] as { text?: unknown }
-				const texts = Array.isArray(input.text)
-					? input.text.map(String)
-					: [String(input.text ?? '')]
+		BEDROCK_EMBEDDINGS: {
+			async embedTexts(input: readonly string[]) {
+				const texts = [...input]
 				embeddedTexts.push(...texts)
-				return {
-					data: texts.map((text) => deterministicEmbedding(text)),
-					shape: [texts.length, CAPABILITY_EMBEDDING_DIMENSIONS],
-				}
+				return texts.map((text) => deterministicEmbedding(text))
 			},
 		},
 		CAPABILITY_VECTOR_INDEX: {
@@ -165,10 +156,7 @@ test('offline capability search ranks lexical matches and returns structured det
 			inputTypeDefinition: 'type OAuthSetupGuideInput = {\n\tguide: string\n}',
 		},
 	} satisfies Record<string, CapabilitySpec>
-	const env = {
-		SENTRY_ENVIRONMENT: 'test',
-		AI: {} as Ai,
-	} as Env
+	const env = { SENTRY_ENVIRONMENT: 'test' } as unknown as Env
 
 	const oauthGuide = await searchCapabilities({
 		env,

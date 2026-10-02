@@ -3,6 +3,7 @@
  * GROUP BY — the page never pages users or fans out per-account reads.
  */
 
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { classifyMcpClientName } from '#universal/connected-mcp-agents.ts'
 import {
@@ -99,7 +100,7 @@ function planSlices(
 }
 
 export async function loadAdminLaunchSignals(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: BillingEnv
 	now: Date
 }): Promise<AdminInsightsLaunchSignals> {

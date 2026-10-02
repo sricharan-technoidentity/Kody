@@ -1,6 +1,5 @@
 import { lexer, type Token, type Tokens } from 'marked'
-import { highlightCacheHeaderName } from '#universal/highlight-cache-header.ts'
-import { highlightBatchCacheRequest } from '#universal/highlight-cache-request.ts'
+import { tokenizeSnippets } from '#worker/highlight/tokenize.ts'
 import {
 	highlightSnippetKey,
 	plainHighlightedCode,
@@ -9,147 +8,23 @@ import {
 } from '#universal/highlighted-code.ts'
 import { type ServerTimingEntry } from '#worker/server-timing.ts'
 
-export type HighlightEnv = {
-	HIGHLIGHT?: Fetcher
-}
-
-export type HighlightOptions = {
-	serverTiming?: Array<ServerTimingEntry>
-}
-
-type HighlightCacheDesc = 'hit' | 'worker' | 'miss' | 'fallback'
-
-function recordHighlight(
-	serverTiming: Array<ServerTimingEntry> | undefined,
-	startedAt: number,
-	desc: HighlightCacheDesc,
-) {
-	if (!serverTiming) return
-	serverTiming.push({
-		name: 'highlight',
-		durationMs: Date.now() - startedAt,
-		desc,
-	})
-}
-
-const highlightOrigin = 'https://highlight.internal'
-const originCacheOrigin = 'https://highlight-origin.local'
-const originHighlightCacheName = 'kody-highlight-origin'
-
-async function originHighlightCache() {
-	if (typeof caches === 'undefined') return null
-	return caches.open(originHighlightCacheName)
-}
-
-function originCacheRequest(snippets: Array<HighlightSnippet>) {
-	return highlightBatchCacheRequest(originCacheOrigin, snippets)
-}
-
-function isHighlightedCode(value: unknown): value is HighlightedCode {
-	if (typeof value !== 'object' || value === null) return false
-	const item = value as HighlightedCode
-	return (
-		typeof item.code === 'string' &&
-		typeof item.lang === 'string' &&
-		typeof item.plain === 'boolean' &&
-		Array.isArray(item.lines)
-	)
-}
-
-async function readOriginCache(snippets: Array<HighlightSnippet>) {
-	try {
-		const cache = await originHighlightCache()
-		if (!cache) return null
-		const cached = await cache.match(await originCacheRequest(snippets))
-		if (!cached?.ok) return null
-		const body = (await cached.json()) as { results?: unknown }
-		if (!Array.isArray(body.results)) return null
-		if (body.results.length !== snippets.length) return null
-		if (!body.results.every(isHighlightedCode)) return null
-		return body.results
-	} catch {
-		return null
-	}
-}
-
-async function writeOriginCache(
-	snippets: Array<HighlightSnippet>,
-	results: Array<HighlightedCode>,
-) {
-	try {
-		const cache = await originHighlightCache()
-		if (!cache) return
-		await cache.put(
-			await originCacheRequest(snippets),
-			new Response(JSON.stringify({ results }), {
-				headers: {
-					'content-type': 'application/json',
-					'cache-control': 'public, max-age=86400',
-				},
-			}),
-		)
-	} catch (error) {
-		console.debug('highlight-origin-cache-write-failed', error)
-	}
-}
+export type HighlightEnv = object
+export type HighlightOptions = { serverTiming?: Array<ServerTimingEntry> }
 
 export async function highlightSnippets(
-	env: HighlightEnv,
+	_env: HighlightEnv,
 	snippets: Array<HighlightSnippet>,
 	options?: HighlightOptions,
 ): Promise<Array<HighlightedCode>> {
 	if (snippets.length === 0) return []
-
 	const startedAt = Date.now()
-	const cached = await readOriginCache(snippets)
-	if (cached) {
-		recordHighlight(options?.serverTiming, startedAt, 'hit')
-		return cached
-	}
-
-	const highlight = env.HIGHLIGHT
-	if (!highlight) {
-		recordHighlight(options?.serverTiming, startedAt, 'fallback')
-		return snippets.map((snippet) =>
-			plainHighlightedCode(snippet.code, snippet.lang),
-		)
-	}
-
-	try {
-		const response = await highlight.fetch(`${highlightOrigin}/highlight`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ snippets }),
-		})
-		if (!response.ok) {
-			throw new Error(`highlight worker ${response.status}`)
-		}
-		const body = (await response.json()) as { results?: unknown }
-		if (
-			!Array.isArray(body.results) ||
-			body.results.length !== snippets.length
-		) {
-			throw new Error('highlight worker returned unexpected results')
-		}
-		if (!body.results.every(isHighlightedCode)) {
-			throw new Error('highlight worker returned unexpected results')
-		}
-		await writeOriginCache(snippets, body.results)
-		recordHighlight(
-			options?.serverTiming,
-			startedAt,
-			response.headers.get(highlightCacheHeaderName) === 'hit'
-				? 'worker'
-				: 'miss',
-		)
-		return body.results
-	} catch (error) {
-		console.debug('highlight-binding-failed', error)
-		recordHighlight(options?.serverTiming, startedAt, 'fallback')
-		return snippets.map((snippet) =>
-			plainHighlightedCode(snippet.code, snippet.lang),
-		)
-	}
+	const results = tokenizeSnippets(snippets)
+	options?.serverTiming?.push({
+		name: 'highlight',
+		durationMs: Date.now() - startedAt,
+		desc: 'library',
+	})
+	return results
 }
 
 function walkMarkdownTokens(

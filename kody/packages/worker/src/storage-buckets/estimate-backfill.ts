@@ -3,6 +3,7 @@ import {
 	registerMissingRepoSessionStorageBuckets,
 	updateStorageBucketEstimate,
 } from './service.ts'
+import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { readInventoriedStorageBucketEstimatedBytes } from '#worker/storage-runner.ts'
 
 /**
@@ -67,8 +68,9 @@ export async function backfillStorageBucketEstimates(input: {
 						retryDelaysMs: storageBucketEstimateBackfillRetryDelaysMs,
 					},
 				)
+				// Listed as the operator; the estimate is written by the owner.
 				await updateStorageBucketEstimate({
-					db: input.env.APP_DB,
+					db: getAccountEnv(input.env, row.userId).APP_DB,
 					userId: row.userId,
 					storageId: row.storageId,
 					estimatedBytes,

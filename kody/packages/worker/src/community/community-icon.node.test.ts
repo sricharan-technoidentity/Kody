@@ -127,7 +127,7 @@ function createCommunityIconTestEnv(input: {
 		BUNDLE_ARTIFACTS_KV: input.kv,
 		COMMUNITY_ASSETS: input.bucket,
 		IMAGES: createFakeImagesBinding(),
-		USER_METER: meter.env.USER_METER,
+		USER_METERS: meter.env.USER_METERS,
 	} as Env
 }
 

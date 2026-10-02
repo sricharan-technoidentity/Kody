@@ -1,56 +1,47 @@
 import { processCloudflareArtifactsRepoEvent } from './package-subscriptions.ts'
-import { artifactsRepoEventsQueueName } from './artifacts-event-queue-names.ts'
 
-const unmatchedRetryDelaySeconds = 30
-export { artifactsRepoEventsQueueName }
-
-export async function handleArtifactsRepoEventsQueue(
-	batch: MessageBatch<unknown>,
+/**
+ * One `artifacts-repo-events` provider event (a `QueueMessage` workflow).
+ * `waitUntil` work belongs to the caller, which awaits it.
+ */
+export async function processArtifactsRepoEventMessage(
+	body: unknown,
 	env: Env,
-	ctx: ExecutionContext,
-) {
-	const waitUntil = (promise: Promise<unknown>) => ctx.waitUntil(promise)
-	for (const queueMessage of batch.messages) {
-		try {
-			const result = await processCloudflareArtifactsRepoEvent({
-				env,
-				body: queueMessage.body,
-				waitUntil,
-			})
-			switch (result.outcome) {
-				case 'invalid':
-				case 'ignored':
-					queueMessage.ack()
-					break
-				case 'unmatched': {
-					// Create can race D1 insert; retry briefly. Deleted events after
-					// entity_sources cleanup are expected misses — ack without fan-out.
-					if (result.providerEvent.type === 'cf.artifacts.repo.deleted') {
-						queueMessage.ack()
-						break
-					}
-					console.warn('artifacts-repo-event-unmatched', {
-						queueMessageId: queueMessage.id,
-						type: result.providerEvent.type,
-						repoName: result.providerEvent.source.repoName,
-						namespace: result.providerEvent.source.namespace,
-					})
-					queueMessage.retry({ delaySeconds: unmatchedRetryDelaySeconds })
-					break
+	waitUntil: (promise: Promise<unknown>) => void,
+): Promise<'ack' | 'retry'> {
+	try {
+		const result = await processCloudflareArtifactsRepoEvent({
+			env,
+			body,
+			waitUntil,
+		})
+		switch (result.outcome) {
+			case 'invalid':
+			case 'ignored':
+			case 'dispatched':
+				return 'ack'
+			case 'unmatched': {
+				// Create can race D1 insert; retry briefly. Deleted events after
+				// entity_sources cleanup are expected misses — ack without fan-out.
+				if (result.providerEvent.type === 'cf.artifacts.repo.deleted') {
+					return 'ack'
 				}
-				case 'dispatched':
-					queueMessage.ack()
-					break
-				default: {
-					const exhaustive: never = result
-					throw new Error(
-						`Unsupported Artifacts repo event queue outcome: ${JSON.stringify(exhaustive)}`,
-					)
-				}
+				console.warn('artifacts-repo-event-unmatched', {
+					type: result.providerEvent.type,
+					repoName: result.providerEvent.source.repoName,
+					namespace: result.providerEvent.source.namespace,
+				})
+				return 'retry'
 			}
-		} catch (error) {
-			console.error('artifacts-repo-event-processing-failed', error)
-			queueMessage.retry({ delaySeconds: unmatchedRetryDelaySeconds })
+			default: {
+				const exhaustive: never = result
+				throw new Error(
+					`Unsupported Artifacts repo event queue outcome: ${JSON.stringify(exhaustive)}`,
+				)
+			}
 		}
+	} catch (error) {
+		console.error('artifacts-repo-event-processing-failed', error)
+		return 'retry'
 	}
 }

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { systemEmailOwnerId } from '#worker/email/email-owner.ts'
 import { mailboxRpc, type MailboxEnv } from '#worker/email/mailbox-client.ts'
 import {
@@ -119,7 +120,7 @@ function addMailboxCounts(
  * List active owners from the account index, ordered by stable_user_id keyset.
  */
 export async function listUsersForAdminMailboxRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	limit: number
 	startAfterUserId?: string | null
 }): Promise<Array<{ userId: string }>> {
@@ -127,7 +128,7 @@ export async function listUsersForAdminMailboxRetention(input: {
 	const result = startAfter
 		? await input.db
 				.prepare(
-					`SELECT u.stable_user_id AS userId
+					`SELECT u.stable_user_id AS "userId"
 					FROM users u
 					WHERE u.deleting_at IS NULL
 						AND u.stable_user_id IS NOT NULL
@@ -140,7 +141,7 @@ export async function listUsersForAdminMailboxRetention(input: {
 				.all<{ userId: string }>()
 		: await input.db
 				.prepare(
-					`SELECT u.stable_user_id AS userId
+					`SELECT u.stable_user_id AS "userId"
 					FROM users u
 					WHERE u.deleting_at IS NULL
 						AND u.stable_user_id IS NOT NULL

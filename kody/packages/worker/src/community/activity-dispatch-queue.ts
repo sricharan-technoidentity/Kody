@@ -3,8 +3,6 @@ import { type CommunityActivityDispatchQueueMessage } from './activity-dispatch-
 import { CommunityActivityDispatchCancelledError } from './errors.ts'
 import { communityActivityKinds } from './types.ts'
 
-const communityActivityDispatchRetryDelaySeconds = 30
-
 function parseCommunityActivityDispatchQueueMessage(
 	body: unknown,
 ): CommunityActivityDispatchQueueMessage | null {
@@ -31,36 +29,25 @@ function parseCommunityActivityDispatchQueueMessage(
 	}
 }
 
-export async function handleCommunityActivityDispatchQueue(
-	batch: MessageBatch<unknown>,
+/** One `community-activity-dispatch` message (a `QueueMessage` workflow). */
+export async function processCommunityActivityDispatchMessage(
+	body: unknown,
 	env: Env,
-	_ctx: ExecutionContext,
-) {
-	for (const queueMessage of batch.messages) {
-		const parsed = parseCommunityActivityDispatchQueueMessage(queueMessage.body)
-		if (!parsed) {
-			queueMessage.ack()
-			continue
-		}
-		try {
-			await dispatchCommunityActivityRecordedSubscriptionEvent({
-				env,
-				...parsed,
-			})
-			queueMessage.ack()
-		} catch (error) {
-			if (error instanceof CommunityActivityDispatchCancelledError) {
-				queueMessage.ack()
-				continue
-			}
-			console.error('community-activity-dispatch-queue-processing-failed', {
-				queueMessageId: queueMessage.id,
-				...parsed,
-				error,
-			})
-			queueMessage.retry({
-				delaySeconds: communityActivityDispatchRetryDelaySeconds,
-			})
-		}
+): Promise<'ack' | 'retry'> {
+	const parsed = parseCommunityActivityDispatchQueueMessage(body)
+	if (!parsed) return 'ack'
+	try {
+		await dispatchCommunityActivityRecordedSubscriptionEvent({
+			env,
+			...parsed,
+		})
+		return 'ack'
+	} catch (error) {
+		if (error instanceof CommunityActivityDispatchCancelledError) return 'ack'
+		console.error('community-activity-dispatch-queue-processing-failed', {
+			...parsed,
+			error,
+		})
+		return 'retry'
 	}
 }

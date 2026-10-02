@@ -4,15 +4,15 @@ import {
 	deterministicEmbedding,
 	embedTextForVectorize,
 	getCapabilityVectorIndex,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import {
 	CAPABILITY_SEARCH_RRF_K,
 	cosineSimilarity,
 	lexicalScore,
 	reciprocalRankFusion,
 	sortIdsByScore,
-} from '#worker/vectorize/scoring.ts'
-import { userVectorNamespace } from '#worker/vectorize/vector-namespaces.ts'
+} from '#worker/search-index/scoring.ts'
+import { userVectorNamespace } from '#worker/search-index/vector-namespaces.ts'
 import {
 	buildPackageSearchDocument,
 	buildPackageSearchProjection,

@@ -13,31 +13,9 @@ const mocks = vi.hoisted(() => ({
 		activationMilestones: [],
 		jobRunCounts: { success: 0, error: 0 },
 	})),
-	getSqlBillingStats: vi.fn(async () => ({
-		databaseSize: 0,
-		rowsReadTotal: 0,
-		rowsWrittenTotal: 0,
-		ops: [],
-	})),
-	inspectSqlBilling: vi.fn(async () => ({
-		schemaVersion: 11,
-		billing: {
-			databaseSize: 0,
-			rowsReadTotal: 0,
-			rowsWrittenTotal: 0,
-			ops: [],
-		},
-		runLogsIndexes: [],
-		runLogsColumns: [],
-		tableCounts: {
-			runs: 0,
-			runLogs: 0,
-			packageInvocationLedger: 0,
-			workflowProjections: 0,
-		},
-		runCount: { meta: 0, actual: 0, matches: true },
-		explainRunLogsDeleteByRunId: [],
-		explainRunLogsSelectByRunId: [],
+	exportState: vi.fn(async () => ({
+		packageInvocations: [],
+		workflowProjections: [],
 	})),
 }))
 
@@ -49,8 +27,6 @@ const {
 	beginRunRecord,
 	finishRunRecord,
 	getAdminInsightsSnapshot,
-	getSqlBillingStats,
-	inspectRunLogSqlBilling,
 	listActivationMilestones,
 	listPackageRunSuccesses,
 	recordRunRecord,
@@ -58,18 +34,16 @@ const {
 
 function createEnv(overrides: Partial<Env> = {}) {
 	return {
-		RUN_LOG: {
-			idFromName: () => ({ toString: () => 'run-log-id' }),
-			get: () => ({
+		RUN_RECORDS: {
+			forUser: () => ({
 				startRun: mocks.startRun,
 				finishRun: mocks.finishRun,
 				listPackageRunSuccesses: mocks.listPackageRunSuccesses,
 				listActivationMilestones: mocks.listActivationMilestones,
 				getAdminInsightsSnapshot: mocks.getAdminInsightsSnapshot,
-				getSqlBillingStats: mocks.getSqlBillingStats,
-				inspectSqlBilling: mocks.inspectSqlBilling,
 			}),
 		},
+		RUN_STATE: { forUser: () => ({ exportState: mocks.exportState }) },
 		APP_DB: {},
 		BUNDLE_ARTIFACTS_KV: {},
 		APP_BASE_URL: 'https://example.com',
@@ -219,7 +193,7 @@ test('finishRunRecord dispatches run.error.recorded only for persisted non-subsc
 	)
 })
 
-test('finishRunRecord awaits the terminal Durable Object write before scheduling side effects', async () => {
+test('finishRunRecord awaits the terminal run-store write before scheduling side effects', async () => {
 	let releaseFinish!: () => void
 	const finishGate = new Promise<void>((resolve) => {
 		releaseFinish = resolve
@@ -229,10 +203,9 @@ test('finishRunRecord awaits the terminal Durable Object write before scheduling
 		return { ok: true }
 	})
 	const env = createEnv({
-		RUN_LOG: {
-			idFromName: () => ({ toString: () => 'run-log-id' }),
-			get: () => ({ finishRun }),
-		} as unknown as Env['RUN_LOG'],
+		RUN_RECORDS: {
+			forUser: () => ({ finishRun }),
+		} as unknown as Env['RUN_RECORDS'],
 	})
 	const waitUntil = vi.fn<(promise: Promise<unknown>) => void>()
 	const handle: RunRecordHandle = {
@@ -262,7 +235,7 @@ test('finishRunRecord awaits the terminal Durable Object write before scheduling
 	expect(waitUntil).toHaveBeenCalledTimes(1)
 })
 
-test('activation reads never throw when RunLog is missing or RPC fails', async () => {
+test('activation reads never throw when RUN_RECORDS is missing or RPC fails', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const envWithoutBinding = {} as Env
 	await expect(
@@ -295,109 +268,43 @@ test('activation reads never throw when RunLog is missing or RPC fails', async (
 	)
 })
 
-test('getAdminInsightsSnapshot requires RUN_LOG and forwards the RPC', async () => {
+test('getAdminInsightsSnapshot requires RUN_RECORDS and merges workflow counts from RunLog', async () => {
 	await expect(
 		getAdminInsightsSnapshot({ env: {} as Env, userId: 'user-1' }),
-	).rejects.toThrow('RUN_LOG Durable Object binding is not configured.')
+	).rejects.toThrow('RUN_RECORDS binding is not configured.')
 
-	mocks.getAdminInsightsSnapshot.mockResolvedValueOnce({
-		workflowStatusCounts: [{ status: 'running', count: 2 }],
+	const activationMilestones = [
+		{
+			milestone: 'package_activated' as const,
+			reachedAt: '2026-08-01T00:00:00.000Z',
+			packageId: 'pkg-1',
+		},
+	]
+	mocks.getAdminInsightsSnapshot.mockResolvedValue({
+		workflowStatusCounts: [],
 		jobRunCounts: { success: 8, error: 3 },
-		activationMilestones: [
-			{
-				milestone: 'package_activated',
-				reachedAt: '2026-08-01T00:00:00.000Z',
-				packageId: 'pkg-1',
-			},
-		],
+		activationMilestones,
 	})
-	const env = createEnv()
+	mocks.exportState.mockResolvedValueOnce({
+		packageInvocations: [],
+		workflowProjections: [{ status: 'running' }, { status: 'running' }],
+	})
 	await expect(
-		getAdminInsightsSnapshot({ env, userId: 'user-1' }),
+		getAdminInsightsSnapshot({ env: createEnv(), userId: 'user-1' }),
 	).resolves.toEqual({
 		workflowStatusCounts: [{ status: 'running', count: 2 }],
 		jobRunCounts: { success: 8, error: 3 },
-		activationMilestones: [
-			{
-				milestone: 'package_activated',
-				reachedAt: '2026-08-01T00:00:00.000Z',
-				packageId: 'pkg-1',
-			},
-		],
+		activationMilestones,
 	})
-})
-
-test('getSqlBillingStats requires RUN_LOG and forwards the RPC', async () => {
+	// Without the RunLog DO only the run-store counts remain.
 	await expect(
-		getSqlBillingStats({ env: {} as Env, userId: 'user-1' }),
-	).rejects.toThrow('RUN_LOG Durable Object binding is not configured.')
-
-	mocks.getSqlBillingStats.mockResolvedValueOnce({
-		databaseSize: 4096,
-		rowsReadTotal: 12,
-		rowsWrittenTotal: 3,
-		ops: [{ op: 'listRuns', rowsRead: 12, rowsWritten: 0, calls: 1 }],
+		getAdminInsightsSnapshot({
+			env: createEnv({ RUN_STATE: undefined }),
+			userId: 'user-1',
+		}),
+	).resolves.toEqual({
+		workflowStatusCounts: [],
+		jobRunCounts: { success: 8, error: 3 },
+		activationMilestones,
 	})
-	const env = createEnv()
-	await expect(getSqlBillingStats({ env, userId: 'user-1' })).resolves.toEqual({
-		databaseSize: 4096,
-		rowsReadTotal: 12,
-		rowsWrittenTotal: 3,
-		ops: [{ op: 'listRuns', rowsRead: 12, rowsWritten: 0, calls: 1 }],
-	})
-})
-
-test('inspectRunLogSqlBilling requires RUN_LOG and forwards the RPC', async () => {
-	await expect(
-		inspectRunLogSqlBilling({ env: {} as Env, userId: 'user-1' }),
-	).rejects.toThrow('RUN_LOG Durable Object binding is not configured.')
-
-	const inspection = {
-		schemaVersion: 11,
-		billing: {
-			databaseSize: 4096,
-			rowsReadTotal: 12,
-			rowsWrittenTotal: 3,
-			ops: [
-				{ op: 'listRuns' as const, rowsRead: 12, rowsWritten: 0, calls: 1 },
-			],
-		},
-		runLogsIndexes: [
-			{
-				seq: 0,
-				name: 'sqlite_autoindex_run_logs_1',
-				unique: true,
-				origin: 'pk',
-				partial: false,
-			},
-		],
-		runLogsColumns: [
-			{
-				cid: 0,
-				name: 'run_id',
-				type: 'TEXT',
-				notnull: true,
-				dfltValue: null,
-				pk: 1,
-			},
-		],
-		tableCounts: {
-			runs: 2,
-			runLogs: 4,
-			packageInvocationLedger: 0,
-			workflowProjections: 0,
-		},
-		runCount: { meta: 2, actual: 2, matches: true },
-		explainRunLogsDeleteByRunId: [
-			{ id: 2, parent: 0, detail: 'SEARCH run_logs USING INTEGER PRIMARY KEY' },
-		],
-		explainRunLogsSelectByRunId: [
-			{ id: 3, parent: 0, detail: 'SEARCH run_logs USING INTEGER PRIMARY KEY' },
-		],
-	}
-	mocks.inspectSqlBilling.mockResolvedValueOnce(inspection)
-	const env = createEnv()
-	await expect(
-		inspectRunLogSqlBilling({ env, userId: 'user-1' }),
-	).resolves.toEqual(inspection)
 })

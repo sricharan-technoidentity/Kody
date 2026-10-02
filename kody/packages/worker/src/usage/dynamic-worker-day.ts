@@ -18,7 +18,7 @@ export type DynamicWorkerDayEnv = UsageEnv & UserMeterEnv
  * package_export, …). Uniqueness is still `(user, workerId, day)` — the
  * first claim's surface is the one stored.
  *
- * Never throws. Missing `USER_METER` skips the write so local/tests without
+ * Never throws. Missing `USER_METERS` skips the write so local/tests without
  * the binding cannot overcount unique days. Returns the claim result so
  * callers can record a `dynamic_worker_invoke` hit or miss; `undefined`
  * when the claim did not run.

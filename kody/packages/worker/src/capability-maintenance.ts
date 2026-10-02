@@ -18,7 +18,7 @@ import {
 	type CapabilityReindexCursor,
 	type CapabilityReindexPhase,
 	type VectorReindexSweepResult,
-} from '#worker/vectorize/reindex-sweep.ts'
+} from '#worker/search-index/reindex-sweep.ts'
 
 type ReindexStepResult = VectorReindexSweepResult & {
 	error?: string

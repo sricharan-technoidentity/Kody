@@ -2,7 +2,13 @@ import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { type McpUserContext } from '@kody-internal/shared/chat.ts'
 import { normalizeEmailAddress } from '#worker/email/address.ts'
 import { isAccountEmailVerified } from '#worker/identity/email-verification-state.ts'
-import { getUserPlan } from '#worker/entitlements/service.ts'
+import {
+	getUserPlan,
+	resolveUserPlanFromRow,
+	type UserEntitlementRow,
+} from '#worker/entitlements/service.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+import { getUniqueConstraintField } from '#worker/database-errors.ts'
 import {
 	findPublicUserIdentityByStableUserId,
 	findPublicUserIdentityByUsername,
@@ -43,8 +49,103 @@ export type PackageShareTrustLevel = (typeof packageShareTrustLevels)[number]
 
 export const defaultPackageShareTrustLevel: PackageShareTrustLevel = 'pin'
 
-function canPrepareAppDb(db: D1Database | null | undefined): db is D1Database {
+function canPrepareAppDb<T extends SqlDatabase>(
+	db: T | null | undefined,
+): db is T {
 	return typeof db?.prepare === 'function'
+}
+
+function isPostgres(db: SqlDatabase) {
+	return 'dialect' in db && db.dialect === 'postgres'
+}
+
+type ShareDirectoryRow = UserEntitlementRow & {
+	id: number
+	username: string
+	email: string | null
+	stable_user_id: string
+}
+
+/**
+ * The caller or the other party of a grant the caller can see. On Postgres the
+ * account row comes from `kody_share_peer`, so a guest never reads the owner's
+ * credentials and email is returned only to an owner about their grantee.
+ */
+async function readSharePeerRow(db: SqlDatabase, userId: string) {
+	return await db
+		.prepare(`SELECT * FROM kody_share_peer(?)`)
+		.bind(userId)
+		.first<ShareDirectoryRow>()
+}
+
+export async function findSharePeer(
+	db: D1Database,
+	userId: string,
+): Promise<
+	(Omit<PublicUserIdentity, 'email'> & { email: string | null }) | null
+> {
+	if (!isPostgres(db)) {
+		return await findPublicUserIdentityByStableUserId({ db, userId })
+	}
+	const row = await readSharePeerRow(db, userId.trim())
+	return row
+		? {
+				userId: Number(row.id),
+				username: row.username,
+				email: row.email,
+				mcpUserId: row.stable_user_id,
+			}
+		: null
+}
+
+/** Exact-match invitee lookup; on Postgres through `kody_share_find_invitee`. */
+async function findShareInvitee(
+	db: D1Database,
+	lookup: { username: string } | { email: string },
+): Promise<{ identity: PublicUserIdentity; emailVerified: boolean } | null> {
+	if (isPostgres(db)) {
+		const row = await db
+			.prepare(`SELECT * FROM kody_share_find_invitee(?, ?)`)
+			.bind(
+				'username' in lookup ? lookup.username : null,
+				'email' in lookup ? normalizeEmailAddress(lookup.email) : null,
+			)
+			.first<{
+				id: number
+				username: string
+				email: string
+				stable_user_id: string
+				email_verified: boolean
+			}>()
+		return row
+			? {
+					identity: {
+						userId: Number(row.id),
+						username: row.username,
+						email: row.email,
+						mcpUserId: row.stable_user_id,
+					},
+					emailVerified: row.email_verified,
+				}
+			: null
+	}
+	if ('username' in lookup) {
+		const identity = await findPublicUserIdentityByUsername({
+			db,
+			username: lookup.username,
+		})
+		return identity ? { identity, emailVerified: true } : null
+	}
+	const identity = await findPersonUserByEmail(db, lookup.email)
+	if (!identity) return null
+	return {
+		identity,
+		emailVerified: await isAccountEmailVerified({
+			db,
+			email: identity.email,
+			stableUserId: identity.mcpUserId,
+		}),
+	}
 }
 
 function isMissingShareGrantsTable(error: unknown) {
@@ -203,10 +304,15 @@ export async function assertPaidPlanForPackageShare(
 	db: D1Database,
 	input: { userId: string; email: string | null | undefined; who: string },
 ) {
-	const plan = await getUserPlan(db, {
-		userId: input.userId,
-		email: input.email,
-	})
+	const peerRow = isPostgres(db)
+		? await readSharePeerRow(db, input.userId)
+		: undefined
+	const plan =
+		peerRow === undefined
+			? await getUserPlan(db, { userId: input.userId, email: input.email })
+			: peerRow
+				? resolveUserPlanFromRow(peerRow).plan
+				: 'free'
 	if (!isPaidPlanForPackageShare(plan)) {
 		throw new PackageSharePaidRequiredError(
 			`${input.who} must be on a paid Kody plan to share or use a shared package. Open /pricing, then retry.`,
@@ -554,15 +660,9 @@ export async function hydratePackageShareGrantView(input: {
 	})
 	if (!savedPackage) return null
 	const [owner, grantee, publishedCommit] = await Promise.all([
-		findPublicUserIdentityByStableUserId({
-			db: input.db,
-			userId: input.grant.ownerUserId,
-		}),
+		findSharePeer(input.db, input.grant.ownerUserId),
 		input.grant.granteeUserId
-			? findPublicUserIdentityByStableUserId({
-					db: input.db,
-					userId: input.grant.granteeUserId,
-				})
+			? findSharePeer(input.db, input.grant.granteeUserId)
 			: Promise.resolve(null),
 		getPublishedCommitForPackage(input.db, savedPackage),
 	])
@@ -672,10 +772,7 @@ export async function assertPackageShareUseAllowed(input: {
 	if (input.grant.acceptedPublishedCommit === publishedCommit) {
 		return publishedCommit
 	}
-	const owner = await findPublicUserIdentityByStableUserId({
-		db: input.db,
-		userId: input.grant.ownerUserId,
-	})
+	const owner = await findSharePeer(input.db, input.grant.ownerUserId)
 	if (!owner?.username) {
 		throw new PackageShareAccessError('Shared package owner was not found.')
 	}
@@ -924,10 +1021,7 @@ export async function invitePackageShare(input: {
 	let invitee: PublicUserIdentity | null = null
 	let bindInvitee = false
 	if (username) {
-		invitee = await findPublicUserIdentityByUsername({
-			db: input.db,
-			username,
-		})
+		invitee = (await findShareInvitee(input.db, { username }))?.identity ?? null
 		if (!invitee && !emailInput) {
 			throw new PackageShareAccessError(
 				`User "${username}" was not found. Invite by email to send an invite-before-signup.`,
@@ -936,15 +1030,10 @@ export async function invitePackageShare(input: {
 		if (invitee) bindInvitee = true
 	}
 	if (!invitee && emailInput) {
-		const foundByEmail = await findPersonUserByEmail(input.db, emailInput)
+		const foundByEmail = await findShareInvitee(input.db, { email: emailInput })
 		if (foundByEmail) {
-			const emailVerified = await isAccountEmailVerified({
-				db: input.db,
-				email: foundByEmail.email,
-				stableUserId: foundByEmail.mcpUserId,
-			})
-			invitee = foundByEmail
-			bindInvitee = emailVerified
+			invitee = foundByEmail.identity
+			bindInvitee = foundByEmail.emailVerified
 		}
 	}
 	const inviteeEmail = emailInput ? normalizeEmailAddress(emailInput) : null
@@ -1003,7 +1092,7 @@ export async function invitePackageShare(input: {
 			)
 			.run()
 	} catch (error) {
-		if (/UNIQUE constraint failed/i.test(getErrorMessage(error))) {
+		if (getUniqueConstraintField(error)) {
 			throw new PackageShareAccessError(
 				'An invitation for that person is already pending or accepted.',
 			)
@@ -1241,7 +1330,7 @@ export async function acknowledgePackageShareUpdate(input: {
 }
 
 export async function attachPendingPackageShareInvitesForEmail(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	email: string
 	username?: string | null
@@ -1284,7 +1373,7 @@ export async function attachPendingPackageShareInvitesForEmail(input: {
 }
 
 export async function attachPendingPackageShareInvitesSafely(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	email: string
 	username?: string | null

@@ -19,8 +19,9 @@
  * Like usage rollups, the data source depends on the environment: with the
  * Analytics Engine bindings and Cloudflare REST credentials
  * (production/preview) both sides come from Analytics Engine SQL queries;
- * otherwise (local dev, tests) the D1 fallback tables
- * (`feature_flag_exposure_rollups`, `usage_rollups`) are used. Readout
+ * otherwise (local dev, tests) the relational fallback tables
+ * (`feature_flag_exposure_rollups`, `usage_rollups`) are read through the
+ * read-only `kody_analytics` role, which sees fleet-wide counters. Readout
  * failures degrade to `{ status: 'unavailable' }` — the admin surfaces must
  * render even when the analytics backend is down.
  */
@@ -35,9 +36,10 @@ import {
 	type AdminFeatureFlagMetricReadout,
 	type FeatureFlagMetricCohort,
 } from '#universal/feature-flags/types.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 
 export type FeatureFlagReadoutEnv = {
-	APP_DB: D1Database
+	APP_DB: Pick<SqlDatabase, 'prepare'>
 	FLAG_EXPOSURES?: AnalyticsEngineDataset
 	USAGE_EVENTS?: AnalyticsEngineDataset
 	CLOUDFLARE_ACCOUNT_ID?: string
@@ -313,7 +315,7 @@ FORMAT JSON
 	})
 }
 
-type D1ExposureRow = {
+type SqlExposureRow = {
 	user_id: string
 	enabled: number
 	source: string
@@ -321,15 +323,15 @@ type D1ExposureRow = {
 	last_updated: string | null
 }
 
-type D1UsageRow = {
+type SqlUsageRow = {
 	user_id: string
 	event_count: number
 	error_count: number
 	total_duration_ms: number
 }
 
-async function loadReadoutFromD1(input: {
-	db: D1Database
+async function loadReadoutFromSql(input: {
+	db: Pick<SqlDatabase, 'prepare'>
 	flagKey: string
 	successMetric: FeatureFlagSuccessMetric
 	now: Date
@@ -348,7 +350,7 @@ async function loadReadoutFromD1(input: {
 			 GROUP BY user_id, enabled, source`,
 		)
 		.bind(input.flagKey, window.monthStartDay, windowEndDay)
-		.all<D1ExposureRow>()
+		.all<SqlExposureRow>()
 	const exposuresByUser = new Map<string, UserExposureState>()
 	for (const row of exposureResult.results ?? []) {
 		const state = exposuresByUser.get(row.user_id) ?? {
@@ -373,7 +375,7 @@ async function loadReadoutFromD1(input: {
 			 WHERE metric = ? AND month = ?`,
 		)
 		.bind(input.successMetric.eventType, window.month)
-		.all<D1UsageRow>()
+		.all<SqlUsageRow>()
 	const usageByUser = new Map<string, UserUsageAggregate>()
 	for (const row of usageResult.results ?? []) {
 		usageByUser.set(row.user_id, {
@@ -400,11 +402,11 @@ export async function loadFeatureFlagSuccessMetricReadout(
 		const apiToken = env.CLOUDFLARE_API_TOKEN?.trim()
 		// Local Wrangler dev emulates the Analytics Engine binding and the CLI
 		// injects mock REST credentials, but the SQL API cannot read locally
-		// emulated datasets — exposures are written to D1 there instead.
+		// emulated datasets — exposures are written to the relational store there instead.
 		if (env.FLAG_EXPOSURES && env.WRANGLER_IS_LOCAL_DEV !== 'true') {
 			if (!accountId || !apiToken) {
 				// With the binding present, exposures were written only to
-				// Analytics Engine; falling back to the (empty) D1 tables would
+				// Analytics Engine; falling back to the (empty) relational tables would
 				// present confident zero cohorts instead of a config problem.
 				return {
 					status: 'unavailable',
@@ -421,7 +423,7 @@ export async function loadFeatureFlagSuccessMetricReadout(
 				now,
 			})
 		}
-		return await loadReadoutFromD1({
+		return await loadReadoutFromSql({
 			db: env.APP_DB,
 			flagKey: input.flagKey,
 			successMetric: input.successMetric,

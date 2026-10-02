@@ -8,32 +8,12 @@ export type RepoSessionDueOwner = {
 	dueAt: string
 }
 
-/** Workers-unit D1 does not apply SQL migrations; production deploy does. */
-async function ensureRepoSessionDueOwnersSchema(db: D1Database): Promise<void> {
-	await db
-		.prepare(
-			`CREATE TABLE IF NOT EXISTS repo_session_due_owners (
-				user_id TEXT PRIMARY KEY NOT NULL,
-				due_at TEXT NOT NULL,
-				updated_at TEXT NOT NULL
-			)`,
-		)
-		.run()
-	await db
-		.prepare(
-			`CREATE INDEX IF NOT EXISTS idx_repo_session_due_owners_due_at
-			ON repo_session_due_owners(due_at, user_id)`,
-		)
-		.run()
-}
-
 export async function replaceRepoSessionDueOwner(input: {
 	db: D1Database
 	userId: string
 	dueAt: string | null
 	now?: Date
 }): Promise<void> {
-	await ensureRepoSessionDueOwnersSchema(input.db)
 	if (input.dueAt == null) {
 		await input.db
 			.prepare(`DELETE FROM repo_session_due_owners WHERE user_id = ?`)
@@ -59,7 +39,6 @@ export async function listDueRepoSessionOwners(input: {
 	now?: Date
 	limit?: number
 }): Promise<Array<RepoSessionDueOwner>> {
-	await ensureRepoSessionDueOwnersSchema(input.db)
 	const rows = await input.db
 		.prepare(
 			`SELECT user_id, due_at
@@ -84,7 +63,6 @@ export async function listRepoSessionDueOwnersPage(input: {
 	afterUserId?: string
 	limit?: number
 }): Promise<Array<RepoSessionDueOwner>> {
-	await ensureRepoSessionDueOwnersSchema(input.db)
 	const rows = await input.db
 		.prepare(
 			`SELECT user_id, due_at
@@ -108,7 +86,6 @@ export async function deferRepoSessionDueOwner(input: {
 	now?: Date
 }): Promise<void> {
 	const now = input.now ?? new Date()
-	await ensureRepoSessionDueOwnersSchema(input.db)
 	await input.db
 		.prepare(
 			`UPDATE repo_session_due_owners

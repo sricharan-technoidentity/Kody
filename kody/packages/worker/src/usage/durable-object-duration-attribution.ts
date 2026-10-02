@@ -23,7 +23,6 @@ import {
 	packageRealtimeSessionDurableObjectName,
 	repoSessionDurableObjectName,
 	repoSessionIndexDurableObjectName,
-	runLogDurableObjectName,
 	storageRunnerDurableObjectName,
 	stripePlanRefreshDurableObjectName,
 	userMeterDurableObjectName,
@@ -39,7 +38,6 @@ export type DurableObjectDurationAttributionEnv = Pick<
 	| 'APP_DB'
 	| 'MCP_CLIENT_HUB'
 	| 'STORAGE_RUNNER'
-	| 'RUN_LOG'
 	| 'USER_METER'
 	| 'MAILBOX'
 	| 'REPO_SESSION_INDEX'
@@ -73,7 +71,6 @@ export type DurableObjectDurationAttributionResult =
 function perUserNamespaces(env: DurableObjectDurationAttributionEnv) {
 	return [
 		['McpClientHub', env.MCP_CLIENT_HUB, mcpClientHubDurableObjectName],
-		['RunLog', env.RUN_LOG, runLogDurableObjectName],
 		['UserMeter', env.USER_METER, userMeterDurableObjectName],
 		['Mailbox', env.MAILBOX, mailboxDurableObjectName],
 		[

@@ -5,7 +5,7 @@ import {
 	embedTextForVectorize,
 	getCapabilityVectorIndex,
 	isCapabilitySearchOffline,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import {
 	CAPABILITY_SEARCH_RRF_K,
 	blendLexicalAndVectorScore,
@@ -14,8 +14,8 @@ import {
 	reciprocalRankFusion,
 	sortIdsByScore,
 	tokenizeSearchText,
-} from '#worker/vectorize/scoring.ts'
-import { BUILTIN_VECTOR_NAMESPACE } from '#worker/vectorize/vector-namespaces.ts'
+} from '#worker/search-index/scoring.ts'
+import { BUILTIN_VECTOR_NAMESPACE } from '#worker/search-index/vector-namespaces.ts'
 
 /**
  * Indexed metadata `kind` for builtin capability vectors in the shared

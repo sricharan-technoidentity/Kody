@@ -1,6 +1,10 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { routes } from '#universal/routes.ts'
-import { findPublicUserIdentityByUsername } from '#worker/identity/user-lookup.ts'
-import { normalizeUsername } from '#worker/identity/username.ts'
+import {
+	getUsernameFormatValidationError,
+	normalizeUsername,
+} from '#worker/identity/username.ts'
+import { resolveUserStableId } from '#worker/user-id.ts'
 import {
 	getSavedPackageById,
 	getSavedPackageByKodyId,
@@ -74,7 +78,7 @@ function normalizeKodyId(value: string) {
  * cannot be used to bounce visitors at an unrelated package.
  */
 export async function resolveCommunityPackageUrl(input: {
-	db: D1Database
+	db: SqlDatabase
 	username: string
 	kodyId: string
 }): Promise<CommunityPackageUrlTarget | null> {
@@ -89,7 +93,7 @@ export async function resolveCommunityPackageUrl(input: {
 	let moved = username !== requestedUsername || kodyId !== requestedKodyId
 
 	for (let hop = 0; hop <= maxUsernameRedirectHops; hop++) {
-		const identity = await findPublicUserIdentityByUsername({
+		const identity = await findPackageOwnerByUsername({
 			db: input.db,
 			username,
 		})
@@ -154,7 +158,7 @@ export async function resolveCommunityPackageUrl(input: {
  * packages at the same URL visitors use for listings.
  */
 export async function resolvePackagePageUrl(input: {
-	db: D1Database
+	db: SqlDatabase
 	username: string
 	kodyId: string
 }): Promise<PackagePageUrlTarget | null> {
@@ -167,7 +171,7 @@ export async function resolvePackagePageUrl(input: {
 	let moved = username !== requestedUsername || kodyId !== requestedKodyId
 
 	for (let hop = 0; hop <= maxUsernameRedirectHops; hop++) {
-		const identity = await findPublicUserIdentityByUsername({
+		const identity = await findPackageOwnerByUsername({
 			db: input.db,
 			username,
 		})
@@ -269,7 +273,7 @@ export async function resolvePackagePageUrl(input: {
  * details and visitors still see an active listing.
  */
 async function resolveListingAndSavedPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	ownerUserId: string
 	listing: CommunityListingRecord | null
 	savedPackage: SavedPackageRecord | null
@@ -299,8 +303,26 @@ async function resolveListingAndSavedPackage(input: {
 	}
 }
 
+/**
+ * Owner of a public URL. Reads only public profile columns, so it works under
+ * the `kody_community` role (no email or credentials).
+ */
+async function findPackageOwnerByUsername(input: {
+	db: SqlDatabase
+	username: string
+}): Promise<{ username: string; mcpUserId: string } | null> {
+	if (getUsernameFormatValidationError(input.username)) return null
+	const row = await input.db
+		.prepare(`SELECT username, stable_user_id FROM users WHERE username = ?`)
+		.bind(input.username)
+		.first<{ username: string; stable_user_id: string }>()
+	return row
+		? { username: row.username, mcpUserId: resolveUserStableId(row) }
+		: null
+}
+
 async function findCurrentUsernameForRetiredUsername(input: {
-	db: D1Database
+	db: SqlDatabase
 	oldUsername: string
 }): Promise<string | null> {
 	const row = await input.db
@@ -317,7 +339,7 @@ async function findCurrentUsernameForRetiredUsername(input: {
 }
 
 async function findCurrentKodyIdForRetiredKodyId(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	oldKodyId: string
 }): Promise<string | null> {
@@ -343,7 +365,7 @@ async function findCurrentKodyIdForRetiredKodyId(input: {
  * would otherwise outlive the name it points away from.
  */
 export async function retireUsername(input: {
-	db: D1Database
+	db: SqlDatabase
 	oldUsername: string
 	newUsername: string
 	userId: string
@@ -352,18 +374,24 @@ export async function retireUsername(input: {
 	const newUsername = normalizeUsername(input.newUsername)
 	if (!oldUsername || oldUsername === newUsername) return
 	await input.db.batch([
-		input.db
-			.prepare(`DELETE FROM username_redirects WHERE old_username = ?`)
-			.bind(newUsername),
+		'dialect' in input.db && input.db.dialect === 'postgres'
+			? // Another user's stale row for the claimed name is hidden by RLS; a
+				// definer releases rows for the caller's current username only.
+				input.db.prepare(
+					`SELECT kody_community_release_claimed_username() AS released`,
+				)
+			: input.db
+					.prepare(`DELETE FROM username_redirects WHERE old_username = ?`)
+					.bind(newUsername),
 		input.db
 			.prepare(
-				`INSERT INTO username_redirects (old_username, user_id)
-				VALUES (?, ?)
+				`INSERT INTO username_redirects (old_username, user_id, created_at)
+				VALUES (?, ?, ?)
 				ON CONFLICT (old_username) DO UPDATE SET
 					user_id = excluded.user_id,
-					created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')`,
+					created_at = excluded.created_at`,
 			)
-			.bind(oldUsername, input.userId),
+			.bind(oldUsername, input.userId, new Date().toISOString()),
 	])
 }
 
@@ -373,7 +401,7 @@ export async function retireUsername(input: {
  * the new package's own URL to an unrelated one.
  */
 export async function releasePackageKodyIdRedirect(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	kodyId: string
 }) {
@@ -393,7 +421,7 @@ export async function releasePackageKodyIdRedirect(input: {
  * the old id follow the package to its new one.
  */
 export async function retirePackageKodyId(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	oldKodyId: string
@@ -411,13 +439,13 @@ export async function retirePackageKodyId(input: {
 			.bind(input.userId, newKodyId),
 		input.db
 			.prepare(
-				`INSERT INTO package_kody_id_redirects (user_id, old_kody_id, package_id)
-				VALUES (?, ?, ?)
+				`INSERT INTO package_kody_id_redirects (user_id, old_kody_id, package_id, created_at)
+				VALUES (?, ?, ?, ?)
 				ON CONFLICT (user_id, old_kody_id) DO UPDATE SET
 					package_id = excluded.package_id,
-					created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')`,
+					created_at = excluded.created_at`,
 			)
-			.bind(input.userId, oldKodyId, input.packageId),
+			.bind(input.userId, oldKodyId, input.packageId, new Date().toISOString()),
 	])
 }
 
@@ -427,7 +455,7 @@ export async function retirePackageKodyId(input: {
  * package's redirect history.
  */
 export async function deletePackageKodyIdRedirects(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 }) {

@@ -58,7 +58,7 @@ test('authenticated delayed mutation holds web lease through handler completion'
 	})
 	const middleware = createAccountWriteLeaseMiddleware({
 		APP_DB: db,
-		USER_METER: meter.env.USER_METER,
+		USER_METERS: meter.env.USER_METERS,
 	} as Env)
 	const responsePromise = middleware(
 		{

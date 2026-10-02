@@ -30,6 +30,7 @@ import {
 } from '#app/rate-limit.ts'
 import { createDb, usersTable } from '#worker/db.ts'
 import { touchLastActiveAt } from '#worker/identity/activation-stamps.ts'
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 
 export function createVerifyHandler(env: Env) {
 	return {
@@ -132,14 +133,17 @@ export function createTwoFactorVerifyApiHandler(env: Env) {
 				)
 			}
 
-			const db = createDb(env.APP_DB)
-			const userRecord = await db.findOne(usersTable, {
+			// The signed pending cookie names the account; read through its writer.
+			const accountDb =
+				getAccountWriterFactory(env)?.(pendingSession.stableUserId) ??
+				env.APP_DB
+			const userRecord = await createDb(accountDb).findOne(usersTable, {
 				where: { stable_user_id: pendingSession.stableUserId },
 			})
 			const codeValid =
 				userRecord != null &&
 				(await verifyTwoFactorCode({
-					db: env.APP_DB,
+					db: accountDb,
 					userId: userRecord.id,
 					code,
 					type: twoFactorVerificationType,
@@ -180,7 +184,7 @@ export function createTwoFactorVerifyApiHandler(env: Env) {
 			)
 			headers.append('Set-Cookie', await destroyVerifySessionCookie(secure))
 
-			await touchLastActiveAt(env.APP_DB, {
+			await touchLastActiveAt(accountDb, {
 				stableUserId: pendingSession.stableUserId,
 			})
 			void logAuditEvent({

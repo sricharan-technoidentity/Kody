@@ -1,4 +1,5 @@
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	loadAdminUserByTarget,
 	loadAdminUserRowByStableUserId,
@@ -27,9 +28,15 @@ export class AdminEmailVerificationError extends Error {
 	}
 }
 
+/**
+ * `db` reads and stamps `users` (the restricted admin role on PostgreSQL);
+ * `forUser` supplies the target account's scoped writer for its token rows.
+ */
+type AccountWriter = (stableUserId: string) => SqlDatabase
+
 export async function markAdminUserEmailVerified(
-	db: D1Database,
-	input: AdminUserTarget & { now?: Date },
+	db: SqlDatabase,
+	input: AdminUserTarget & { now?: Date; forUser?: AccountWriter },
 ): Promise<AdminUserListItem> {
 	const existing = await loadAdminUserByTarget(db, input)
 	if (!existing) {
@@ -59,7 +66,10 @@ export async function markAdminUserEmailVerified(
 		throw new AccountDeletionInProgressError()
 	}
 	await clearUserEmailVerificationDelivery(db, existingRow.id)
-	await deleteEmailVerificationsForUser(db, existingRow.id)
+	await deleteEmailVerificationsForUser(
+		input.forUser?.(existing.stableUserId) ?? db,
+		existingRow.id,
+	)
 
 	const updated = await loadAdminUserByTarget(db, {
 		stableUserId: existing.stableUserId,
@@ -71,7 +81,8 @@ export async function markAdminUserEmailVerified(
 }
 
 export async function mintAdminEmailVerificationUrl(input: {
-	db: D1Database
+	db: SqlDatabase
+	forUser?: AccountWriter
 	appBaseUrl: string
 	target: AdminUserTarget
 	now?: Date
@@ -95,13 +106,14 @@ export async function mintAdminEmailVerificationUrl(input: {
 	}
 	await assertAccountWritableDb(input.db, existing.stableUserId)
 
+	const accountDb = input.forUser?.(existing.stableUserId) ?? input.db
 	const minted = await insertEmailVerificationToken({
-		db: input.db,
+		db: accountDb,
 		userId: existingRow.id,
 		now: input.now,
 	})
 	await retireOtherEmailVerificationTokens(
-		input.db,
+		accountDb,
 		existingRow.id,
 		minted.tokenHash,
 	)

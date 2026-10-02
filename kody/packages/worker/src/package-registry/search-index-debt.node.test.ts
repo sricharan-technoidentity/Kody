@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import { consoleError } from '#worker/test-support/console-spies.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const mockModule = vi.hoisted(() => ({
 	upsertSavedPackageVector: vi.fn(),
@@ -18,95 +19,29 @@ vi.mock('@sentry/cloudflare', () => ({
 
 import { scheduleSavedPackageSearchIndexUpsert } from './search-index-debt.ts'
 
-type DebtRow = {
-	packageId: string
-	userId: string
-	generation: number
-	embedText: string
-	lastError: string | null
-}
-
-function createDebtDb() {
-	const rows = new Map<string, DebtRow>()
+/** Debt rows are written through the owner's scoped writer and read back as schema owner. */
+async function createDebtDb() {
+	const store = await createTestDb()
+	async function row(packageId: string) {
+		const result = await store.pg.query<{
+			packageId: string
+			userId: string
+			generation: number
+			embedText: string
+			lastError: string | null
+		}>(
+			`SELECT package_id AS "packageId", user_id AS "userId", generation::int AS generation,
+				embed_text AS "embedText", last_error AS "lastError"
+			FROM saved_package_search_index_debt WHERE package_id = $1`,
+			[packageId],
+		)
+		return result.rows[0]
+	}
 	return {
-		rows,
-		db: {
-			prepare(sql: string) {
-				return {
-					bind(...values: Array<unknown>) {
-						return {
-							async run() {
-								if (
-									sql.includes('INSERT INTO saved_package_search_index_debt')
-								) {
-									const packageId = String(values[0])
-									const existing = rows.get(packageId)
-									rows.set(packageId, {
-										packageId,
-										userId: String(values[1]),
-										generation: existing ? existing.generation + 1 : 1,
-										embedText: String(values[2]),
-										lastError: values[3] == null ? null : String(values[3]),
-									})
-								}
-								if (
-									sql.includes('UPDATE saved_package_search_index_debt') &&
-									sql.includes('last_error')
-								) {
-									const packageId = String(values[2])
-									const generation = Number(values[3])
-									const existing = rows.get(packageId)
-									if (existing && existing.generation === generation) {
-										rows.set(packageId, {
-											...existing,
-											lastError: String(values[0]),
-										})
-									}
-								}
-								if (
-									sql.includes('DELETE FROM saved_package_search_index_debt')
-								) {
-									const packageId = String(values[0])
-									if (sql.includes('AND generation')) {
-										const generation = Number(values[1])
-										const existing = rows.get(packageId)
-										if (existing?.generation === generation) {
-											rows.delete(packageId)
-										}
-									} else {
-										rows.delete(packageId)
-									}
-								}
-								return { success: true }
-							},
-							async first() {
-								if (sql.includes('SELECT generation FROM')) {
-									const packageId = String(values[0])
-									const existing = rows.get(packageId)
-									return existing ? { generation: existing.generation } : null
-								}
-								if (sql.includes('SELECT package_id, user_id, generation')) {
-									const packageId = String(values[0])
-									const existing = rows.get(packageId)
-									return existing
-										? {
-												package_id: existing.packageId,
-												user_id: existing.userId,
-												generation: existing.generation,
-												embed_text: existing.embedText,
-											}
-										: null
-								}
-								return null
-							},
-							async all() {
-								return { results: [...rows.values()] }
-							},
-						}
-					},
-				}
-			},
-		} as unknown as D1Database,
+		...store,
+		row,
+		envFor: (userId: string) =>
+			({ APP_DB: store.forUser(userId).db }) as unknown as Env,
 	}
 }
 
@@ -119,10 +54,10 @@ test('scheduleSavedPackageSearchIndexUpsert defers via waitUntil and clears debt
 				resolveUpsert = resolve
 			}),
 	)
-	const { db, rows } = createDebtDb()
+	await using debt = await createDebtDb()
 	const waitUntilPromises: Array<Promise<unknown>> = []
 	const schedulePromise = scheduleSavedPackageSearchIndexUpsert({
-		env: { APP_DB: db } as Env,
+		env: debt.envFor('user-1'),
 		packageId: 'pkg-1',
 		userId: 'user-1',
 		embedText: 'hello',
@@ -131,7 +66,7 @@ test('scheduleSavedPackageSearchIndexUpsert defers via waitUntil and clears debt
 		},
 	})
 	await schedulePromise
-	expect(rows.has('pkg-1')).toBe(true)
+	expect(await debt.row('pkg-1')).toBeDefined()
 	expect(waitUntilPromises).toHaveLength(1)
 	await vi.waitFor(() => {
 		expect(mockModule.upsertSavedPackageVector).toHaveBeenCalledWith(
@@ -145,7 +80,7 @@ test('scheduleSavedPackageSearchIndexUpsert defers via waitUntil and clears debt
 	})
 	resolveUpsert?.()
 	await waitUntilPromises[0]
-	expect(rows.has('pkg-1')).toBe(false)
+	expect(await debt.row('pkg-1')).toBeUndefined()
 })
 
 test('scheduleSavedPackageSearchIndexUpsert keeps debt and reports to Sentry on failure', async () => {
@@ -155,14 +90,14 @@ test('scheduleSavedPackageSearchIndexUpsert keeps debt and reports to Sentry on 
 	mockModule.upsertSavedPackageVector.mockRejectedValue(
 		new Error('vectorize down'),
 	)
-	const { db, rows } = createDebtDb()
+	await using debt = await createDebtDb()
 	await scheduleSavedPackageSearchIndexUpsert({
-		env: { APP_DB: db } as Env,
+		env: debt.envFor('user-2'),
 		packageId: 'pkg-2',
 		userId: 'user-2',
 		embedText: 'hello',
 	})
-	expect(rows.get('pkg-2')).toMatchObject({
+	expect(await debt.row('pkg-2')).toMatchObject({
 		packageId: 'pkg-2',
 		userId: 'user-2',
 		generation: 1,
@@ -172,7 +107,7 @@ test('scheduleSavedPackageSearchIndexUpsert keeps debt and reports to Sentry on 
 	expect(consoleError).toHaveBeenCalled()
 })
 
-test('out-of-order publishes keep the newest owner and embed text under one coalesced reconcile', async () => {
+test('out-of-order publishes keep the newest embed text under one coalesced reconcile', async () => {
 	let resolveFirstUpsert: (() => void) | undefined
 	let upsertCalls = 0
 	mockModule.upsertSavedPackageVector.mockReset()
@@ -184,29 +119,38 @@ test('out-of-order publishes keep the newest owner and embed text under one coal
 			})
 		}
 	})
-	const { db, rows } = createDebtDb()
+	await using debt = await createDebtDb()
 	const waitUntilPromises: Array<Promise<unknown>> = []
 	const waitUntil = (promise: Promise<unknown>) => {
 		waitUntilPromises.push(promise)
 	}
 
 	await scheduleSavedPackageSearchIndexUpsert({
-		env: { APP_DB: db } as Env,
+		env: debt.envFor('user-a'),
 		packageId: 'pkg-race',
 		userId: 'user-a',
 		embedText: 'older',
 		waitUntil,
 	})
+	// Another account cannot take over the owner's debt row.
+	await expect(
+		scheduleSavedPackageSearchIndexUpsert({
+			env: debt.envFor('user-b'),
+			packageId: 'pkg-race',
+			userId: 'user-b',
+			embedText: 'hijack',
+		}),
+	).rejects.toThrow(/row-level security/)
 	await scheduleSavedPackageSearchIndexUpsert({
-		env: { APP_DB: db } as Env,
+		env: debt.envFor('user-a'),
 		packageId: 'pkg-race',
-		userId: 'user-b',
+		userId: 'user-a',
 		embedText: 'newer',
 		waitUntil,
 	})
-	expect(rows.get('pkg-race')).toMatchObject({
+	expect(await debt.row('pkg-race')).toMatchObject({
 		generation: 2,
-		userId: 'user-b',
+		userId: 'user-a',
 		embedText: 'newer',
 	})
 	// Coalesced to one in-flight reconcile.
@@ -227,7 +171,7 @@ test('out-of-order publishes keep the newest owner and embed text under one coal
 	expect(mockModule.upsertSavedPackageVector).toHaveBeenNthCalledWith(
 		2,
 		expect.anything(),
-		expect.objectContaining({ userId: 'user-b', embedText: 'newer' }),
+		expect.objectContaining({ userId: 'user-a', embedText: 'newer' }),
 	)
-	expect(rows.has('pkg-race')).toBe(false)
+	expect(await debt.row('pkg-race')).toBeUndefined()
 })

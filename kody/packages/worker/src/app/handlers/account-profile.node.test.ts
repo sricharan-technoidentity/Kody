@@ -18,182 +18,62 @@ import {
 	type AuthSession,
 } from '#app/auth-session.ts'
 import { createAccountProfileApiHandler } from './account-profile.ts'
-import { CommunityActionError } from '#worker/community/errors.ts'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { reservedUsernamesKvKey } from '#worker/identity/reserved-username-settings.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-const mockModule = vi.hoisted(() => ({
-	updateCommunityProfile: vi.fn(),
-}))
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
 
-vi.mock('#worker/community/profile-service.ts', () => ({
-	updateCommunityProfile: (...args: Array<unknown>) =>
-		mockModule.updateCommunityProfile(...args),
-}))
-
-type TestUser = {
-	id: number
-	email: string
-	username: string
-	password_hash: string
-	stable_user_id: string
-	display_name: string | null
-	bio: string | null
-	avatar_key: string | null
-	profile_visibility: 'public' | 'private'
-	created_at: string
-	updated_at: string
+/** Seeds accounts `ids[i] = i + 1`; every request runs on account 1's writer. */
+async function createProfileStore(usernames: Array<string>) {
+	const store = await createTestDb()
+	for (const [index, username] of usernames.entries()) {
+		await store.pg.query(
+			`INSERT INTO users (id, email, username, password_hash, stable_user_id, created_at, updated_at)
+			 VALUES ($1, $2, $3, 'unused', $4, $5, $5)`,
+			[
+				index + 1,
+				`${username}@example.com`,
+				username,
+				testStableUserIdFromEmail(`${username}@example.com`),
+				new Date(0).toISOString(),
+			],
+		)
+	}
+	return store
 }
 
-function createProfileTestDb(
-	initialUsers: Array<TestUser>,
-	options?: { persistUsernameUpdates?: boolean },
-) {
-	const persistUsernameUpdates = options?.persistUsernameUpdates !== false
-	const users = new Map(initialUsers.map((user) => [user.id, { ...user }]))
-	const db = {
-		prepare(query: string) {
-			const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-			return {
-				bind(...params: Array<unknown>) {
-					const readUserByStableUserId = () =>
-						[...users.values()].find(
-							(user) => user.stable_user_id === params[0],
-						) ?? null
-					const readUserById = () => users.get(Number(params[0])) ?? null
-					const readUserByUsername = () => {
-						const username = String(params[0] ?? '').toLowerCase()
-						return (
-							Array.from(users.values()).find(
-								(user) => user.username.toLowerCase() === username,
-							) ?? null
-						)
-					}
-					const updateUsername = () => {
-						const [username, updatedAt, id] = params as Array<string | number>
-						const user = users.get(Number(id))
-						if (!user) return null
-						if (
-							Array.from(users.values()).some(
-								(existingUser) =>
-									existingUser.id !== user.id &&
-									existingUser.username.toLowerCase() ===
-										String(username).toLowerCase(),
-							)
-						) {
-							throw new Error('UNIQUE constraint failed: users.username')
-						}
-						if (persistUsernameUpdates) {
-							user.username = String(username)
-						}
-						user.updated_at = String(updatedAt)
-						return user
-					}
-					const executeAll = async () => {
-						if (normalizedQuery.includes('update "users"')) {
-							const user = updateUsername()
-							return {
-								results: user ? [{ ...user }] : [],
-								meta: { changes: user ? 1 : 0, last_row_id: 0 },
-							}
-						}
-						if (
-							normalizedQuery.startsWith('select') &&
-							normalizedQuery.includes('from "users"') &&
-							/"stable_user_id"\s*=/.test(normalizedQuery)
-						) {
-							const user = readUserByStableUserId()
-							return {
-								results: user ? [{ ...user }] : [],
-								meta: { changes: 0, last_row_id: 0 },
-							}
-						}
-						if (
-							normalizedQuery.startsWith('select') &&
-							normalizedQuery.includes('from "users"') &&
-							/"id"\s*=/.test(normalizedQuery)
-						) {
-							const user = readUserById()
-							return {
-								results: user ? [{ ...user }] : [],
-								meta: { changes: 0, last_row_id: 0 },
-							}
-						}
-						if (
-							normalizedQuery.startsWith('select') &&
-							normalizedQuery.includes('from "users"') &&
-							/"username"\s*=/.test(normalizedQuery)
-						) {
-							const user = readUserByUsername()
-							return {
-								results: user ? [{ ...user }] : [],
-								meta: { changes: 0, last_row_id: 0 },
-							}
-						}
-						return {
-							results: [],
-							meta: { changes: 0, last_row_id: 0 },
-						}
-					}
-
-					return {
-						query,
-						async all() {
-							return executeAll()
-						},
-						async first() {
-							const result = await executeAll()
-							return result.results[0] ?? null
-						},
-						async run() {
-							if (normalizedQuery.includes('update "users"')) {
-								const user = updateUsername()
-								return {
-									meta: { changes: user ? 1 : 0, last_row_id: 0 },
-								}
-							}
-							return { meta: { changes: 0, last_row_id: 0 } }
-						},
-					}
-				},
-			}
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
-
-	return { db, users }
+async function readUser(store: TestDb, id: number) {
+	return (
+		await store.pg.query<{
+			username: string
+			display_name: string | null
+			bio: string | null
+			profile_visibility: string
+		}>(
+			`SELECT username, display_name, bio, profile_visibility FROM users WHERE id = $1`,
+			[id],
+		)
+	).rows[0]
 }
 
-function createUser(
-	id: number,
-	username: string,
-	email = `${username}@example.com`,
-	profile?: Partial<
-		Pick<TestUser, 'display_name' | 'bio' | 'avatar_key' | 'profile_visibility'>
-	>,
-) {
+async function readUsernameRedirects(store: TestDb) {
+	return (
+		await store.pg.query<{ old_username: string; user_id: string }>(
+			`SELECT old_username, user_id FROM username_redirects ORDER BY old_username`,
+		)
+	).rows
+}
+
+function sessionFor(username: string): AuthSession {
 	return {
-		id,
-		email,
-		username,
-		password_hash: 'unused',
-		stable_user_id: testStableUserIdFromEmail(email),
-		display_name: profile?.display_name ?? null,
-		bio: profile?.bio ?? null,
-		avatar_key: profile?.avatar_key ?? null,
-		profile_visibility: profile?.profile_visibility ?? 'public',
-		created_at: new Date(0).toISOString(),
-		updated_at: new Date(0).toISOString(),
-	} satisfies TestUser
+		stableUserId: testStableUserIdFromEmail(`${username}@example.com`),
+		email: `${username}@example.com`,
+		rememberMe: false,
+	}
 }
 
 async function createRequest(input: {
@@ -212,13 +92,14 @@ async function createRequest(input: {
 	})
 }
 
-function createEnv(db: D1Database, kv?: KVNamespace) {
+/** The signed-in account's request env: its own scoped writer. */
+function createEnv(store: TestDb, session: AuthSession, kv?: KVNamespace) {
 	return {
-		APP_DB: db,
+		APP_DB: store.forUser(session.stableUserId).db,
 		COOKIE_SECRET: testCookieSecret,
 		APP_BASE_URL: 'http://example.com',
 		...(kv ? { BUNDLE_ARTIFACTS_KV: kv } : {}),
-	} as Env
+	} as unknown as Env
 }
 
 async function runHandler(
@@ -250,19 +131,11 @@ beforeEach(() => {
 })
 
 test('account profile API returns email and username for the signed-in user', async () => {
-	const testDb = createProfileTestDb([createUser(1, 'current-user')])
-	const handler = createAccountProfileApiHandler(createEnv(testDb.db))
+	await using store = await createProfileStore(['current-user'])
+	const session = sessionFor('current-user')
+	const handler = createAccountProfileApiHandler(createEnv(store, session))
 
-	const response = await runHandler(
-		handler,
-		await createRequest({
-			session: {
-				stableUserId: testStableUserIdFromEmail('current-user@example.com'),
-				email: 'current-user@example.com',
-				rememberMe: false,
-			},
-		}),
-	)
+	const response = await runHandler(handler, await createRequest({ session }))
 
 	expect(response.status).toBe(200)
 	expect(await response.json()).toEqual({
@@ -282,9 +155,10 @@ test('account profile API returns email and username for the signed-in user', as
 	expect(mocks.updatePackagesForUsernameChange).not.toHaveBeenCalled()
 })
 
-test('account profile API updates username for the signed-in user', async () => {
-	const testDb = createProfileTestDb([createUser(1, 'current-user')])
-	const handler = createAccountProfileApiHandler(createEnv(testDb.db))
+test('account profile API updates username for the signed-in user and retires the old one', async () => {
+	await using store = await createProfileStore(['current-user'])
+	const session = sessionFor('current-user')
+	const handler = createAccountProfileApiHandler(createEnv(store, session))
 	mocks.updatePackagesForUsernameChange.mockResolvedValueOnce({
 		updatedPackages: [
 			{
@@ -307,11 +181,7 @@ test('account profile API updates username for the signed-in user', async () => 
 	const response = await runHandler(
 		handler,
 		await createRequest({
-			session: {
-				stableUserId: testStableUserIdFromEmail('current-user@example.com'),
-				email: 'current-user@example.com',
-				rememberMe: false,
-			},
+			session,
 			method: 'POST',
 			body: { username: 'Next-Jane' },
 		}),
@@ -329,8 +199,11 @@ test('account profile API updates username for the signed-in user', async () => 
 		communityListingsRepublished: 1,
 		packageUpdateMessage: 'Updated 1 package to the new @next-jane scope.',
 	})
-	expect(testDb.users.get(1)?.username).toBe('next-jane')
-	expect(mockModule.updateCommunityProfile).not.toHaveBeenCalled()
+	expect((await readUser(store, 1))?.username).toBe('next-jane')
+	// Links shared under the old name keep resolving to this account.
+	expect(await readUsernameRedirects(store)).toEqual([
+		{ old_username: 'current-user', user_id: session.stableUserId },
+	])
 	expect(mocks.updatePackagesForUsernameChange).toHaveBeenCalledWith(
 		expect.objectContaining({
 			previousUsername: 'current-user',
@@ -357,33 +230,31 @@ test('account profile API updates username for the signed-in user', async () => 
 test('account profile API treats an unchanged username as a no-op so grandfathered reserved usernames can still save profile fields', async () => {
 	// 'kody' is on the reserved username list; an account that already holds
 	// it must still be able to save display name / bio / visibility.
-	const testDb = createProfileTestDb([createUser(1, 'kody')])
-	const handler = createAccountProfileApiHandler(createEnv(testDb.db))
-	mockModule.updateCommunityProfile.mockResolvedValue(undefined)
+	await using store = await createProfileStore(['kody'])
+	const session = sessionFor('kody')
+	const handler = createAccountProfileApiHandler(createEnv(store, session))
 
 	const response = await runHandler(
 		handler,
 		await createRequest({
-			session: {
-				stableUserId: testStableUserIdFromEmail('kody@example.com'),
-				email: 'kody@example.com',
-				rememberMe: false,
-			},
+			session,
 			method: 'POST',
 			body: { username: 'kody', displayName: 'Kody the Koala', bio: 'Hi' },
 		}),
 	)
 
 	expect(response.status).toBe(200)
-	expect(await response.json()).toMatchObject({ ok: true, username: 'kody' })
-	expect(testDb.users.get(1)?.username).toBe('kody')
-	expect(mockModule.updateCommunityProfile).toHaveBeenCalledWith(
-		expect.objectContaining({
-			numericUserId: 1,
-			displayName: 'Kody the Koala',
-			bio: 'Hi',
-		}),
-	)
+	expect(await response.json()).toMatchObject({
+		ok: true,
+		username: 'kody',
+		displayName: 'Kody the Koala',
+		bio: 'Hi',
+	})
+	expect(await readUser(store, 1)).toMatchObject({
+		username: 'kody',
+		display_name: 'Kody the Koala',
+		bio: 'Hi',
+	})
 	expect(logAuditEventSpy).not.toHaveBeenCalledWith(
 		expect.objectContaining({ action: 'update_username' }),
 	)
@@ -391,8 +262,9 @@ test('account profile API treats an unchanged username as a no-op so grandfather
 })
 
 test('account profile API rejects username changes when package updates fail', async () => {
-	const testDb = createProfileTestDb([createUser(1, 'current-user')])
-	const handler = createAccountProfileApiHandler(createEnv(testDb.db))
+	await using store = await createProfileStore(['current-user'])
+	const session = sessionFor('current-user')
+	const handler = createAccountProfileApiHandler(createEnv(store, session))
 	mocks.updatePackagesForUsernameChange.mockRejectedValueOnce(
 		new Error('sync failed'),
 	)
@@ -400,11 +272,7 @@ test('account profile API rejects username changes when package updates fail', a
 	const response = await runHandler(
 		handler,
 		await createRequest({
-			session: {
-				stableUserId: testStableUserIdFromEmail('current-user@example.com'),
-				email: 'current-user@example.com',
-				rememberMe: false,
-			},
+			session,
 			method: 'POST',
 			body: { username: 'next-jane' },
 		}),
@@ -416,7 +284,9 @@ test('account profile API rejects username changes when package updates fail', a
 		error:
 			'Username was not changed because package updates failed: sync failed',
 	})
-	expect(testDb.users.get(1)?.username).toBe('current-user')
+	// The claimed name is rolled back and nothing is retired.
+	expect((await readUser(store, 1))?.username).toBe('current-user')
+	expect(await readUsernameRedirects(store)).toEqual([])
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
 		expect.objectContaining({
 			category: 'account',
@@ -428,16 +298,9 @@ test('account profile API rejects username changes when package updates fail', a
 })
 
 test('account profile API rejects invalid or duplicate usernames', async () => {
-	const testDb = createProfileTestDb([
-		createUser(1, 'current-user'),
-		createUser(2, 'taken-jane'),
-	])
-	const handler = createAccountProfileApiHandler(createEnv(testDb.db))
-	const session = {
-		stableUserId: testStableUserIdFromEmail('current-user@example.com'),
-		email: 'current-user@example.com',
-		rememberMe: false,
-	}
+	await using store = await createProfileStore(['current-user', 'taken-jane'])
+	const session = sessionFor('current-user')
+	const handler = createAccountProfileApiHandler(createEnv(store, session))
 
 	const invalidResponse = await runHandler(
 		handler,
@@ -463,6 +326,7 @@ test('account profile API rejects invalid or duplicate usernames', async () => {
 		error: '`kody` is reserved.',
 	})
 
+	// RLS hides the other account, so the unique constraint is what refuses.
 	const duplicateResponse = await runHandler(
 		handler,
 		await createRequest({
@@ -476,7 +340,8 @@ test('account profile API rejects invalid or duplicate usernames', async () => {
 		ok: false,
 		error: '`taken-jane` is taken.',
 	})
-	expect(testDb.users.get(1)?.username).toBe('current-user')
+	expect((await readUser(store, 1))?.username).toBe('current-user')
+	expect((await readUser(store, 2))?.username).toBe('taken-jane')
 	expect(mocks.updatePackagesForUsernameChange).not.toHaveBeenCalled()
 	// Only the duplicate attempt is audited; validation rejections are not.
 	expect(logAuditEventSpy).toHaveBeenCalledTimes(1)
@@ -491,19 +356,21 @@ test('account profile API rejects invalid or duplicate usernames', async () => {
 })
 
 test('account profile API does not report success when the requested username did not persist', async () => {
-	const testDb = createProfileTestDb([createUser(1, 'jklotz08')], {
-		persistUsernameUpdates: false,
-	})
-	const handler = createAccountProfileApiHandler(createEnv(testDb.db))
+	await using store = await createProfileStore(['jklotz08'])
+	// Simulates a write that reports success but leaves the row unchanged.
+	await store.pg.exec(`
+		CREATE FUNCTION test_keep_username() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN NEW.username := OLD.username; RETURN NEW; END $$;
+		CREATE TRIGGER test_keep_username BEFORE UPDATE ON users
+		FOR EACH ROW EXECUTE FUNCTION test_keep_username();
+	`)
+	const session = sessionFor('jklotz08')
+	const handler = createAccountProfileApiHandler(createEnv(store, session))
 
 	const response = await runHandler(
 		handler,
 		await createRequest({
-			session: {
-				stableUserId: testStableUserIdFromEmail('jklotz08@example.com'),
-				email: 'jklotz08@example.com',
-				rememberMe: false,
-			},
+			session,
 			method: 'POST',
 			body: { username: 'jklotz' },
 		}),
@@ -514,42 +381,14 @@ test('account profile API does not report success when the requested username di
 		ok: false,
 		error: 'Username was not changed to `jklotz`.',
 	})
-	expect(testDb.users.get(1)?.username).toBe('jklotz08')
+	expect((await readUser(store, 1))?.username).toBe('jklotz08')
 	expect(mocks.updatePackagesForUsernameChange).not.toHaveBeenCalled()
 })
 
-test('account profile API rounds trip displayName, bio, and visibility', async () => {
-	const testDb = createProfileTestDb([createUser(1, 'current-user')])
-	const env = createEnv(testDb.db)
-	const handler = createAccountProfileApiHandler(env)
-	const session = {
-		stableUserId: testStableUserIdFromEmail('current-user@example.com'),
-		email: 'current-user@example.com',
-		rememberMe: false,
-	}
-
-	mockModule.updateCommunityProfile.mockImplementation(
-		async (input: {
-			displayName?: string
-			bio?: string
-			visibility?: 'public' | 'private'
-		}) => {
-			const user = testDb.users.get(1)
-			if (!user) return
-			if (input.displayName !== undefined) {
-				user.display_name =
-					input.displayName.trim().length === 0
-						? null
-						: input.displayName.trim()
-			}
-			if (input.bio !== undefined) {
-				user.bio = input.bio.trim().length === 0 ? null : input.bio.trim()
-			}
-			if (input.visibility !== undefined) {
-				user.profile_visibility = input.visibility
-			}
-		},
-	)
+test('account profile API round trips displayName, bio, and visibility', async () => {
+	await using store = await createProfileStore(['current-user', 'bystander'])
+	const session = sessionFor('current-user')
+	const handler = createAccountProfileApiHandler(createEnv(store, session))
 
 	const response = await runHandler(
 		handler,
@@ -557,7 +396,7 @@ test('account profile API rounds trip displayName, bio, and visibility', async (
 			session,
 			method: 'POST',
 			body: {
-				displayName: 'Current User',
+				displayName: '  Current User  ',
 				bio: 'I build packages',
 				profileVisibility: 'private',
 			},
@@ -577,12 +416,15 @@ test('account profile API rounds trip displayName, bio, and visibility', async (
 		profileVisibility: 'private',
 		formerEmails: [],
 	})
-	expect(mockModule.updateCommunityProfile).toHaveBeenCalledWith({
-		env,
-		numericUserId: 1,
-		displayName: 'Current User',
+	expect(await readUser(store, 1)).toMatchObject({
+		display_name: 'Current User',
 		bio: 'I build packages',
-		visibility: 'private',
+		profile_visibility: 'private',
+	})
+	expect(await readUser(store, 2)).toMatchObject({
+		display_name: null,
+		bio: null,
+		profile_visibility: 'public',
 	})
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
 		expect.objectContaining({
@@ -601,16 +443,30 @@ test('account profile API rounds trip displayName, bio, and visibility', async (
 		bio: 'I build packages',
 		profileVisibility: 'private',
 	})
+
+	// Blank fields clear back to null.
+	const clearResponse = await runHandler(
+		handler,
+		await createRequest({
+			session,
+			method: 'POST',
+			body: { displayName: ' ', bio: null },
+		}),
+	)
+	expect(await clearResponse.json()).toMatchObject({
+		displayName: 'current-user',
+		bio: null,
+	})
+	expect(await readUser(store, 1)).toMatchObject({
+		display_name: null,
+		bio: null,
+	})
 })
 
 test('account profile API validates profile field updates', async () => {
-	const testDb = createProfileTestDb([createUser(1, 'current-user')])
-	const handler = createAccountProfileApiHandler(createEnv(testDb.db))
-	const session = {
-		stableUserId: testStableUserIdFromEmail('current-user@example.com'),
-		email: 'current-user@example.com',
-		rememberMe: false,
-	}
+	await using store = await createProfileStore(['current-user'])
+	const session = sessionFor('current-user')
+	const handler = createAccountProfileApiHandler(createEnv(store, session))
 
 	const invalidVisibility = await runHandler(
 		handler,
@@ -626,9 +482,6 @@ test('account profile API validates profile field updates', async () => {
 		error: 'Profile visibility is invalid.',
 	})
 
-	mockModule.updateCommunityProfile.mockRejectedValue(
-		new CommunityActionError('Display name must be at most 50 characters.'),
-	)
 	const invalidDisplayName = await runHandler(
 		handler,
 		await createRequest({
@@ -642,10 +495,12 @@ test('account profile API validates profile field updates', async () => {
 		ok: false,
 		error: 'Display name must be at most 50 characters.',
 	})
+	expect((await readUser(store, 1))?.display_name).toBeNull()
 })
 
 test('account profile username change consults KV reserved additions and removals', async () => {
-	const testDb = createProfileTestDb([createUser(1, 'current-user')])
+	await using store = await createProfileStore(['current-user'])
+	const session = sessionFor('current-user')
 	const kv = {
 		async get(key: string, type?: string) {
 			if (key !== reservedUsernamesKvKey) return null
@@ -658,12 +513,7 @@ test('account profile username change consults KV reserved additions and removal
 			return type === 'json' ? JSON.parse(raw) : raw
 		},
 	} as unknown as KVNamespace
-	const handler = createAccountProfileApiHandler(createEnv(testDb.db, kv))
-	const session = {
-		stableUserId: testStableUserIdFromEmail('current-user@example.com'),
-		email: 'current-user@example.com',
-		rememberMe: false,
-	}
+	const handler = createAccountProfileApiHandler(createEnv(store, session, kv))
 
 	const addedResponse = await runHandler(
 		handler,
@@ -688,5 +538,5 @@ test('account profile username change consults KV reserved additions and removal
 		}),
 	)
 	expect(unreservedResponse.status).toBe(200)
-	expect(testDb.users.get(1)?.username).toBe('faq')
+	expect((await readUser(store, 1))?.username).toBe('faq')
 })

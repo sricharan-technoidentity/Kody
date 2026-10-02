@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	chunkArray,
 	maxD1BoundParameters,
@@ -71,7 +72,7 @@ export async function insertEntitySource(
 }
 
 export async function getEntitySourceById(
-	db: D1Database,
+	db: SqlDatabase,
 	id: string,
 ): Promise<EntitySourceRow | null> {
 	const result = await db

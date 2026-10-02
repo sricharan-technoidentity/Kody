@@ -675,13 +675,15 @@ export function buildUserScopedTargetMatch(input: {
 		case 'replace_user_id_in_json_column': {
 			const quotedUserId = `"${input.mcpUserId}"`
 			const quotedReplacement = `"${target.value}"`
-			// D1 caps LIKE/GLOB patterns at 50 bytes ("LIKE or GLOB pattern too
-			// complex"); a quoted 64-hex stable user id is 66. instr() has no
-			// such limit and matches the same substring.
+			// A literal substring test that SQLite and PostgreSQL both run (no
+			// shared instr/strpos), not LIKE: no wildcard escaping, and the old
+			// D1 50-byte LIKE pattern cap stays moot.
+			const contains = (column: string) =>
+				`length(replace(${column}, ?, '')) < length(${column})`
 			return {
 				table,
-				whereSql: `instr(${target.column}, ?) > 0`,
-				qualifiedWhereSql: `instr(${table}.${target.column}, ?) > 0`,
+				whereSql: contains(target.column),
+				qualifiedWhereSql: contains(`${table}.${target.column}`),
 				params: [quotedUserId],
 				mutation: {
 					kind: 'replace_json_string',
@@ -732,6 +734,14 @@ export function buildUserScopedTargetMatch(input: {
 		}
 	}
 }
+
+/**
+ * PostgreSQL applies every non-delete target through the definer function in
+ * `migrations-pg/0008_account_subject.sql`: RLS cannot let the subject purger
+ * rewrite the attribution column that makes another user's row visible.
+ * Rows are `{ target_ordinal, changed_rows }`, indexed into accountUserDataTargets.
+ */
+export const accountSubjectAnonymizeSql = `SELECT target_ordinal, changed_rows FROM kody_subject_anonymize()`
 
 export function buildUserScopedDeleteOrUpdateSql(
 	match: UserScopedTargetMatch,

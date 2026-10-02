@@ -205,16 +205,16 @@ test('readEntitlementUsageSnapshot reads the weekly window without waiting on th
 		read: (input: { resource: string }) => Promise<unknown>
 		readRange: (input: { resource: string }) => Promise<unknown>
 	}
-	const userMeter = env.USER_METER as unknown as {
-		get: (id: unknown) => MeterStub
+	const userMeter = env.USER_METERS as unknown as {
+		forUser: (id: string) => MeterStub
 	}
-	const realGet = userMeter.get
+	const realGet = userMeter.forUser
 	let releaseDailyRead!: () => void
 	const dailyReadGate = new Promise<void>((resolve) => {
 		releaseDailyRead = resolve
 	})
 	const weeklyRangeResources: Array<string> = []
-	userMeter.get = (id) => {
+	userMeter.forUser = (id) => {
 		const meter = realGet(id)
 		return {
 			...meter,

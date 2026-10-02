@@ -1,20 +1,20 @@
 import { expect, test } from 'vitest'
 import { handleOidcUserinfoRequest } from '#worker/oidc/userinfo.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+
+async function createUserinfoDb() {
+	const database = await createTestDb()
+	await database.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
+		 VALUES (1, 'test-user', 'user@example.com', 'user-stable-id', 'x', $1),
+			(2, 'unverified', 'unverified@example.com', 'unverified-stable-id', 'x', NULL)`,
+		[new Date(0).toISOString()],
+	)
+	return database
+}
 
 function createOidcEnv(overrides: Partial<Env> = {}) {
 	return {
-		APP_DB: {
-			prepare() {
-				return {
-					bind() {
-						return this
-					},
-					async first() {
-						return { email_verified_at: new Date(0).toISOString() }
-					},
-				}
-			},
-		},
 		OAUTH_PROVIDER: {
 			unwrapToken: async () => ({
 				scope: ['openid', 'email', 'profile'],
@@ -36,7 +36,11 @@ function createOidcEnv(overrides: Partial<Env> = {}) {
 }
 
 test('userinfo returns claims for verified bearer tokens and 401 without bearer', async () => {
-	const env = createOidcEnv()
+	await using database = await createUserinfoDb()
+	// The token subject's scoped reader performs the verification lookup.
+	const env = createOidcEnv({
+		APP_DB: database.forUser('user-stable-id').reader,
+	} as unknown as Partial<Env>)
 	const okResponse = await handleOidcUserinfoRequest(
 		new Request('https://heykody.dev/oauth/userinfo', {
 			headers: { Authorization: 'Bearer demo-token' },
@@ -56,10 +60,46 @@ test('userinfo returns claims for verified bearer tokens and 401 without bearer'
 		env,
 	)
 	expect(unauthorized.status).toBe(401)
+
+	// Another account's scoped reader cannot see the subject's row, and an
+	// unverified subject is refused even with a valid openid token.
+	for (const stableUserId of ['unverified-stable-id', 'user-stable-id']) {
+		const refused = await handleOidcUserinfoRequest(
+			new Request('https://heykody.dev/oauth/userinfo', {
+				headers: { Authorization: 'Bearer demo-token' },
+			}),
+			createOidcEnv({
+				APP_DB: database.forUser('unverified-stable-id').reader,
+				OAUTH_PROVIDER: {
+					unwrapToken: async () => ({
+						scope: ['openid'],
+						grant: {
+							clientId: 'client-123',
+							scope: ['openid'],
+							props: {
+								userId: stableUserId,
+								email:
+									stableUserId === 'user-stable-id'
+										? 'user@example.com'
+										: 'unverified@example.com',
+							},
+						},
+					}),
+				},
+			} as unknown as Partial<Env>),
+		)
+		expect(refused.status).toBe(401)
+		await expect(refused.json()).resolves.toMatchObject({
+			error_description: 'Account email is not verified.',
+		})
+	}
 })
 
 test('userinfo accepts POST with form access_token', async () => {
-	const env = createOidcEnv()
+	await using database = await createUserinfoDb()
+	const env = createOidcEnv({
+		APP_DB: database.forUser('user-stable-id').reader,
+	} as unknown as Partial<Env>)
 	const response = await handleOidcUserinfoRequest(
 		new Request('https://heykody.dev/oauth/userinfo', {
 			method: 'POST',

@@ -8,7 +8,8 @@ import {
 import { createAccountHandler } from '#app/handlers/account.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
 import { loadSessionInfo } from '#app/session-info.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
@@ -73,47 +74,75 @@ vi.mock('#app/ssr-render.tsx', () => ({
 	renderAppPage: vi.fn(),
 }))
 
-function createStaleSessionTestEnv() {
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
+
+function createEnv(db: PgDatabase) {
 	return {
 		COOKIE_SECRET: testCookieSecret,
-		APP_DB: {
-			prepare(query: string) {
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				return {
-					query,
-					bind() {
-						return {
-							query,
-							async all() {
-								if (
-									normalizedQuery.startsWith('select') &&
-									normalizedQuery.includes('from "users"')
-								) {
-									return { results: [], meta: { changes: 0 } }
-								}
-								if (normalizedQuery.includes('from user_roles ur')) {
-									return { results: [], meta: { changes: 0 } }
-								}
-								return { results: [], meta: { changes: 0 } }
-							},
-							async first() {
-								return null
-							},
-							async run() {
-								return { meta: { changes: 0 } }
-							},
-						}
-					},
-				}
-			},
-			async batch(statements: Array<{ query?: string }>) {
-				return await executePreparedD1Batch(statements)
-			},
-			async exec() {
-				return
-			},
-		} as unknown as D1Database,
-	} as Env
+		FLAG_EXPOSURES: { writeDataPoint() {} },
+		APP_DB: db,
+	} as unknown as Env
+}
+
+async function seedAccount(
+	store: TestDb,
+	input: { id: number; email: string; username: string; deletingAt?: string },
+) {
+	await store.pg.query(
+		`INSERT INTO users (id, email, username, password_hash, stable_user_id, deleting_at)
+		 VALUES ($1, $2, $3, 'unused', $4, $5)`,
+		[
+			input.id,
+			input.email,
+			input.username,
+			testStableUserIdFromEmail(input.email),
+			input.deletingAt ?? null,
+		],
+	)
+}
+
+/** Counts prepares and batch sizes on the scoped writer. */
+function countQueries(db: PgDatabase) {
+	const counts = { prepare: 0, batch: 0, batchSizes: [] as Array<number> }
+	const counted: PgDatabase = {
+		...db,
+		prepare(sql: string) {
+			counts.prepare += 1
+			return db.prepare(sql)
+		},
+		batch(statements) {
+			counts.batch += 1
+			counts.batchSizes.push(statements.length)
+			return db.batch(statements)
+		},
+	}
+	return { db: counted, counts }
+}
+
+async function requestAccountPage(env: Env, cookie: string) {
+	return await createAccountHandler(env).handler(
+		new RequestContext(
+			new Request('https://example.com/account', {
+				headers: { Cookie: cookie },
+			}),
+		),
+	)
+}
+
+function loginRedirectState(response: Response) {
+	const setCookie = response.headers.get('Set-Cookie') ?? ''
+	return {
+		status: response.status,
+		location: response.headers.get('Location'),
+		clearsSession:
+			setCookie.includes('kody_session=') && setCookie.includes('Max-Age=0'),
+	}
+}
+
+const signedOutRedirect = {
+	status: 302,
+	location: 'https://example.com/login?redirectTo=%2Faccount',
+	clearsSession: true,
 }
 
 test('account handler redirects to login with a session-destroy cookie for stale sessions', async () => {
@@ -124,200 +153,67 @@ test('account handler redirects to login with a session-destroy cookie for stale
 		rememberMe: false,
 	}
 	const cookie = await createAuthCookie(session, false)
-	const handler = createAccountHandler(createStaleSessionTestEnv())
-	const response = await handler.handler(
-		new RequestContext(
-			new Request('https://example.com/account', {
-				headers: { Cookie: cookie },
-			}),
-		),
-	)
+	await using store = await createTestDb()
+	// A bystander exists, but no row matches the cookie's account.
+	await seedAccount(store, {
+		id: 1,
+		email: 'bystander@example.com',
+		username: 'bystander',
+	})
 
-	expect(response.status).toBe(302)
-	expect(response.headers.get('Location')).toBe(
-		'https://example.com/login?redirectTo=%2Faccount',
-	)
-	const setCookie = response.headers.get('Set-Cookie') ?? ''
-	expect(setCookie).toContain('kody_session=')
-	expect(setCookie).toContain('Max-Age=0')
+	expect(
+		loginRedirectState(
+			await requestAccountPage(
+				createEnv(store.forUser(session.stableUserId).db),
+				cookie,
+			),
+		),
+	).toEqual(signedOutRedirect)
 })
 
 test('account handler redirects to login and clears the cookie for a deleting account', async () => {
 	setAuthSessionSecret(testCookieSecret)
 	const session: AuthSession = {
-		stableUserId: 'a'.repeat(64),
+		stableUserId: testStableUserIdFromEmail('deleting@example.com'),
 		email: 'deleting@example.com',
 		rememberMe: false,
 	}
 	const cookie = await createAuthCookie(session, false)
-	const env = {
-		COOKIE_SECRET: testCookieSecret,
-		APP_DB: {
-			prepare(query: string) {
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				return {
-					query,
-					bind() {
-						return {
-							query,
-							async all() {
-								if (
-									normalizedQuery.startsWith('select') &&
-									normalizedQuery.includes('from "users"')
-								) {
-									return {
-										results: [
-											{
-												id: 7,
-												email: 'deleting@example.com',
-												username: 'deleting-user',
-												stable_user_id: 'a'.repeat(64),
-												deleting_at: '2026-08-31 15:00:00',
-											},
-										],
-										meta: { changes: 0 },
-									}
-								}
-								if (normalizedQuery.includes('from user_roles ur')) {
-									return { results: [], meta: { changes: 0 } }
-								}
-								return { results: [], meta: { changes: 0 } }
-							},
-							async first() {
-								return null
-							},
-							async run() {
-								return { meta: { changes: 0 } }
-							},
-						}
-					},
-				}
-			},
-			async batch(statements: Array<{ query?: string }>) {
-				return await executePreparedD1Batch(statements)
-			},
-			async exec() {
-				return
-			},
-		} as unknown as D1Database,
-	} as Env
-	const handler = createAccountHandler(env)
-	const response = await handler.handler(
-		new RequestContext(
-			new Request('https://example.com/account', {
-				headers: { Cookie: cookie },
-			}),
-		),
-	)
+	await using store = await createTestDb()
+	await seedAccount(store, {
+		id: 7,
+		email: 'deleting@example.com',
+		username: 'deleting-user',
+		deletingAt: '2026-08-31 15:00:00',
+	})
 
-	expect(response.status).toBe(302)
-	expect(response.headers.get('Location')).toBe(
-		'https://example.com/login?redirectTo=%2Faccount',
-	)
-	const setCookie = response.headers.get('Set-Cookie') ?? ''
-	expect(setCookie).toContain('kody_session=')
-	expect(setCookie).toContain('Max-Age=0')
+	expect(
+		loginRedirectState(
+			await requestAccountPage(
+				createEnv(store.forUser(session.stableUserId).db),
+				cookie,
+			),
+		),
+	).toEqual(signedOutRedirect)
 })
 
 test('authenticated account SSR batches user/role and flag reads into two round trips', async () => {
 	setAuthSessionSecret(testCookieSecret)
 	const email = 'account@example.com'
 	const stableUserId = testStableUserIdFromEmail(email)
-	const session: AuthSession = {
-		stableUserId,
-		email,
-		rememberMe: false,
-	}
-	const cookie = await createAuthCookie(session, false)
-	const counts = { prepare: 0, batch: 0, batchSizes: [] as Array<number> }
-	const userRow = {
-		id: 7,
-		email,
-		username: 'account-user',
-		stable_user_id: stableUserId,
-	}
-	const env = {
-		COOKIE_SECRET: testCookieSecret,
-		FLAG_EXPOSURES: { writeDataPoint() {} },
-		APP_DB: {
-			prepare(query: string) {
-				counts.prepare += 1
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				const statement = {
-					query,
-					bind() {
-						return statement
-					},
-					async all() {
-						if (
-							normalizedQuery.startsWith('select') &&
-							normalizedQuery.includes('from "users"')
-						) {
-							return { results: [userRow], meta: { changes: 0 } }
-						}
-						if (normalizedQuery.includes('from user_roles ur')) {
-							return {
-								results: [
-									{
-										role_name: 'user',
-										action: 'read',
-										entity: 'user',
-										access: 'own',
-									},
-								],
-								meta: { changes: 0 },
-							}
-						}
-						if (
-							normalizedQuery.includes('from feature_flags') &&
-							!normalizedQuery.includes('where')
-						) {
-							return {
-								results: [
-									{
-										key: 'demo-indicator',
-										enabled: 1,
-										rollout_percent: null,
-									},
-								],
-								meta: { changes: 0 },
-							}
-						}
-						if (
-							normalizedQuery.includes('from feature_flag_user_overrides') &&
-							normalizedQuery.includes('where user_id = ?')
-						) {
-							return {
-								results: [
-									{
-										flag_key: 'compact-mcp-server-instructions',
-										enabled: 1,
-									},
-								],
-								meta: { changes: 0 },
-							}
-						}
-						return { results: [], meta: { changes: 0 } }
-					},
-					async first() {
-						return null
-					},
-					async run() {
-						return { meta: { changes: 0 } }
-					},
-				}
-				return statement
-			},
-			async batch(statements: Array<{ query?: string }>) {
-				counts.batch += 1
-				counts.batchSizes.push(statements.length)
-				return await executePreparedD1Batch(statements)
-			},
-			async exec() {
-				return
-			},
-		} as unknown as D1Database,
-	} as Env
+	const cookie = await createAuthCookie(
+		{ stableUserId, email, rememberMe: false },
+		false,
+	)
+	await using store = await createTestDb()
+	await seedAccount(store, { id: 7, email, username: 'account-user' })
+	await store.pg.exec(`
+		INSERT INTO user_roles (user_id, role_id) SELECT 7, id FROM roles WHERE name = 'user';
+		INSERT INTO feature_flags (key, enabled) VALUES ('demo-indicator', 1);
+		INSERT INTO feature_flag_user_overrides (flag_key, user_id, enabled)
+		VALUES ('compact-mcp-server-instructions', 7, 1);
+	`)
+	const { db, counts } = countQueries(store.forUser(stableUserId).db)
 
 	vi.mocked(renderAppPage).mockImplementation(async (input) => {
 		const loaded = await loadSessionInfo(input.request, input.env)
@@ -327,13 +223,7 @@ test('authenticated account SSR batches user/role and flag reads into two round 
 		})
 	})
 
-	const response = await createAccountHandler(env).handler(
-		new RequestContext(
-			new Request('https://example.com/account', {
-				headers: { Cookie: cookie },
-			}),
-		),
-	)
+	const response = await requestAccountPage(createEnv(db), cookie)
 	expect(response.status).toBe(200)
 	const body = (await response.json()) as {
 		session: {
@@ -346,7 +236,7 @@ test('authenticated account SSR batches user/role and flag reads into two round 
 	}
 	expect(body.session.username).toBe('account-user')
 	expect(body.session.roles).toEqual(['user'])
-	expect(body.session.permissions).toEqual(['read:user:own'])
+	expect(body.session.permissions).toContain('read:user:own')
 	expect(body.session.featureFlags).toEqual({
 		'demo-indicator': true,
 		'compact-mcp-server-instructions': true,

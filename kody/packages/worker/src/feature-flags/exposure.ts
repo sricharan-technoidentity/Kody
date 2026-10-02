@@ -18,7 +18,7 @@
  *   each exposure is a single non-blocking `writeDataPoint` call.
  * - Without it — or in local Wrangler dev, where the binding is a local
  *   emulation whose data the SQL API can never read — exposures are upserted
- *   into the D1 `feature_flag_exposure_rollups` table (one row per
+ *   into the relational `feature_flag_exposure_rollups` table (one row per
  *   flag/user/day/state) so the readout keeps working without Analytics
  *   Engine access.
  *
@@ -31,20 +31,21 @@ import {
 	recordsFeatureFlagExposureAtEvaluation,
 	type FeatureFlagKey,
 } from '#universal/feature-flags/registry.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { type FeatureFlagEvaluation } from './service.ts'
 
 export type FeatureFlagExposureEnv = {
 	FLAG_EXPOSURES?: AnalyticsEngineDataset
-	APP_DB?: D1Database
+	APP_DB?: SqlDatabase
 	WRANGLER_IS_LOCAL_DEV?: string
 }
 
 const exposureRollupUpsertStatement = `
 INSERT INTO feature_flag_exposure_rollups (
 	flag_key, user_id, day, enabled, source, exposure_count, updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+) VALUES (?, ?, ?, ?, ?, 1, ?)
 ON CONFLICT (flag_key, user_id, day, enabled, source) DO UPDATE SET
-	exposure_count = exposure_count + 1,
+	exposure_count = feature_flag_exposure_rollups.exposure_count + 1,
 	updated_at = excluded.updated_at
 `.trim()
 

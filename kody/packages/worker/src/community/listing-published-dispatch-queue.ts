@@ -2,8 +2,6 @@ import { CommunityListingPublishedDispatchCancelledError } from './errors.ts'
 import { type CommunityListingPublishedDispatchQueueMessage } from './listing-published-dispatch-queue-producer.ts'
 import { dispatchCommunityListingPublishedSubscriptionEvent } from './listing-published-package-subscriptions.ts'
 
-const communityListingPublishedDispatchRetryDelaySeconds = 30
-
 function parseCommunityListingPublishedDispatchQueueMessage(
 	body: unknown,
 ): CommunityListingPublishedDispatchQueueMessage | null {
@@ -26,41 +24,27 @@ function parseCommunityListingPublishedDispatchQueueMessage(
 	}
 }
 
-export async function handleCommunityListingPublishedDispatchQueue(
-	batch: MessageBatch<unknown>,
+/** One `community-listing-published-dispatch` message (a `QueueMessage` workflow). */
+export async function processCommunityListingPublishedDispatchMessage(
+	body: unknown,
 	env: Env,
-	_ctx: ExecutionContext,
-) {
-	for (const queueMessage of batch.messages) {
-		const parsed = parseCommunityListingPublishedDispatchQueueMessage(
-			queueMessage.body,
+): Promise<'ack' | 'retry'> {
+	const parsed = parseCommunityListingPublishedDispatchQueueMessage(body)
+	if (!parsed) return 'ack'
+	try {
+		await dispatchCommunityListingPublishedSubscriptionEvent({
+			env,
+			...parsed,
+		})
+		return 'ack'
+	} catch (error) {
+		if (error instanceof CommunityListingPublishedDispatchCancelledError) {
+			return 'ack'
+		}
+		console.error(
+			'community-listing-published-dispatch-queue-processing-failed',
+			{ ...parsed, error },
 		)
-		if (!parsed) {
-			queueMessage.ack()
-			continue
-		}
-		try {
-			await dispatchCommunityListingPublishedSubscriptionEvent({
-				env,
-				...parsed,
-			})
-			queueMessage.ack()
-		} catch (error) {
-			if (error instanceof CommunityListingPublishedDispatchCancelledError) {
-				queueMessage.ack()
-				continue
-			}
-			console.error(
-				'community-listing-published-dispatch-queue-processing-failed',
-				{
-					queueMessageId: queueMessage.id,
-					...parsed,
-					error,
-				},
-			)
-			queueMessage.retry({
-				delaySeconds: communityListingPublishedDispatchRetryDelaySeconds,
-			})
-		}
+		return 'retry'
 	}
 }

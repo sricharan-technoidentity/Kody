@@ -37,7 +37,7 @@ test('the layer boundaries forbid upward imports and never allow handler imports
 	expect(
 		findImportBoundaryViolation(
 			packageRegistryFile,
-			'#worker/vectorize/vector-ids.ts',
+			'#worker/search-index/vector-ids.ts',
 		),
 	).toBe(null)
 	expect(

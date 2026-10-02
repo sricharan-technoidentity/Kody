@@ -1,8 +1,9 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import {
+	createUserTestEnv,
+	pgQuery,
+} from '#worker/test-support/aws/user-test-env.ts'
 import {
 	persistIntegrationTokens,
 	persistUserOauthAppClientSecret,
@@ -37,17 +38,14 @@ const {
 	refreshIntegrationTokens,
 } = await import('./token-refresh.ts')
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
-		...createInMemoryUserMeterEnv().env,
-	} as Env
-	return { sqlite, env }
+/** The user's request env plus the operator db that writes platform apps. */
+async function createHarness(userId: string) {
+	const harness = await createUserTestEnv({ userId })
+	const admin = createPgDatabase({
+		connection: harness.pg,
+		role: 'kody_admin',
+	}) as unknown as D1Database
+	return { ...harness, admin, q: pgQuery(harness.pg) }
 }
 
 async function readAuthFailure(env: Env, userId: string, name: string) {
@@ -88,10 +86,11 @@ function stubTokenEndpoint(payload: Record<string, unknown>) {
 }
 
 test('platform-lane refresh uses the decrypted shared client secret and persists tokens', async () => {
-	const { env } = createHarness()
 	const userId = 'user-platform-refresh'
+	await using harness = await createHarness(userId)
+	const { env, q } = harness
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: harness.admin,
 		env,
 		app: {
 			slug: 'github',
@@ -227,8 +226,13 @@ test('platform-lane refresh uses the decrypted shared client secret and persists
 		mocks.dispatchIntegrationAuthSucceededSubscriptionEvents,
 	).not.toHaveBeenCalled()
 
+	// A second account gets its own scoped writer.
+	const otherEnv = {
+		...env,
+		APP_DB: harness.database.forUser('user-no-refresh').db,
+	} as unknown as Env
 	await upsertPlatformIntegration({
-		env,
+		env: otherEnv,
 		userId: 'user-no-refresh',
 		platformAppSlug: 'github',
 		scopes: [],
@@ -236,7 +240,7 @@ test('platform-lane refresh uses the decrypted shared client secret and persists
 	mocks.dispatchIntegrationAuthFailedSubscriptionEvents.mockClear()
 	await expect(
 		refreshIntegrationTokens({
-			env,
+			env: otherEnv,
 			userId: 'user-no-refresh',
 			name: 'github',
 		}),
@@ -260,19 +264,20 @@ test('platform-lane refresh uses the decrypted shared client secret and persists
 			}),
 		}),
 	)
-	expect(await readAuthFailure(env, 'user-no-refresh', 'github')).toMatchObject(
-		{
-			auth_failed_reason: 'missing_refresh_token',
-			auth_failed_reconnectable: 1,
-		},
-	)
+	expect(
+		await readAuthFailure(otherEnv, 'user-no-refresh', 'github'),
+	).toMatchObject({
+		auth_failed_reason: 'missing_refresh_token',
+		auth_failed_reconnectable: 1,
+	})
 })
 
 test('provider HTTP status classifies refresh failures as caller errors or Sentry-visible Errors', async () => {
-	const { env } = createHarness()
 	const userId = 'user-google-provider-status'
+	await using harness = await createHarness(userId)
+	const { env, q } = harness
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: harness.admin,
 		env,
 		app: {
 			slug: 'google',
@@ -409,8 +414,9 @@ test('provider HTTP status classifies refresh failures as caller errors or Sentr
 })
 
 test('user-lane refresh resolves the ciphertext client secret and enforces required hosts', async () => {
-	const { env } = createHarness()
 	const userId = 'user-lane-refresh'
+	await using harness = await createHarness(userId)
+	const { env, q } = harness
 	const googleConfig = {
 		name: 'google',
 		tokenUrl: 'https://oauth2.googleapis.com/token',
@@ -509,10 +515,11 @@ test('user-lane refresh resolves the ciphertext client secret and enforces requi
 })
 
 test('successful Google refresh persists userinfo email as account_label when missing', async () => {
-	const { env } = createHarness()
 	const userId = 'user-google-label'
+	await using harness = await createHarness(userId)
+	const { env, q } = harness
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: harness.admin,
 		env,
 		app: {
 			slug: 'google',
@@ -598,10 +605,11 @@ test('successful Google refresh persists userinfo email as account_label when mi
 test('in-flight refreshes of the same connection share one provider POST and one succeeded emit', async () => {
 	mocks.dispatchIntegrationAuthSucceededSubscriptionEvents.mockClear()
 	mocks.dispatchIntegrationAuthFailedSubscriptionEvents.mockClear()
-	const { env } = createHarness()
 	const userId = 'user-coalesce-refresh'
+	await using harness = await createHarness(userId)
+	const { env, q } = harness
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: harness.admin,
 		env,
 		app: {
 			slug: 'github',

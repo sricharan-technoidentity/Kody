@@ -1,5 +1,15 @@
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { normalizeStableUserId, resolveUserStableId } from '#worker/user-id.ts'
+
+/**
+ * Platform accounts are public package scopes, but `users` rows hold
+ * credentials; on Postgres every role reads them through the
+ * `kody_platform_account*` definers instead of owner RLS.
+ */
+function isPostgres(db: SqlDatabase) {
+	return 'dialect' in db && db.dialect === 'postgres'
+}
 
 function isUsersPlatformSchemaUnavailable(error: unknown) {
 	const message = getErrorMessage(error)
@@ -54,7 +64,9 @@ export async function listPlatformAccountUsernames(
 	try {
 		const result = await db
 			.prepare(
-				`SELECT username FROM users WHERE account_type = 'platform' ORDER BY username ASC`,
+				isPostgres(db)
+					? `SELECT username FROM kody_platform_account_usernames()`
+					: `SELECT username FROM users WHERE account_type = 'platform' ORDER BY username ASC`,
 			)
 			.all<{ username: string }>()
 		return (result.results ?? []).map((row) => row.username)
@@ -73,7 +85,10 @@ export async function getPlatformAccountByUsername(
 	try {
 		const row = await db
 			.prepare(
-				`SELECT id, username, email, account_type, stable_user_id
+				isPostgres(db)
+					? `SELECT id, username, email, 'platform' AS account_type, stable_user_id
+					FROM kody_platform_account(?, NULL)`
+					: `SELECT id, username, email, account_type, stable_user_id
 			FROM users
 			WHERE username = ?
 			LIMIT 1`,
@@ -107,7 +122,11 @@ export async function isPlatformAccountStableUserId(
 	if (!trimmed) return false
 	try {
 		const row = await db
-			.prepare(`SELECT account_type FROM users WHERE stable_user_id = ?`)
+			.prepare(
+				isPostgres(db)
+					? `SELECT 'platform' AS account_type FROM kody_platform_account(NULL, ?)`
+					: `SELECT account_type FROM users WHERE stable_user_id = ?`,
+			)
 			.bind(trimmed)
 			.first<{ account_type: string }>()
 		return row?.account_type === 'platform'

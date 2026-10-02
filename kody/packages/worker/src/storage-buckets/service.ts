@@ -1,3 +1,4 @@
+import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { listRepoSessionDueOwnersPage } from '#worker/repo/repo-session-due-owners.ts'
 import { repoSessionIndexRpc } from '#worker/repo/repo-session-index-client.ts'
 import {
@@ -228,8 +229,9 @@ export async function registerMissingRepoSessionStorageBuckets(input: {
 		}).listByUser({ ownerId: owner.userId })
 		for (const session of sessions) {
 			if (session.status !== 'active') continue
-			const result = await input.db
-				.prepare(
+			// The sweep lists as the operator; each row is written by its owner.
+			const result = await getAccountEnv(input.env, session.user_id)
+				.APP_DB.prepare(
 					`INSERT INTO user_storage_buckets (
 						user_id, storage_id, kind, created_at, last_seen_at
 					) VALUES (?, ?, 'repo_session', ?, ?)
@@ -332,7 +334,7 @@ export async function listStorageBucketsMissingEstimates(input: {
 > {
 	const result = await input.db
 		.prepare(
-			`SELECT user_id AS userId, storage_id AS storageId, kind
+			`SELECT user_id AS "userId", storage_id AS "storageId", kind
 			FROM user_storage_buckets
 			WHERE estimated_bytes IS NULL
 			ORDER BY last_seen_at DESC, user_id ASC, storage_id ASC
@@ -453,7 +455,7 @@ export async function listUserStorageBucketIds(input: {
 	userId: string
 }): Promise<Array<string>> {
 	const result = await input.env.APP_DB.prepare(
-		`SELECT storage_id AS storageId
+		`SELECT storage_id AS "storageId"
 		FROM user_storage_buckets
 		WHERE user_id = ? AND kind <> 'repo_session'
 		ORDER BY storage_id ASC`,
@@ -479,7 +481,7 @@ export async function listUserStorageBucketEstimates(input: {
 	}>
 > {
 	const result = await input.env.APP_DB.prepare(
-		`SELECT storage_id AS storageId, kind, estimated_bytes AS estimatedBytes
+		`SELECT storage_id AS "storageId", kind, estimated_bytes AS "estimatedBytes"
 		FROM user_storage_buckets
 		WHERE user_id = ?
 		ORDER BY storage_id ASC`,
@@ -505,7 +507,7 @@ export async function listPlatformStorageBuckets(input: {
 }): Promise<Array<{ userId: string; storageId: string }>> {
 	const result = await input.db
 		.prepare(
-			`SELECT user_id AS userId, storage_id AS storageId
+			`SELECT user_id AS "userId", storage_id AS "storageId"
 			FROM user_storage_buckets
 			WHERE kind <> 'repo_session'
 			ORDER BY user_id ASC, storage_id ASC`,

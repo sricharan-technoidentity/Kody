@@ -1665,6 +1665,7 @@ export async function runDueJobsForUser(input: {
 	userId: string
 	now?: Date
 	waitUntil?: (promise: Promise<unknown>) => void
+	jobId?: string
 }) {
 	return await withAccountWriteLease({
 		db: input.env.APP_DB,
@@ -1677,11 +1678,18 @@ export async function runDueJobsForUser(input: {
 				userId: input.userId,
 				nowIso,
 			})
-			const dueRows = await jobsData(input.env).listDueJobs({
-				userId: input.userId,
-				nowIso,
-			})
-			if (dueRows.length === 0) {
+			const selectedRows = input.jobId
+				? [
+						await jobsData(input.env).getJobById({
+							userId: input.userId,
+							jobId: input.jobId,
+						}),
+					].filter((row): row is JobRow => row !== null)
+				: await jobsData(input.env).listDueJobs({
+						userId: input.userId,
+						nowIso,
+					})
+			if (selectedRows.length === 0) {
 				logJobSchedulerEvent({
 					event: 'run_due_jobs_empty',
 					userId: input.userId,
@@ -1699,7 +1707,7 @@ export async function runDueJobsForUser(input: {
 			let successCount = 0
 			let errorCount = 0
 			const jobOutcomes: Array<SchedulerJobOutcomeLog> = []
-			for (const dueRow of dueRows) {
+			for (const dueRow of selectedRows) {
 				const claimToken = crypto.randomUUID()
 				const claimNow = input.now ?? new Date()
 				const row = await jobsData(input.env).claimJob({

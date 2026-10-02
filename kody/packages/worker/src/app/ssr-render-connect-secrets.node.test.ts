@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import {
 	createAuthCookie,
@@ -6,82 +7,33 @@ import {
 } from '#app/auth-session.ts'
 import { resetDataCacheForTests } from '#app/data-cache.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testOidcSigningEnv } from '#worker/test-support/oidc-signing-env.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createUserTestDb() {
-	function createStatement(query: string, params: Array<unknown> = []) {
-		const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-		const executeAll = async () => {
-			if (
-				normalizedQuery.startsWith('select') &&
-				normalizedQuery.includes('from "users"') &&
-				/"stable_user_id"\s*=/.test(normalizedQuery)
-			) {
-				if (params[0] === testStableUserIdFromEmail('user@example.com')) {
-					return {
-						results: [
-							{
-								id: 1,
-								email: 'user@example.com',
-								username: 'account-user',
-								password_hash: 'unused',
-								stable_user_id: testStableUserIdFromEmail('user@example.com'),
-								created_at: new Date(0).toISOString(),
-								updated_at: new Date(0).toISOString(),
-							},
-						],
-						meta: { changes: 0, last_row_id: 0 },
-					}
-				}
-			}
-			return {
-				results: [],
-				meta: { changes: 0, last_row_id: 0 },
-			}
-		}
-		return {
-			query,
-			bind(...nextParams: Array<unknown>) {
-				return createStatement(query, nextParams)
-			},
-			async all() {
-				return executeAll()
-			},
-			async first() {
-				const result = await executeAll()
-				return result.results[0] ?? null
-			},
-			async run() {
-				return { meta: { changes: 0, last_row_id: 0 } }
-			},
-		}
-	}
+const userStableId = testStableUserIdFromEmail('user@example.com')
 
-	return {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
+async function createUserTestDb() {
+	const store = await createTestDb()
+	await store.pg.query(
+		`INSERT INTO users (id, email, username, password_hash, stable_user_id)
+		 VALUES (1, 'user@example.com', 'account-user', 'unused', $1)`,
+		[userStableId],
+	)
+	return store
 }
 
 test('renderAppPage server-renders the dedicated connect-secrets approval page', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
+	await using store = await createUserTestDb()
 	const env = {
 		COOKIE_SECRET: testCookieSecret,
-		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		SECRET_KMS: testSecretKms,
 		...testOidcSigningEnv,
-		APP_DB: createUserTestDb(),
+		APP_DB: store.forUser(userStableId).db,
 		BUNDLE_ARTIFACTS_KV: {},
 		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},
@@ -153,11 +105,12 @@ test('renderAppPage server-renders the dedicated connect-secrets approval page',
 test('renderAppPage flags invalid connect-secrets hosts instead of offering Allow all', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
+	await using store = await createUserTestDb()
 	const env = {
 		COOKIE_SECRET: testCookieSecret,
-		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		SECRET_KMS: testSecretKms,
 		...testOidcSigningEnv,
-		APP_DB: createUserTestDb(),
+		APP_DB: store.forUser(userStableId).db,
 		BUNDLE_ARTIFACTS_KV: {},
 		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},

@@ -1,5 +1,5 @@
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { isoBase64URL, isoCBOR } from '@simplewebauthn/server/helpers'
 import { expect, test } from 'vitest'
 import {
 	createAuthCookie,
@@ -12,100 +12,121 @@ import {
 	createWebauthnRegistrationHandler,
 } from '#app/handlers/webauthn.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
-import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function applyMigrations(db: DatabaseSync) {
-	const migrationsDir = new URL('../../../migrations/', import.meta.url)
-	applyAllMigrations(db, migrationsDir)
-}
-
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyMigrations(sqlite)
-	return {
-		sqlite,
-		db: createD1FromSqlite(sqlite),
-	}
-}
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
 
 async function seedUser(
-	sqlite: DatabaseSync,
+	store: TestDb,
 	input: {
 		id: number
 		email: string
 		username: string
 	},
 ) {
-	const passwordHash = await createPasswordHash('test-password')
 	const stableUserId = await createStableUserIdFromEmail(input.email)
-	sqlite.exec(`
-		INSERT INTO users (
-			id,
-			username,
-			email,
-			stable_user_id,
-			password_hash,
-			email_verified_at
-		) VALUES (
-			${input.id},
-			${quoteSqlString(input.username)},
-			${quoteSqlString(input.email)},
-			${quoteSqlString(stableUserId)},
-			${quoteSqlString(passwordHash)},
-			CURRENT_TIMESTAMP
-		);
-	`)
+	await store.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
+		 VALUES ($1, $2, $3, $4, 'test-password-hash', '2026-01-01T00:00:00.000Z')`,
+		[input.id, input.username, input.email, stableUserId],
+	)
+	return stableUserId
 }
 
-function seedPasskey(
-	sqlite: DatabaseSync,
+async function seedPasskey(
+	store: TestDb,
 	input: {
 		id: string
 		userId: number
 		name?: string
 		aaguid?: string
 		lastUsedAt?: string | null
+		publicKey?: string
 	},
 ) {
-	const name = input.name ?? ''
-	const aaguid = input.aaguid ?? '00000000-0000-0000-0000-000000000000'
-	const lastUsedAt =
-		input.lastUsedAt === undefined
-			? 'NULL'
-			: input.lastUsedAt === null
-				? 'NULL'
-				: quoteSqlString(input.lastUsedAt)
-	sqlite.exec(`
-		INSERT INTO passkeys (
+	await store.pg.query(
+		`INSERT INTO passkeys (
 			id, aaguid, public_key, user_id, webauthn_user_handle, counter,
 			device_type, backed_up, transports, name, last_used_at
-		) VALUES (
-			${quoteSqlString(input.id)},
-			${quoteSqlString(aaguid)},
-			'cHVibGljLWtleQ',
-			${input.userId},
-			'd2ViYXV0aG4tdXNlcg',
-			0,
-			'multiDevice',
-			1,
-			'internal',
-			${quoteSqlString(name)},
-			${lastUsedAt}
-		);
-	`)
+		) VALUES ($1, $2, $3, $4, 'd2ViYXV0aG4tdXNlcg', 0, 'multiDevice', 1, 'internal', $5, $6)`,
+		[
+			input.id,
+			input.aaguid ?? '00000000-0000-0000-0000-000000000000',
+			input.publicKey ?? 'cHVibGljLWtleQ',
+			input.userId,
+			input.name ?? '',
+			input.lastUsedAt ?? null,
+		],
+	)
 }
 
-function createAppEnv(db: D1Database) {
+/** A software P-256 authenticator that signs WebAuthn assertions for example.com. */
+function createTestAuthenticator() {
+	const { privateKey, publicKey } = generateKeyPairSync('ec', {
+		namedCurve: 'P-256',
+	})
+	const jwk = publicKey.export({ format: 'jwk' })
+	const coseKey = isoCBOR.encode(
+		new Map<number, number | Uint8Array>([
+			[1, 2],
+			[3, -7],
+			[-1, 1],
+			[-2, isoBase64URL.toBuffer(jwk.x!)],
+			[-3, isoBase64URL.toBuffer(jwk.y!)],
+		]),
+	)
+	return {
+		publicKey: isoBase64URL.fromBuffer(coseKey),
+		assert(input: { id: string; challenge: string; counter: number }) {
+			const clientDataJSON = Buffer.from(
+				JSON.stringify({
+					type: 'webauthn.get',
+					challenge: input.challenge,
+					origin: 'http://example.com',
+				}),
+			)
+			const counter = Buffer.alloc(4)
+			counter.writeUInt32BE(input.counter)
+			// rpIdHash, flags (user present + user verified), sign counter.
+			const authenticatorData = Buffer.concat([
+				createHash('sha256').update('example.com').digest(),
+				Buffer.from([0x05]),
+				counter,
+			])
+			const signature = sign(
+				'sha256',
+				Buffer.concat([
+					authenticatorData,
+					createHash('sha256').update(clientDataJSON).digest(),
+				]),
+				privateKey,
+			)
+			return {
+				id: input.id,
+				rawId: input.id,
+				type: 'public-key',
+				clientExtensionResults: {},
+				response: {
+					clientDataJSON: clientDataJSON.toString('base64url'),
+					authenticatorData: authenticatorData.toString('base64url'),
+					signature: signature.toString('base64url'),
+				},
+			}
+		},
+	}
+}
+
+function createAppEnv(db: PgDatabase, overrides: Record<string, unknown> = {}) {
 	return {
 		APP_DB: db,
 		APP_BASE_URL: 'http://example.com',
 		COOKIE_SECRET: testCookieSecret,
 		SENTRY_ENVIRONMENT: 'test',
+		...overrides,
 	} as unknown as Parameters<typeof createAccountPasskeysApiHandler>[0]
 }
 
@@ -136,23 +157,33 @@ const userOneSession: AuthSession = {
 
 test('account passkeys API lists labels/dates, renames owned keys, and deletes while ignoring other users', async () => {
 	initTestSecrets()
-	const { sqlite, db } = createMigratedDb()
-	await seedUser(sqlite, { id: 1, email: 'one@example.com', username: 'one' })
-	await seedUser(sqlite, { id: 2, email: 'two@example.com', username: 'two' })
-	seedPasskey(sqlite, {
+	await using store = await createTestDb()
+	const userOneId = await seedUser(store, {
+		id: 1,
+		email: 'one@example.com',
+		username: 'one',
+	})
+	await seedUser(store, { id: 2, email: 'two@example.com', username: 'two' })
+	await seedPasskey(store, {
 		id: 'passkey-user-1',
 		userId: 1,
 		aaguid: 'ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4',
 		lastUsedAt: '2026-07-01 12:00:00',
 	})
-	seedPasskey(sqlite, {
+	await seedPasskey(store, {
 		id: 'passkey-user-1b',
 		userId: 1,
 		name: 'Work laptop',
 	})
-	seedPasskey(sqlite, { id: 'passkey-user-2', userId: 2, name: 'Other user' })
+	await seedPasskey(store, {
+		id: 'passkey-user-2',
+		userId: 2,
+		name: 'Other user',
+	})
 
-	const handler = createAccountPasskeysApiHandler(createAppEnv(db))
+	const handler = createAccountPasskeysApiHandler(
+		createAppEnv(store.forUser(userOneId).db),
+	)
 	const listResponse = await runHandler(
 		handler,
 		new Request('http://example.com/account/passkeys.json', {
@@ -206,10 +237,12 @@ test('account passkeys API lists labels/dates, renames owned keys, and deletes w
 	)
 	expect(crossUserRename.status).toBe(404)
 	expect(
-		sqlite
-			.prepare(`SELECT name FROM passkeys WHERE id = 'passkey-user-2'`)
-			.get(),
-	).toEqual({ name: 'Other user' })
+		(
+			await store.pg.query(
+				`SELECT name FROM passkeys WHERE id = 'passkey-user-2'`,
+			)
+		).rows,
+	).toEqual([{ name: 'Other user' }])
 
 	const ownRename = await runHandler(
 		handler,
@@ -267,8 +300,8 @@ test('account passkeys API lists labels/dates, renames owned keys, and deletes w
 	)
 	expect(crossUserDelete.status).toBe(404)
 	expect(
-		sqlite.prepare(`SELECT COUNT(*) AS count FROM passkeys`).get(),
-	).toEqual({ count: 3 })
+		(await store.pg.query(`SELECT COUNT(*)::int AS count FROM passkeys`)).rows,
+	).toEqual([{ count: 3 }])
 
 	const ownDelete = await runHandler(
 		handler,
@@ -294,17 +327,24 @@ test('account passkeys API lists labels/dates, renames owned keys, and deletes w
 
 test('registration options require authentication and exclude existing credentials', async () => {
 	initTestSecrets()
-	const { sqlite, db } = createMigratedDb()
-	const handler = createWebauthnRegistrationHandler(createAppEnv(db))
-
+	await using store = await createTestDb()
 	const unauthenticated = await runHandler(
-		handler,
+		createWebauthnRegistrationHandler(createAppEnv(store.forUser().db)),
 		new Request('http://example.com/webauthn/registration'),
 	)
 	expect(unauthenticated.status).toBe(401)
 
-	await seedUser(sqlite, { id: 1, email: 'one@example.com', username: 'one' })
-	seedPasskey(sqlite, { id: 'passkey-user-1', userId: 1 })
+	const userOneId = await seedUser(store, {
+		id: 1,
+		email: 'one@example.com',
+		username: 'one',
+	})
+	await seedUser(store, { id: 2, email: 'two@example.com', username: 'two' })
+	await seedPasskey(store, { id: 'passkey-user-1', userId: 1 })
+	await seedPasskey(store, { id: 'passkey-user-2', userId: 2 })
+	const handler = createWebauthnRegistrationHandler(
+		createAppEnv(store.forUser(userOneId).db),
+	)
 
 	const response = await runHandler(
 		handler,
@@ -332,38 +372,129 @@ test('registration options require authentication and exclude existing credentia
 	)
 })
 
-test('authentication issues challenge options and rejects unknown passkeys', async () => {
+test('signed-out passkey sign-in resolves the credential owner and requires their key', async () => {
 	initTestSecrets()
-	const { db } = createMigratedDb()
-	const handler = createWebauthnAuthenticationHandler(createAppEnv(db))
-	const optionsResponse = await runHandler(
-		handler,
-		new Request('http://example.com/webauthn/authentication'),
-	)
-	expect(optionsResponse.status).toBe(200)
-	const optionsPayload = (await optionsResponse.json()) as {
-		ok: boolean
-		options: { challenge: string }
-	}
-	expect(optionsPayload.ok).toBe(true)
-	expect(optionsPayload.options.challenge.length).toBeGreaterThan(0)
-	const challengeCookie =
-		optionsResponse.headers.get('Set-Cookie')?.split(';')[0] ?? ''
-	expect(challengeCookie).toContain('kody_webauthn_challenge=')
-
-	const response = await runHandler(
-		handler,
-		new Request('http://example.com/webauthn/authentication', {
-			method: 'POST',
-			headers: {
-				Cookie: challengeCookie,
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				response: { id: 'unknown-passkey', rawId: 'unknown-passkey' },
-			}),
+	await using store = await createTestDb()
+	const ownerId = await seedUser(store, {
+		id: 1,
+		email: 'one@example.com',
+		username: 'one',
+	})
+	await seedUser(store, { id: 2, email: 'two@example.com', username: 'two' })
+	const authenticator = createTestAuthenticator()
+	const credentialId = isoBase64URL.fromUTF8String('passkey-user-1')
+	await seedPasskey(store, {
+		id: credentialId,
+		userId: 1,
+		publicKey: authenticator.publicKey,
+	})
+	await seedPasskey(store, { id: 'passkey-user-2', userId: 2 })
+	// Pre-auth writer: no account context, so RLS shows it no passkeys.
+	const handler = createWebauthnAuthenticationHandler(
+		createAppEnv(store.forUser().db, {
+			APP_DB_FOR_USER: (userId: string) => store.forUser(userId).db,
 		}),
 	)
-	expect(response.status).toBe(401)
-	expect(await response.json()).toMatchObject({ ok: false })
+
+	async function startCeremony() {
+		const response = await runHandler(
+			handler,
+			new Request('http://example.com/webauthn/authentication'),
+		)
+		expect(response.status).toBe(200)
+		const payload = (await response.json()) as {
+			ok: boolean
+			options: { challenge: string }
+		}
+		expect(payload.ok).toBe(true)
+		expect(payload.options.challenge.length).toBeGreaterThan(0)
+		const cookie = response.headers.get('Set-Cookie')?.split(';')[0] ?? ''
+		expect(cookie).toContain('kody_webauthn_challenge=')
+		return { challenge: payload.options.challenge, cookie }
+	}
+	function submit(cookie: string, response: unknown) {
+		return runHandler(
+			handler,
+			new Request('http://example.com/webauthn/authentication', {
+				method: 'POST',
+				headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+				body: JSON.stringify({ response }),
+			}),
+		)
+	}
+
+	const unknown = await submit((await startCeremony()).cookie, {
+		id: 'unknown-passkey',
+		rawId: 'unknown-passkey',
+	})
+	expect(unknown.status).toBe(401)
+	expect(await unknown.json()).toMatchObject({
+		ok: false,
+		error: 'Passkey not recognized.',
+	})
+
+	await expect(
+		store
+			.forUser()
+			.reader.prepare(`SELECT kody_passkey_owner(?) AS owner`)
+			.bind(credentialId)
+			.first(),
+	).rejects.toThrow(/permission denied/)
+
+	// Knowing the credential id is not enough: another key's signature fails.
+	const forged = await startCeremony()
+	const forgedResponse = await submit(
+		forged.cookie,
+		createTestAuthenticator().assert({
+			id: credentialId,
+			challenge: forged.challenge,
+			counter: 1,
+		}),
+	)
+	expect(forgedResponse.status).toBe(401)
+	expect(await forgedResponse.json()).toMatchObject({
+		ok: false,
+		error: 'Passkey sign-in failed.',
+	})
+
+	const ceremony = await startCeremony()
+	const response = await submit(
+		ceremony.cookie,
+		authenticator.assert({
+			id: credentialId,
+			challenge: ceremony.challenge,
+			counter: 1,
+		}),
+	)
+	expect(response.status).toBe(200)
+	expect(await response.json()).toEqual({ ok: true })
+	expect(response.headers.getSetCookie()).toEqual(
+		expect.arrayContaining([expect.stringMatching(/^kody_session=[^;]+/)]),
+	)
+	expect(
+		(
+			await store.pg.query<{
+				id: string
+				counter: number
+				last_used_at: string | null
+			}>(
+				`SELECT id, counter::int AS counter, last_used_at FROM passkeys ORDER BY user_id`,
+			)
+		).rows,
+	).toEqual([
+		{
+			id: credentialId,
+			counter: 1,
+			last_used_at: expect.stringMatching(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/),
+		},
+		{ id: 'passkey-user-2', counter: 0, last_used_at: null },
+	])
+	expect(
+		(
+			await store.pg.query(
+				`SELECT last_active_at IS NOT NULL AS active FROM users WHERE stable_user_id = $1`,
+				[ownerId],
+			)
+		).rows,
+	).toEqual([{ active: true }])
 })

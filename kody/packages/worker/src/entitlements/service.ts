@@ -39,8 +39,6 @@ import {
 import {
 	isDailyEntitlementResource,
 	type DailyEntitlementResource,
-} from './user-meter-do.ts'
-import {
 	userMeterNamespace,
 	userMeterRpc,
 	type UserMeterEnv,
@@ -49,7 +47,7 @@ import {
 /** Env surface for authoritative entitlement usage readers. */
 export type EntitlementUsageEnv = UserMeterEnv &
 	RepoSessionIndexEnv &
-	Pick<Env, 'RUN_LOG' | 'MAILBOX' | 'JOBS'>
+	Pick<Env, 'RUN_STATE' | 'MAILBOX' | 'JOBS'>
 
 const stableUserIdPattern = /^[a-f0-9]{64}$/i
 
@@ -615,7 +613,7 @@ export function estimateEntitlementStorageSqlWriteBytes(input: {
 
 function textBytesExpression(columns: ReadonlyArray<string>) {
 	return columns
-		.map((column) => `length(CAST(COALESCE(${column}, '') AS BLOB))`)
+		.map((column) => `octet_length(COALESCE(${column}, ''))`)
 		.join(' + ')
 }
 
@@ -871,7 +869,7 @@ export async function listUsersForD1StorageReconciliation(input: {
 	const lastUserId = cursorRow?.position ?? ''
 	const page = await input.db
 		.prepare(
-			`SELECT stable_user_id AS userId
+			`SELECT stable_user_id AS "userId"
 			FROM users
 			WHERE stable_user_id > ?
 			ORDER BY stable_user_id ASC
@@ -884,7 +882,7 @@ export async function listUsersForD1StorageReconciliation(input: {
 	// Tail reached: wrap to the start of the keyset for the next full sweep.
 	const wrapped = await input.db
 		.prepare(
-			`SELECT stable_user_id AS userId
+			`SELECT stable_user_id AS "userId"
 			FROM users
 			ORDER BY stable_user_id ASC
 			LIMIT ?`,
@@ -1101,7 +1099,7 @@ const storageBytesBootstrapMaxAttempts = 2
  * `getCurrent` is a check-only path for StorageRunner bucket totals and does
  * not reserve in UserMeter; `env` is not required on that path.
  *
- * The `env` / `USER_METER` binding is required for the DO reserve path and
+ * The `env` / `USER_METERS` binding is required for the DO reserve path and
  * throws immediately when absent — failing closed for real users.
  */
 export async function assertWithinStorageBytesEntitlement(input: {
@@ -1128,10 +1126,10 @@ export async function assertWithinStorageBytesEntitlement(input: {
 		return
 	}
 
-	// DO-authoritative reserve path: env.USER_METER is required.
+	// DO-authoritative reserve path: env.USER_METERS is required.
 	if (!input.env || !userMeterNamespace(input.env)) {
 		throw new Error(
-			'assertWithinStorageBytesEntitlement requires env.USER_METER for the atomic reserve path.',
+			'assertWithinStorageBytesEntitlement requires env.USER_METERS for the atomic reserve path.',
 		)
 	}
 
@@ -1279,7 +1277,7 @@ export async function assertWithinEntitlement(
 
 export type ConsumeDailyEntitlementInput = {
 	db: D1Database
-	/** Must expose `USER_METER` (sole daily counter authority). */
+	/** Must expose `USER_METERS` (sole daily counter authority). */
 	env: UserMeterEnv
 	userId: string
 	email: string | null | undefined

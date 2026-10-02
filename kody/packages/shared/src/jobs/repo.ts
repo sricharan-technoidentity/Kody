@@ -808,7 +808,7 @@ export async function listJobStorageIdRowsForUser(
 ): Promise<Array<string>> {
 	const { results } = await db
 		.prepare(
-			`SELECT storage_id AS storageId FROM jobs
+			`SELECT storage_id AS "storageId" FROM jobs
 			WHERE user_id = ? AND storage_id IS NOT NULL`,
 		)
 		.bind(userId)
@@ -825,7 +825,7 @@ export async function listAllJobStorageOwnerRows(
 ): Promise<Array<{ userId: string; storageId: string }>> {
 	const { results } = await db
 		.prepare(
-			`SELECT user_id AS userId, storage_id AS storageId
+			`SELECT user_id AS "userId", storage_id AS "storageId"
 			FROM jobs WHERE storage_id IS NOT NULL`,
 		)
 		.all<{ userId: string; storageId: string }>()

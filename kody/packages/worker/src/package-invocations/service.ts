@@ -22,6 +22,7 @@ import {
 import { type PackageEventsDispatchQueueMessage } from '#worker/package-events/dispatch-queue-producer.ts'
 import {
 	createPackageEventToolsWithToolFactories,
+	deliverPackageEventToSubscriberWithToolFactories,
 	deliverPackageEventWithToolFactories,
 	invokePackageSubscriptionWithToolFactories,
 } from './subscription-dispatch.ts'
@@ -122,6 +123,7 @@ export async function invokePackageExport(input: {
 	})
 }
 
+/** Inline delivery to every subscriber (no Temporal binding). */
 export async function deliverPackageEvent(input: {
 	env: Env
 	baseUrl: string
@@ -129,6 +131,20 @@ export async function deliverPackageEvent(input: {
 	waitUntil?: (promise: Promise<unknown>) => void
 }) {
 	return await deliverPackageEventWithToolFactories({
+		...input,
+		toolFactories: packageRuntimeToolFactories,
+	})
+}
+
+export async function deliverPackageEventToSubscriber(input: {
+	env: Env
+	baseUrl: string
+	message: PackageEventsDispatchQueueMessage
+	savedPackage: SavedPackageRecord
+	handler: string
+	waitUntil?: (promise: Promise<unknown>) => void
+}) {
+	return await deliverPackageEventToSubscriberWithToolFactories({
 		...input,
 		toolFactories: packageRuntimeToolFactories,
 	})

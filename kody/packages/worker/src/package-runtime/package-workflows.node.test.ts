@@ -1,4 +1,8 @@
-import { NonRetryableError } from 'cloudflare:workflows'
+import { DynamicCallableWorkflowBase } from './package-workflows-test-harness.ts'
+vi.mock('#worker/temporal/package-workflow.ts', () => ({
+	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
+}))
+import { ApplicationFailure } from '@temporalio/common'
 import { expect, test, vi } from 'vitest'
 import {
 	AccountSuspendedError,
@@ -7,7 +11,6 @@ import {
 import {} from '#worker/package-runtime/workflow-statuses.ts'
 import { type WorkflowProjectionUpsertInput } from '#worker/run-records/service.ts'
 import {
-	DynamicCallableWorkflowBase,
 	createDynamicCallableWorkflow,
 	dynamicCallableWorkflowsBindingName,
 	workflowExecutorTimeoutMs,
@@ -119,7 +122,7 @@ test('createDynamicCallableWorkflow queues inline code without package context a
 	const created = await createDynamicCallableWorkflow({
 		env: {
 			APP_DB: db,
-			DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+			TEMPORAL: binding.workflow,
 			RUN_LOG: {} as DurableObjectNamespace,
 		} as Env,
 		userId: 'user-1',
@@ -134,7 +137,7 @@ test('createDynamicCallableWorkflow queues inline code without package context a
 
 	expect(created).toMatchObject({
 		ok: true,
-		id: expect.stringMatching(/^dynwf-/),
+		id: 'user-1:wf:inline-key',
 		source_type: 'inline',
 		workflow_name: 'inline-code',
 		export_name: null,
@@ -174,7 +177,7 @@ test('createDynamicCallableWorkflow queues inline code without package context a
 		createDynamicCallableWorkflow({
 			env: {
 				APP_DB: statusFailureDb,
-				DYNAMIC_CALLABLE_WORKFLOWS: statusFailureBinding.workflow,
+				TEMPORAL: statusFailureBinding.workflow,
 				RUN_LOG: {} as DurableObjectNamespace,
 			} as Env,
 			userId: 'user-1',
@@ -201,7 +204,7 @@ test('DynamicCallableWorkflowBase executes queued inline code and records comple
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	vi.useFakeTimers()
@@ -305,7 +308,7 @@ test('inline workflow sandbox failures throw UserCodeError', async () => {
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -388,7 +391,7 @@ test('inline workflow Durable Object isolate resets are not UserCodeError', asyn
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -443,7 +446,7 @@ test('package-created inline workflows retain package secret authorization conte
 	const binding = createStatefulWorkflowBinding()
 	const env = {
 		APP_DB: createWorkflowRunsDatabase(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const packageContext = {
@@ -543,7 +546,7 @@ test('DynamicCallableWorkflowBase marks package export error responses as workfl
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -617,7 +620,7 @@ test('suspended owners fail inline and package workflow steps once without retri
 	for (const body of bodies) {
 		runRecordMocks.resetProjections()
 		const binding = createStatefulWorkflowBinding()
-		env.DYNAMIC_CALLABLE_WORKFLOWS = binding.workflow
+		env.TEMPORAL = binding.workflow
 		const created = await createDynamicCallableWorkflow({
 			env,
 			userId: 'user-1',
@@ -660,8 +663,8 @@ test('suspended owners fail inline and package workflow steps once without retri
 			),
 		).rejects.toSatisfy(
 			(error: unknown) =>
-				error instanceof NonRetryableError &&
-				error.name === 'AccountSuspendedError' &&
+				error instanceof ApplicationFailure &&
+				error.type === 'AccountSuspendedError' &&
 				error.message === accountSuspendedMessage,
 		)
 		expect(invocationMocks.runModuleWithRegistry).not.toHaveBeenCalled()
@@ -688,7 +691,7 @@ test('DynamicCallableWorkflowBase rejects package export redirect responses', as
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -759,7 +762,7 @@ test('package workflow records exactly one workflow run with workflowId', async 
 	const binding = createStatefulWorkflowBinding()
 	const env = {
 		APP_DB: createWorkflowRunsDatabase(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -833,7 +836,7 @@ test('inline workflow records exactly one workflow run with workflowId', async (
 	const binding = createStatefulWorkflowBinding()
 	const env = {
 		APP_DB: createWorkflowRunsDatabase(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -927,7 +930,7 @@ test('package workflow sandbox and 4xx failures throw UserCodeError', async () =
 		const binding = createStatefulWorkflowBinding()
 		const env = {
 			APP_DB: createWorkflowRunsDatabase(),
-			DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+			TEMPORAL: binding.workflow,
 			APP_BASE_URL: 'https://app.example.com',
 		} as Env
 		const created = await createDynamicCallableWorkflow({
@@ -1030,7 +1033,7 @@ test('package workflow infrastructure failures are not UserCodeError', async () 
 		const binding = createStatefulWorkflowBinding()
 		const env = {
 			APP_DB: createWorkflowRunsDatabase(),
-			DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+			TEMPORAL: binding.workflow,
 			APP_BASE_URL: 'https://app.example.com',
 		} as Env
 		const created = await createDynamicCallableWorkflow({

@@ -97,8 +97,6 @@ test('DO PITR maintenance route fails closed without its shared recovery secret'
 
 test('DO PITR maintenance route targets exact user-scoped object names and round-trips bookmarks', async () => {
 	const mailbox = createNamespace()
-	const runLog = createNamespace()
-	const userMeter = createNamespace()
 	const storageRunner = createNamespace()
 	const timestampMs = Date.now() - 60_000
 	const logger = { log: vi.fn<(message: string) => void>() }
@@ -106,14 +104,10 @@ test('DO PITR maintenance route targets exact user-scoped object names and round
 		SENTRY_ENVIRONMENT: 'production',
 		DR_RESTORE_SECRET: 'correct',
 		MAILBOX: mailbox.namespace,
-		RUN_LOG: runLog.namespace,
-		USER_METER: userMeter.namespace,
 		STORAGE_RUNNER: storageRunner.namespace,
 	} as unknown as Env
 	const targets = [
 		{ kind: 'mailbox', binding: mailbox, expectedName: 'stable-user-id' },
-		{ kind: 'run-log', binding: runLog, expectedName: 'stable-user-id' },
-		{ kind: 'user-meter', binding: userMeter, expectedName: 'stable-user-id' },
 		{
 			kind: 'storage-runner',
 			binding: storageRunner,
@@ -191,6 +185,25 @@ test('DO PITR maintenance route targets exact user-scoped object names and round
 			}),
 		),
 	)
+	for (const kind of ['run-log', 'user-meter', 'stripe-plan-refresh']) {
+		const response = await handleDoPitrRequest(
+			createRequest(
+				{
+					operation: 'get-recovery-bookmark',
+					kind,
+					userId: 'stable-user-id',
+					timestampMs,
+				},
+				'Bearer correct',
+			),
+			env,
+		)
+		expect(response.status).toBe(500)
+		await expect(response.json()).resolves.toMatchObject({
+			code: 'invalid-request',
+			error: expect.stringContaining('kind must be one of'),
+		})
+	}
 })
 
 test('DO PITR maintenance route rejects timestamps outside the provider window', async () => {

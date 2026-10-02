@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
@@ -147,7 +148,7 @@ test('connect lookup never prefills a built-in and converts platform reconnects 
 	const userId = 'user-platform-priority'
 	const platformEnv = {
 		...env,
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 	} as Env
 
 	await upsertPlatformOauthApp({
@@ -425,7 +426,7 @@ test('loadAccountIntegrationsData lists built-in apps next to user-registered ap
 	const userId = 'user-integrations-platform-list'
 	const platformEnv = {
 		...env,
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 	} as Env
 
 	await upsertPlatformOauthApp({

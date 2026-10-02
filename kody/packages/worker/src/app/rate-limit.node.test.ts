@@ -1,35 +1,59 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	authRateLimitConfig,
 	checkAuthRateLimit,
 	checkRateLimit,
+	releaseRateLimit,
 } from './rate-limit.ts'
 
-test('D1 rate limiting cleans up only the key being checked', async () => {
+test('database rate limiting caps one key, prunes only that key and refunds a slot', async () => {
 	vi.useFakeTimers()
 	vi.setSystemTime(new Date('2026-07-31T04:00:00.000Z'))
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
+	await using store = await createTestDb({ userId: 'limited-user' })
+	const config = { maxRequests: 2, windowSeconds: 60 }
+	const rows = async () =>
+		(
+			await store.pg.query<{ key: string; ts: number }>(
+				`SELECT key, ts::int AS ts FROM _rate_limits ORDER BY id`,
+			)
+		).rows
 
-	await checkRateLimit(db, 'auth:ip:current', authRateLimitConfig)
-	sqlite
-		.prepare(`INSERT INTO _rate_limits (key, ts) VALUES (?, ?)`)
-		.run('webhook:user:other', 1)
-	sqlite
-		.prepare(`INSERT INTO _rate_limits (key, ts) VALUES (?, ?)`)
-		.run('auth:ip:current', 1)
+	await checkRateLimit(store.db, 'auth:ip:current', config)
+	await store.pg.query(
+		`INSERT INTO _rate_limits (key, ts) VALUES ('webhook:user:other', 1), ('auth:ip:current', 1)`,
+	)
+	await expect(
+		checkRateLimit(store.db, 'auth:ip:current', config),
+	).resolves.toEqual({ allowed: true, retryAfterSeconds: null })
+	expect((await rows()).filter((row) => row.ts === 1)).toEqual([
+		{ key: 'webhook:user:other', ts: 1 },
+	])
 
 	await expect(
-		checkRateLimit(db, 'auth:ip:current', authRateLimitConfig),
+		checkRateLimit(store.db, 'auth:ip:current', config),
+	).resolves.toEqual({ allowed: false, retryAfterSeconds: 60 })
+	await releaseRateLimit(store.db, 'auth:ip:current')
+	await expect(
+		checkRateLimit(store.db, 'auth:ip:current', config),
 	).resolves.toEqual({ allowed: true, retryAfterSeconds: null })
 	expect(
-		sqlite
-			.prepare(`SELECT key, ts FROM _rate_limits ORDER BY id`)
-			.all()
-			.filter((row) => row.ts === 1),
-	).toEqual([{ key: 'webhook:user:other', ts: 1 }])
+		(await rows()).filter((row) => row.key === 'auth:ip:current'),
+	).toHaveLength(2)
+
+	// Keys carry user ids and IPs, so runtime roles reach rows only through the definers.
+	await expect(
+		store.db.prepare(`SELECT key FROM _rate_limits`).all(),
+	).rejects.toThrow(/permission denied/)
+	await expect(
+		store.db
+			.prepare(`DELETE FROM _rate_limits WHERE key = ?`)
+			.bind('webhook:user:other')
+			.run(),
+	).rejects.toThrow(/permission denied/)
+	await expect(
+		checkRateLimit(store.reader, 'auth:ip:current', config),
+	).rejects.toThrow(/permission denied/)
 
 	vi.useRealTimers()
 })

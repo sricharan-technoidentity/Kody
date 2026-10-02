@@ -8,51 +8,13 @@ import {
 	redirectToLogin,
 	redirectToLoginWhenUnauthenticated,
 } from '#app/auth-redirect.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createStaleSessionTestEnv() {
-	return {
-		COOKIE_SECRET: testCookieSecret,
-		APP_DB: {
-			prepare(query: string) {
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				return {
-					query,
-					bind() {
-						return {
-							query,
-							async all() {
-								if (
-									normalizedQuery.startsWith('select') &&
-									normalizedQuery.includes('from "users"')
-								) {
-									return { results: [], meta: { changes: 0 } }
-								}
-								if (normalizedQuery.includes('from user_roles ur')) {
-									return { results: [], meta: { changes: 0 } }
-								}
-								return { results: [], meta: { changes: 0 } }
-							},
-							async first() {
-								return null
-							},
-							async run() {
-								return { meta: { changes: 0 } }
-							},
-						}
-					},
-				}
-			},
-			async batch(statements: Array<{ query?: string }>) {
-				return await executePreparedD1Batch(statements)
-			},
-			async exec() {
-				return
-			},
-		} as unknown as D1Database,
-	} as Env
+function createStaleSessionTestEnv(db: PgDatabase) {
+	return { COOKIE_SECRET: testCookieSecret, APP_DB: db } as unknown as Env
 }
 
 test('redirectToLogin attaches Set-Cookie when provided', async () => {
@@ -76,7 +38,9 @@ test('redirectToLoginWhenUnauthenticated clears a stale session cookie', async (
 		rememberMe: false,
 	}
 	const cookie = await createAuthCookie(session, false)
-	const env = createStaleSessionTestEnv()
+	// The cookie's account no longer exists; its scoped writer finds nobody.
+	await using store = await createTestDb()
+	const env = createStaleSessionTestEnv(store.forUser(session.stableUserId).db)
 
 	const response = await redirectToLoginWhenUnauthenticated(
 		new Request('https://example.com/account', {

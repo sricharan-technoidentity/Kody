@@ -16,7 +16,7 @@ import {
 	updateOauthAppClientSecretCiphertext,
 } from './repo.ts'
 
-type CredentialEnv = Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'>
+type CredentialEnv = Pick<Env, 'APP_DB' | 'SECRET_KMS'>
 
 export function createMissingIntegrationAccessTokenMessage(name: string) {
 	return `Integration "${name}" does not have a stored access token.`

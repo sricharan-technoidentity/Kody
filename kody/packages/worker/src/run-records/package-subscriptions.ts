@@ -7,7 +7,7 @@ import { listPackageSubscriptions } from '#worker/package-registry/manifest.ts'
 import { listSavedPackagesByUserId } from '#worker/package-registry/repo.ts'
 import { loadPackageManifestBySourceId } from '#worker/package-registry/source.ts'
 import { type SavedPackageRecord } from '#worker/package-registry/types.ts'
-import { type RunLogRowInput } from './run-log-do.ts'
+import { type RunLogRowInput } from './run-state-types.ts'
 
 export const runErrorRecordedTopic = 'run.error.recorded'
 

@@ -58,6 +58,7 @@ const mockModule = vi.hoisted(() => ({
 	invalidateCommunityPublicCache: vi.fn(),
 	deleteCommunityListing: vi.fn(),
 	deleteCommunityRatingsByListingId: vi.fn(),
+	deleteOwnedCommunityListingEngagement: vi.fn(),
 	deleteCommunitySnapshot: vi.fn(),
 	setCommunityListingStatus: vi.fn(),
 	resolveCommunityReportRow: vi.fn(),
@@ -184,6 +185,8 @@ vi.mock('./repo.ts', async (importOriginal) => {
 			mockModule.deleteCommunityListing(...args),
 		deleteCommunityRatingsByListingId: (...args: Array<unknown>) =>
 			mockModule.deleteCommunityRatingsByListingId(...args),
+		deleteOwnedCommunityListingEngagement: (...args: Array<unknown>) =>
+			mockModule.deleteOwnedCommunityListingEngagement(...args),
 		resolveCommunityReportRow: (...args: Array<unknown>) =>
 			mockModule.resolveCommunityReportRow(...args),
 		setCommunityListingStatus: (...args: Array<unknown>) =>
@@ -252,21 +255,12 @@ const testCommunityAssets = {
 		truncated: false,
 	})),
 } as unknown as R2Bucket
-const testCommunityActivityQueue = {
-	send: vi.fn(),
-} as unknown as Queue
-const testCommunityListingPublishedQueue = {
-	send: vi.fn(),
-} as unknown as Queue
 
 function createEnv() {
 	return {
 		APP_DB: {} as D1Database,
 		BUNDLE_ARTIFACTS_KV: testBundleArtifactsKv,
 		COMMUNITY_ASSETS: testCommunityAssets,
-		COMMUNITY_ACTIVITY_DISPATCH_QUEUE: testCommunityActivityQueue,
-		COMMUNITY_LISTING_PUBLISHED_DISPATCH_QUEUE:
-			testCommunityListingPublishedQueue,
 	} as Env
 }
 
@@ -541,7 +535,9 @@ test('unpublishCommunityListing refuses delisted listings without deleting anyth
 	).rejects.toBeInstanceOf(CommunityActionError)
 
 	expect(mockModule.deleteCommunityListing).not.toHaveBeenCalled()
-	expect(mockModule.deleteCommunityRatingsByListingId).not.toHaveBeenCalled()
+	expect(
+		mockModule.deleteOwnedCommunityListingEngagement,
+	).not.toHaveBeenCalled()
 	expect(mockModule.deleteCommunitySnapshot).not.toHaveBeenCalled()
 })
 
@@ -633,13 +629,17 @@ test('unpublishCommunityListing deletes active listings and cascades cleanup', a
 			ownerUserId: 'owner-1',
 		},
 	)
-	expect(mockModule.deleteCommunityRatingsByListingId).toHaveBeenCalledWith(
+	expect(mockModule.deleteOwnedCommunityListingEngagement).toHaveBeenCalledWith(
 		expect.anything(),
 		'listing-1',
 	)
+	// Engagement is cleared while the listing row still names its owner.
 	expect(
-		mockModule.deleteCommunityActivityEventsByListingId,
-	).toHaveBeenCalledWith(expect.anything(), 'listing-1')
+		mockModule.deleteOwnedCommunityListingEngagement.mock
+			.invocationCallOrder[0],
+	).toBeLessThan(
+		mockModule.deleteCommunityListing.mock.invocationCallOrder[0] ?? 0,
+	)
 	expect(mockModule.deleteCommunitySnapshot).toHaveBeenCalledWith(
 		expect.anything(),
 		'listing-1',
@@ -910,7 +910,7 @@ test('publishCommunityListing enqueues listing.published only on first publish',
 	expect(
 		mockModule.enqueueCommunityListingPublishedDispatch,
 	).toHaveBeenCalledWith({
-		queue: expect.anything(),
+		env: expect.anything(),
 		listingId: insertedListingId,
 	})
 
@@ -1074,7 +1074,7 @@ test('rateCommunityListing rejects owner self-ratings and persists valid ratings
 		}),
 	)
 	expect(mockModule.enqueueCommunityActivityDispatch).toHaveBeenCalledWith({
-		queue: expect.anything(),
+		env: expect.anything(),
 		kind: 'rating',
 		activityId: 'rating-1',
 	})
@@ -1167,7 +1167,7 @@ test('forkCommunityListing creates inert source without saved package row', asyn
 		}),
 	)
 	expect(mockModule.enqueueCommunityActivityDispatch).toHaveBeenCalledWith({
-		queue: expect.anything(),
+		env: expect.anything(),
 		kind: 'fork',
 		activityId: expect.any(String),
 	})

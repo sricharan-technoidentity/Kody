@@ -1,19 +1,21 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { loadAdminLaunchSignals } from './launch-signals.ts'
 
 const now = new Date('2026-09-10T18:00:00.000Z')
 
-function createLaunchSignalsDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+async function createLaunchSignalsDb() {
+	const database = await createTestDb()
+	return {
+		...database,
+		// The admin insights surface selects this role after its permission check.
+		db: createPgDatabase({ connection: database.pg, role: 'kody_analytics' }),
+	}
 }
 
-function insertUser(
-	sqlite: DatabaseSync,
+async function insertUser(
+	database: Awaited<ReturnType<typeof createTestDb>>,
 	row: {
 		username: string
 		stableUserId: string
@@ -34,18 +36,16 @@ function insertUser(
 		deletingAt?: string | null
 	},
 ) {
-	sqlite
-		.prepare(
-			`INSERT INTO users (
+	await database.pg.query(
+		`INSERT INTO users (
 				username, email, password_hash, stable_user_id, plan, stripe_plan,
 				stripe_price_id, entitlement_ladder, email_verified_at,
 				first_mcp_connected_at, first_search_at, first_execute_at,
 				first_saved_package_at, mcp_client_name, last_active_at,
 				second_agent_standard_gift_expires_at, referral_standard_credit_expires_at,
 				created_at, updated_at, deleting_at, account_type
-			) VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'person')`,
-		)
-		.run(
+			) VALUES ($1, $2, 'x', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'person')`,
+		[
 			row.username,
 			`${row.username}@example.com`,
 			row.stableUserId,
@@ -65,12 +65,14 @@ function insertUser(
 			row.createdAt ?? '2026-08-01T00:00:00.000Z',
 			row.createdAt ?? '2026-08-01T00:00:00.000Z',
 			row.deletingAt ?? null,
-		)
+		],
+	)
 }
 
 test('launch signals aggregate paid MRR, funnels, activity, and overlays without paging users', async () => {
-	const { sqlite, db } = createLaunchSignalsDb()
-	insertUser(sqlite, {
+	await using database = await createLaunchSignalsDb()
+	const { db } = database
+	await insertUser(database, {
 		username: 'paid-monthly',
 		stableUserId: 'user-paid-monthly',
 		plan: 'free',
@@ -85,7 +87,7 @@ test('launch signals aggregate paid MRR, funnels, activity, and overlays without
 		lastActiveAt: '2026-09-10T16:00:00.000Z',
 		entitlementLadder: 'legacy',
 	})
-	insertUser(sqlite, {
+	await insertUser(database, {
 		username: 'paid-yearly',
 		stableUserId: 'user-paid-yearly',
 		plan: 'pro',
@@ -97,7 +99,7 @@ test('launch signals aggregate paid MRR, funnels, activity, and overlays without
 		lastActiveAt: '2026-09-09T12:00:00.000Z',
 		createdAt: '2026-09-10T07:00:00.000Z',
 	})
-	insertUser(sqlite, {
+	await insertUser(database, {
 		username: 'gifted',
 		stableUserId: 'user-gifted',
 		plan: 'free',
@@ -106,30 +108,24 @@ test('launch signals aggregate paid MRR, funnels, activity, and overlays without
 		lastActiveAt: '2026-09-03T00:00:00.000Z',
 		createdAt: '2026-09-10T10:00:00.000Z',
 	})
-	insertUser(sqlite, {
+	await insertUser(database, {
 		username: 'deleting',
 		stableUserId: 'user-deleting',
 		stripePlan: 'pro',
 		stripePriceId: 'price_pro',
 		deletingAt: '2026-09-10T00:00:00.000Z',
 	})
-	sqlite
-		.prepare(
-			`INSERT INTO platform_feedback (
+	await database.pg.query(
+		`INSERT INTO platform_feedback (
 				id, submitter_user_id, submitter_username, submitter_email,
 				category, summary, details, status, created_at, updated_at
 			) VALUES
 				('fb-open', 'user-gifted', 'gifted', 'gifted@example.com',
-					'bug', 'Open bug', 'details', 'open', ?, ?),
+					'bug', 'Open bug', 'details', 'open', $1, $1),
 				('fb-done', 'user-gifted', 'gifted', 'gifted@example.com',
-					'suggestion', 'Done idea', 'details', 'resolved', ?, ?)`,
-		)
-		.run(
-			now.toISOString(),
-			now.toISOString(),
-			now.toISOString(),
-			now.toISOString(),
-		)
+					'suggestion', 'Done idea', 'details', 'resolved', $1, $1)`,
+		[now.toISOString()],
+	)
 
 	const signals = await loadAdminLaunchSignals({
 		db,
@@ -198,11 +194,20 @@ test('launch signals aggregate paid MRR, funnels, activity, and overlays without
 		{ kind: 'cursor', label: 'Cursor', count: 1 },
 	])
 	expect(signals.openPlatformFeedback).toBe(1)
+
+	// Fleet counters only: no contact details, profile text or feedback content.
+	for (const sql of [
+		'SELECT email FROM users',
+		'SELECT bio FROM users',
+		'SELECT details FROM platform_feedback',
+	])
+		await expect(db.prepare(sql).all()).rejects.toThrow('permission denied')
 })
 
 test('active windows count last_active_at UTC days, not a rolling ISO-hour cutoff', async () => {
-	const { sqlite, db } = createLaunchSignalsDb()
-	insertUser(sqlite, {
+	await using database = await createLaunchSignalsDb()
+	const { db } = database
+	await insertUser(database, {
 		username: 'yesterday-early',
 		stableUserId: 'user-yesterday-early',
 		lastActiveAt: '2026-09-10T01:00:00.000Z',

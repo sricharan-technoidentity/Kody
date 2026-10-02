@@ -8,7 +8,8 @@ import {
 import { loadResolvedRequestAuth } from '#app/request-auth-cache.ts'
 import { hasResolvedRequestFeatureFlags } from '#app/request-feature-flags-cache.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 const sessionEmail = 'user@example.com'
@@ -19,67 +20,14 @@ const session: AuthSession = {
 	rememberMe: false,
 }
 
-function createAuthCacheTestDb() {
-	return {
-		prepare(query: string) {
-			const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-			const statement = {
-				query,
-				bind() {
-					return statement
-				},
-				async all() {
-					if (
-						normalizedQuery.startsWith('select') &&
-						normalizedQuery.includes('from "users"')
-					) {
-						return {
-							results: [
-								{
-									id: 7,
-									email: sessionEmail,
-									username: 'session-user',
-									stable_user_id: stableUserId,
-								},
-							],
-							meta: { changes: 0 },
-						}
-					}
-					if (normalizedQuery.includes('from user_roles')) {
-						return { results: [], meta: { changes: 0 } }
-					}
-					return { results: [], meta: { changes: 0 } }
-				},
-				async first() {
-					return null
-				},
-				async run() {
-					return { meta: { changes: 0 } }
-				},
-			}
-			return statement
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
-}
-
-function createEnv() {
-	return {
-		APP_DB: createAuthCacheTestDb(),
-		COOKIE_SECRET: testCookieSecret,
-	} as Env
-}
-
-async function resolveCookie(cookie: string) {
+async function resolveCookie(db: PgDatabase, cookie: string) {
 	const request = new Request('https://example.com/account', {
 		headers: { Cookie: cookie.split(';')[0]! },
 	})
-	const resolved = await loadResolvedRequestAuth(request, createEnv())
+	const resolved = await loadResolvedRequestAuth(request, {
+		APP_DB: db,
+		COOKIE_SECRET: testCookieSecret,
+	} as unknown as Env)
 	expect(hasResolvedRequestFeatureFlags(request)).toBe(false)
 	return resolved
 }
@@ -94,12 +42,20 @@ function expectSignedOutWithClearedCookie(
 
 test('resolveRequestAuth rejects cookies past the absolute lifetime and legacy cookies without issuedAt', async () => {
 	setAuthSessionSecret(testCookieSecret)
+	await using store = await createTestDb()
+	await store.pg.query(
+		`INSERT INTO users (id, email, username, password_hash, stable_user_id)
+		 VALUES (7, $1, 'session-user', 'unused', $2)`,
+		[sessionEmail, stableUserId],
+	)
+	const db = store.forUser(stableUserId).db
 	const now = Date.now()
 	const eightDaysAgo = now - 8 * 24 * 60 * 60 * 1000
 	const thirtyOneDaysAgo = now - 31 * 24 * 60 * 60 * 1000
 
 	expectSignedOutWithClearedCookie(
 		await resolveCookie(
+			db,
 			await createAuthCookie(
 				{ ...session, rememberMe: false },
 				false,
@@ -109,6 +65,7 @@ test('resolveRequestAuth rejects cookies past the absolute lifetime and legacy c
 	)
 
 	const rememberedEightDays = await resolveCookie(
+		db,
 		await createAuthCookie(
 			{ ...session, rememberMe: true },
 			false,
@@ -121,6 +78,7 @@ test('resolveRequestAuth rejects cookies past the absolute lifetime and legacy c
 
 	expectSignedOutWithClearedCookie(
 		await resolveCookie(
+			db,
 			await createAuthCookie(
 				{ ...session, rememberMe: true },
 				false,
@@ -129,7 +87,10 @@ test('resolveRequestAuth rejects cookies past the absolute lifetime and legacy c
 		),
 	)
 
-	const fresh = await resolveCookie(await createAuthCookie(session, false, now))
+	const fresh = await resolveCookie(
+		db,
+		await createAuthCookie(session, false, now),
+	)
 	expect(fresh.user).not.toBeNull()
 	expect(fresh.user?.username).toBe('session-user')
 
@@ -141,6 +102,7 @@ test('resolveRequestAuth rejects cookies past the absolute lifetime and legacy c
 	})
 	expectSignedOutWithClearedCookie(
 		await resolveCookie(
+			db,
 			await legacyCookie.serialize(
 				JSON.stringify({
 					v: 2,

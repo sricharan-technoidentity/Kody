@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { setAuthSessionSecret } from '#app/auth-session.ts'
 import { resetDataCacheForTests } from '#app/data-cache.ts'
@@ -5,54 +6,19 @@ import {
 	createInternalErrorPageHandler,
 	createNotFoundPageHandler,
 } from '#app/handlers/error-pages.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { createMemoryKv } from '#worker/test-support/auth-provider-harness.ts'
 import { testOidcSigningEnv } from '#worker/test-support/oidc-signing-env.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createAnonymousTestDb() {
-	function createStatement(query: string) {
-		const executeAll = async () => ({
-			results: [],
-			meta: { changes: 0, last_row_id: 0 },
-		})
-		return {
-			query,
-			bind() {
-				return createStatement(query)
-			},
-			async all() {
-				return executeAll()
-			},
-			async first() {
-				return null
-			},
-			async run() {
-				return { meta: { changes: 0, last_row_id: 0 } }
-			},
-		}
-	}
-
-	return {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
-}
-
-function createTestEnv() {
+function createTestEnv(db: PgDatabase) {
 	return {
 		COOKIE_SECRET: testCookieSecret,
-		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		SECRET_KMS: testSecretKms,
 		...testOidcSigningEnv,
-		APP_DB: createAnonymousTestDb(),
+		APP_DB: db,
 		BUNDLE_ARTIFACTS_KV: createMemoryKv(),
 		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},
@@ -81,7 +47,8 @@ function readAppRootProps(html: string) {
 test('GET /404 and /500 are explicit illustrated error routes', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv()
+	await using store = await createTestDb()
+	const env = createTestEnv(store.db)
 
 	const notFoundResponse = await createNotFoundPageHandler(env).handler({
 		request: new Request('https://example.com/404'),

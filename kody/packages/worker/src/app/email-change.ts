@@ -14,6 +14,9 @@ import { resolveUserStableId } from '#worker/user-id.ts'
 import { attachPendingPackageShareInvitesSafely } from '#worker/package-registry/share-grants.ts'
 import { reconcileDestinationsAfterIdentityEmailChange } from '#worker/email/destinations.ts'
 import { toHex } from '@kody-internal/shared/hex.ts'
+import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+import { resolveTokenOwnerDb } from '#worker/identity/token-owner-db.ts'
 
 const emailChangeTokenBytes = 32
 const emailChangeTokenExpiryMs = 24 * 60 * 60 * 1000
@@ -146,7 +149,9 @@ export type VerifyEmailChangeResult =
 	  }
 
 export async function verifyEmailChangeToken(input: {
-	db: D1Database
+	db: SqlDatabase
+	/** Owner-scoped writers; required on PostgreSQL, where RLS hides the token. */
+	forUser?: (stableUserId: string) => SqlDatabase
 	token: unknown
 	now?: Date
 }): Promise<VerifyEmailChangeResult> {
@@ -154,7 +159,14 @@ export async function verifyEmailChangeToken(input: {
 	if (!token) return { ok: false, reason: 'missing_token' }
 
 	const tokenHash = await hashVerificationToken(token)
-	const record = await input.db
+	const db = await resolveTokenOwnerDb({
+		db: input.db,
+		forUser: input.forUser,
+		kind: 'email_change',
+		key: tokenHash,
+	})
+	if (!db) return { ok: false, reason: 'invalid_token' }
+	const record = await db
 		.prepare(
 			`SELECT pec.id, pec.user_id, pec.new_email, pec.expires_at, u.email, u.stable_user_id
 			 FROM pending_email_changes pec
@@ -174,7 +186,7 @@ export async function verifyEmailChangeToken(input: {
 
 	if (!record) return { ok: false, reason: 'invalid_token' }
 	if (record.expires_at < now.getTime()) {
-		await input.db
+		await db
 			.prepare(`DELETE FROM pending_email_changes WHERE id = ?`)
 			.bind(record.id)
 			.run()
@@ -182,14 +194,12 @@ export async function verifyEmailChangeToken(input: {
 	}
 
 	const newEmail = normalizeEmail(record.new_email)
-	const existing = await input.db
+	const existing = await db
 		.prepare(`SELECT id FROM users WHERE email = ? AND id != ?`)
 		.bind(newEmail, record.user_id)
 		.first<{ id: number }>()
 	if (existing) return { ok: false, reason: 'email_conflict' }
-	if (
-		await isEmailReservedForOtherAccount(input.db, newEmail, record.user_id)
-	) {
+	if (await isEmailReservedForOtherAccount(db, newEmail, record.user_id)) {
 		return { ok: false, reason: 'email_conflict' }
 	}
 
@@ -199,16 +209,22 @@ export async function verifyEmailChangeToken(input: {
 	const verifiedAt = now.toISOString()
 
 	try {
-		await input.db
+		await db
 			.prepare(
 				`UPDATE users
 				 SET email = ?,
 				     email_verified_at = ?,
 				     stable_user_id = ?,
-				     updated_at = CURRENT_TIMESTAMP
+				     updated_at = ?
 				 WHERE id = ?`,
 			)
-			.bind(newEmail, verifiedAt, stableUserId, record.user_id)
+			.bind(
+				newEmail,
+				verifiedAt,
+				stableUserId,
+				utcSqliteTimestamp(now),
+				record.user_id,
+			)
 			.run()
 	} catch (error) {
 		if (getUniqueConstraintField(error) === 'email') {
@@ -217,32 +233,32 @@ export async function verifyEmailChangeToken(input: {
 		throw error
 	}
 
-	await input.db
+	await db
 		.prepare(`DELETE FROM pending_email_changes WHERE user_id = ?`)
 		.bind(record.user_id)
 		.run()
-	await input.db
+	await db
 		.prepare(`DELETE FROM email_verifications WHERE user_id = ?`)
 		.bind(record.user_id)
 		.run()
 
-	await claimAccountEmail(input.db, {
+	await claimAccountEmail(db, {
 		userId: record.user_id,
 		email: record.email,
 		now,
 	})
-	await claimAccountEmail(input.db, {
+	await claimAccountEmail(db, {
 		userId: record.user_id,
 		email: newEmail,
 		now,
 	})
 	await attachPendingPackageShareInvitesSafely({
-		db: input.db,
+		db: db,
 		userId: stableUserId,
 		email: newEmail,
 	})
 	await reconcileDestinationsAfterIdentityEmailChange({
-		db: input.db,
+		db: db,
 		userId: record.user_id,
 		newEmail,
 	})

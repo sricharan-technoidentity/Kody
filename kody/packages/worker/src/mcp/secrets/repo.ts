@@ -178,12 +178,8 @@ function prepareUpdateApprovedUserSecretEntryForPackageStatement(input: {
 					WHERE user_id = ? AND scope = 'user' AND binding_key = ''
 					LIMIT 1
 				)
-				AND json_valid(allowed_packages)
-				AND EXISTS (
-					SELECT 1
-					FROM json_each(allowed_packages)
-					WHERE value = ?
-				)`,
+				AND CASE WHEN pg_input_is_valid(allowed_packages, 'jsonb')
+					THEN allowed_packages::jsonb @> jsonb_build_array(?::text) ELSE false END`,
 		)
 		.bind(
 			input.description,
@@ -268,12 +264,8 @@ export async function updateApprovedUserSecretEntriesForPackageAtomically(input:
 					WHERE user_id = ? AND scope = 'user' AND binding_key = ''
 					LIMIT 1
 				)
-				AND json_valid(allowed_packages)
-				AND EXISTS (
-					SELECT 1
-					FROM json_each(allowed_packages)
-					WHERE value = ?
-				)
+				AND CASE WHEN pg_input_is_valid(allowed_packages, 'jsonb')
+					THEN allowed_packages::jsonb @> jsonb_build_array(?::text) ELSE false END
 				AND (
 					SELECT COUNT(*)
 					FROM secret_entries e
@@ -282,12 +274,8 @@ export async function updateApprovedUserSecretEntriesForPackageAtomically(input:
 						AND b.scope = 'user'
 						AND b.binding_key = ''
 						AND e.name IN (${namePlaceholders})
-						AND json_valid(e.allowed_packages)
-						AND EXISTS (
-							SELECT 1
-							FROM json_each(e.allowed_packages)
-							WHERE value = ?
-						)
+						AND CASE WHEN pg_input_is_valid(e.allowed_packages, 'jsonb')
+					THEN e.allowed_packages::jsonb @> jsonb_build_array(?::text) ELSE false END
 				) = ?`,
 		)
 		.bind(

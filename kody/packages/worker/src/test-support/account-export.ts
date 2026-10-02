@@ -1,84 +1,57 @@
-import { DatabaseSync } from 'node:sqlite'
 import {
 	mailboxBlobRefAttachmentCursorPrefix,
 	mailboxBlobRefRawMimeCursorPrefix,
 	parseMailboxBlobRefCursor,
 } from '#worker/email/mailbox-types.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createPgDatabase, type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
-export function applyMigrations(db: DatabaseSync) {
-	const migrationsDir = new URL('../../migrations/', import.meta.url)
-	applyAllMigrations(db, migrationsDir)
-	// The APP_DB fallback jobs store serves the jobs-worker schema (ADR 0016)
-	// from the same test database handle.
-	applyAllMigrations(
-		db,
-		new URL('../../../jobs-worker/migrations/', import.meta.url),
-	)
-}
-
-export function createD1FromSqlite(
-	db: DatabaseSync,
-	options?: {
-		onQueryRows?: (rowCount: number) => void
-		onQuery?: (query: string) => void
-	},
-) {
-	return {
-		prepare(query: string) {
-			options?.onQuery?.(query.replace(/\s+/g, ' ').trim())
-			return {
-				bind(...params: Array<unknown>) {
-					return {
-						async all<T>() {
-							const statement = db.prepare(query)
-							const rows = statement.all(...params) as Array<T>
-							options?.onQueryRows?.(rows.length)
-							return { results: rows, meta: { changes: 0 } }
-						},
-						async first<T>() {
-							const statement = db.prepare(query)
-							return (statement.get(...params) ?? null) as T | null
-						},
-						async run() {
-							const statement = db.prepare(query)
-							const result = statement.run(...params)
-							return { meta: { changes: result.changes } }
-						},
-					}
-				},
-				async all<T>() {
-					const statement = db.prepare(query)
-					const rows = statement.all() as Array<T>
-					options?.onQueryRows?.(rows.length)
-					return { results: rows, meta: { changes: 0 } }
-				},
-				async first<T>() {
-					const statement = db.prepare(query)
-					return (statement.get() ?? null) as T | null
-				},
-				async run() {
-					const statement = db.prepare(query)
-					const result = statement.run()
-					return { meta: { changes: result.changes } }
-				},
-			}
-		},
-		async exec(query: string) {
-			db.exec(query)
-		},
-	} as unknown as D1Database
-}
-
-export function createMigratedDb(options?: {
+type QueryObserver = {
 	onQueryRows?: (rowCount: number) => void
 	onQuery?: (query: string) => void
-}) {
-	const sqlite = new DatabaseSync(':memory:')
-	applyMigrations(sqlite)
+}
+
+function observe(db: PgDatabase, observer: QueryObserver): PgDatabase {
+	type Statement = ReturnType<PgDatabase['prepare']>
+	const wrap = (statement: Statement): Statement => ({
+		...statement,
+		bind: (...values: Array<unknown>) => wrap(statement.bind(...values)),
+		async all<T>() {
+			const result = await statement.all<T>()
+			observer.onQueryRows?.(result.results.length)
+			return result
+		},
+	})
 	return {
-		sqlite,
-		db: createD1FromSqlite(sqlite, options),
+		...db,
+		prepare(query: string) {
+			observer.onQuery?.(query.replace(/\s+/g, ' ').trim())
+			return wrap(db.prepare(query))
+		},
+	}
+}
+
+/**
+ * PostgreSQL baseline for account export. Export reads through the subject's
+ * `kody_subject_reader`; `db` exports `user-aaa`, `dbFor` any other subject.
+ */
+export async function createMigratedDb(observer: QueryObserver = {}) {
+	const database = await createTestDb()
+	const dbFor = (subject: string) =>
+		observe(
+			createPgDatabase({
+				connection: database.pg,
+				role: 'kody_subject_reader',
+				userId: subject,
+			}),
+			observer,
+		) as unknown as D1Database
+	return {
+		pg: database.pg,
+		exec: (sql: string) => database.pg.exec(sql),
+		db: dbFor('user-aaa'),
+		dbFor,
+		[Symbol.asyncDispose]: () => database.pg.close(),
 	}
 }
 

@@ -1,5 +1,7 @@
 import { expect, test, vi } from 'vitest'
 import { type PermissionString, type RoleName } from '#universal/permissions.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const mockModule = vi.hoisted(() => ({
 	readAuthenticatedAppUser: vi.fn(),
@@ -32,46 +34,13 @@ function createAdminActor(roles: Array<RoleName>) {
 	}
 }
 
-function createRolesTestEnv() {
-	const roles = [
-		{ name: 'admin', description: 'Operator role' },
-		{ name: 'user', description: 'Default role for every account' },
-	]
-	const permissions = [
-		{ role_name: 'user', action: 'read', entity: 'user', access: 'own' },
-		{ role_name: 'admin', action: 'read', entity: 'role', access: 'any' },
-	]
-
+/** The seeded RBAC catalog, read as the restricted admin role. */
+async function createRolesTestEnv() {
+	const store = await createTestDb()
 	return {
 		COOKIE_SECRET: 'secret',
-		APP_DB: {
-			prepare(query: string) {
-				const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-				const execute = {
-					async all<T>() {
-						if (
-							normalizedQuery.includes('select name, description from roles')
-						) {
-							return { results: roles as Array<T>, meta: { changes: 0 } }
-						}
-						if (
-							normalizedQuery.includes('from roles r') &&
-							normalizedQuery.includes('join role_permissions rp')
-						) {
-							return { results: permissions as Array<T>, meta: { changes: 0 } }
-						}
-						return { results: [] as Array<T>, meta: { changes: 0 } }
-					},
-					async first() {
-						return null
-					},
-					async run() {
-						return { meta: { changes: 0 } }
-					},
-				}
-				return { ...execute, bind: () => execute }
-			},
-		} as unknown as D1Database,
+		APP_DB: createPgDatabase({ connection: store.pg, role: 'kody_admin' }),
+		[Symbol.asyncDispose]: () => store[Symbol.asyncDispose](),
 	}
 }
 
@@ -81,9 +50,8 @@ test('admin roles list returns roles and attached permissions', async () => {
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(
 		createAdminActor(['admin']),
 	)
-	const handler = createAdminRolesApiHandler(
-		createRolesTestEnv() as unknown as Env,
-	)
+	await using env = await createRolesTestEnv()
+	const handler = createAdminRolesApiHandler(env as unknown as Env)
 	const response = await handler.handler({
 		request: new Request('https://example.com/admin/roles.json', {
 			headers: { Accept: 'application/json' },
@@ -92,15 +60,21 @@ test('admin roles list returns roles and attached permissions', async () => {
 		url: new URL('https://example.com/admin/roles.json'),
 	} as never)
 	expect(response.status).toBe(200)
+	const payload = (await response.json()) as {
+		roles: Array<{ name: string; permissions: Array<string> }>
+	}
+	const byName = new Map(payload.roles.map((role) => [role.name, role]))
+	expect([...byName.keys()].sort()).toEqual(['admin', 'user'])
+	expect(byName.get('user')?.permissions).toContain('read:user:own')
+	expect(byName.get('admin')?.permissions).toContain('read:role:any')
 })
 
 test('admin roles API returns 403 without read:role:any permission', async () => {
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(
 		createAdminActor(['user']),
 	)
-	const handler = createAdminRolesApiHandler(
-		createRolesTestEnv() as unknown as Env,
-	)
+	await using env = await createRolesTestEnv()
+	const handler = createAdminRolesApiHandler(env as unknown as Env)
 	const response = await handler.handler({
 		request: new Request('https://example.com/admin/roles.json', {
 			headers: { Accept: 'application/json' },

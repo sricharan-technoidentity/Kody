@@ -1,4 +1,5 @@
 import { type deleteUserAccount } from '#worker/app/account-deletion.ts'
+import { createTestRunRecords } from '#worker/test-support/run-records.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
 
@@ -168,7 +169,7 @@ export function createTestDb(
 							}
 							if (
 								lower.includes(
-									'select storage_id as storageid from user_storage_buckets',
+									'select storage_id as "storageid" from user_storage_buckets',
 								)
 							) {
 								results = (rows.user_storage_buckets ?? [])
@@ -192,14 +193,13 @@ export function createTestDb(
 							) {
 								results = (rows.community_listings ?? [])
 									.filter((row) => row['owner_user_id'] === userId)
-									.map((row, index) => {
+									.map((row) => {
 										const source = (rows.entity_sources ?? []).find(
 											(sourceRow) =>
 												sourceRow['id'] === row['source_id'] &&
 												sourceRow['user_id'] === row['owner_user_id'],
 										)
 										return {
-											account_r2_rowid: index + 1,
 											id: row['id'],
 											pinned_commit: row['pinned_commit'],
 											source_published_commit:
@@ -214,8 +214,8 @@ export function createTestDb(
 							) {
 								results = (rows.entity_sources ?? [])
 									.filter((row) => row['user_id'] === userId)
-									.map((row, index) => ({
-										account_r2_rowid: index + 1,
+									.map((row) => ({
+										id: row['id'],
 										repo_id: row['repo_id'] ?? row['id'],
 										entity_kind: row['entity_kind'] ?? 'package',
 										published_commit: row['published_commit'] ?? null,
@@ -351,7 +351,7 @@ export function createTestDb(
 								return { meta: { changes: changed } }
 							}
 							const replaceJsonMatch = lower.match(
-								/^update (\w+) set (\w+) = replace\(\2, \?, \?\) where instr\(\2, \?\) > 0$/,
+								/^update (\w+) set (\w+) = replace\(\2, \?, \?\) where length\(replace\(\2, \?, ''\)\) < length\(\2\)$/,
 							)
 							if (replaceJsonMatch) {
 								const table = replaceJsonMatch[1] as string
@@ -492,7 +492,7 @@ export function createJobsBindingStub(
 			.all<{ storage_id: string }>()
 		return (results ?? []).map((row) => row.storage_id)
 	}
-	return {
+	const binding = {
 		listJobIdsForUser: async (input: { userId: string }) => {
 			const { results } = await db
 				.prepare(`SELECT id FROM jobs WHERE user_id = ?`)
@@ -516,6 +516,12 @@ export function createJobsBindingStub(
 			return { ok: true as const, userId: input.userId, purged: true }
 		},
 		...overrides,
+	}
+	return {
+		...binding,
+		async purgeUserJobsData(input: { userId: string }) {
+			await binding.purgeUser(input)
+		},
 	}
 }
 
@@ -547,17 +553,20 @@ export function createSuccessfulDeletionEnv(
 			idFromName: durableObjectId,
 			get: () => ({ clearStorage: async () => ({ ok: true as const }) }),
 		},
-		RUN_LOG: {
-			idFromName: durableObjectId,
-			get: () => ({
-				clearAll: async () => ({ ok: true as const }),
-				listStorageIds: async () => [] as Array<string>,
+		RUN_STATE: { forUser: () => ({ clear: async () => undefined }) },
+		RUN_RECORDS: createTestRunRecords().records,
+		USER_METERS: userMeter.env.USER_METERS,
+		TEMPORAL: {
+			client: async () => ({
+				workflow: {
+					getHandle: () => ({ cancel: async () => undefined }),
+					async *list() {},
+				},
+				schedule: {
+					async *list() {},
+					getHandle: () => ({ delete: async () => undefined }),
+				},
 			}),
-		},
-		USER_METER: userMeter.env.USER_METER,
-		STRIPE_PLAN_REFRESH: {
-			idFromName: durableObjectId,
-			get: () => ({ purgeUser: async () => ({ ok: true as const }) }),
 		},
 		MAILBOX: {
 			idFromName: durableObjectId,

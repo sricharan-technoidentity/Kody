@@ -1,3 +1,5 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+
 type RateLimitConfig = {
 	maxRequests: number
 	windowSeconds: number
@@ -18,9 +20,14 @@ type SentryTunnelRateLimitEnv = {
 	SENTRY_TUNNEL_RATE_LIMITER?: RateLimit
 }
 
-const initializedDbs = new WeakSet<D1Database>()
+const initializedDbs = new WeakSet<SqlDatabase>()
 
-async function ensureRateLimitTable(db: D1Database) {
+/** PostgreSQL keeps `_rate_limits` behind definers (`0012`); never create it at runtime. */
+function isPostgres(db: SqlDatabase) {
+	return 'dialect' in db && db.dialect === 'postgres'
+}
+
+async function ensureRateLimitTable(db: SqlDatabase) {
 	if (initializedDbs.has(db)) return
 	await db.batch([
 		db.prepare(
@@ -47,13 +54,22 @@ async function ensureRateLimitTable(db: D1Database) {
  * requests do not insert rows.
  */
 export async function checkRateLimit(
-	db: D1Database,
+	db: SqlDatabase,
 	key: string,
 	config: RateLimitConfig,
 ): Promise<RateLimitResult> {
+	const now = Math.floor(Date.now() / 1000)
+	if (isPostgres(db)) {
+		const row = await db
+			.prepare(`SELECT kody_rate_limit_take(?, ?, ?, ?) AS allowed`)
+			.bind(key, now, config.windowSeconds, config.maxRequests)
+			.first<{ allowed: boolean }>()
+		return row?.allowed
+			? { allowed: true, retryAfterSeconds: null }
+			: { allowed: false, retryAfterSeconds: config.windowSeconds }
+	}
 	await ensureRateLimitTable(db)
 
-	const now = Math.floor(Date.now() / 1000)
 	const windowStart = now - config.windowSeconds
 
 	const results = await db.batch([
@@ -87,7 +103,11 @@ export async function checkRateLimit(
  * rate-limited operation itself failed, so transient downstream errors
  * do not eat into the caller's allowance.
  */
-export async function releaseRateLimit(db: D1Database, key: string) {
+export async function releaseRateLimit(db: SqlDatabase, key: string) {
+	if (isPostgres(db)) {
+		await db.prepare(`SELECT kody_rate_limit_release(?)`).bind(key).run()
+		return
+	}
 	await ensureRateLimitTable(db)
 	await db
 		.prepare(

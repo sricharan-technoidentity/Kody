@@ -1,5 +1,27 @@
 # kody agent index
 
+## Current mode: POC (Temporal + AgentCore migration)
+
+For the current migration POC, use this reduced scope. Do not run production
+workflows.
+
+- Read [`planss/kody-migration-plan.md`](./planss/kody-migration-plan.md) first;
+  `planss/execution plan.md` is a duplicate and should not be edited.
+- Goal: prove one vertical slice of Temporal + AgentCore in isolation.
+- Out of scope: live data migration, deployment, cutover, preview testing,
+  production health checks, PR shipping, Discord summaries, visual recaps.
+- Do not invoke `ship-pr`, `preview-manual-test`, `control-kody` preview/health,
+  `visual-recap`, `conduct`, or `file-friction` for POC work.
+- Do not run full `npm run validate` unless the slice modifies existing Kody
+  code; prefer targeted tests for the slice.
+- Verification: unit/integration tests for the slice + a standalone Temporal
+  workflow/activity test.
+- Stop when the slice demonstrates the behavior. Do not fix unrelated friction.
+
+When not in POC mode, the rest of this file applies.
+
+---
+
 Kody is a multi-user personal assistant: every signed-in user gets a fully
 isolated assistant (own packages, jobs, secrets, memories, remote connectors,
 email inboxes, durable storage).

@@ -1,4 +1,6 @@
 import { expect, test, vi } from 'vitest'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const entitlementMocks = vi.hoisted(() => ({
 	readAdminEntitlementConsumption: vi.fn(),
@@ -17,214 +19,106 @@ const {
 	loadFleetUsageInsights,
 } = await import('#worker/admin/fleet-usage-insights.ts')
 
-function createFleetDb(input: {
-	runtimeLeaders?: Array<{
-		stable_user_id: string
-		username: string
-		total_duration_ms: number
-	}>
-	eventLeaders?: Array<{
-		stable_user_id: string
-		username: string
-		event_count: number
-	}>
-	metricLeaders?: Array<{
-		user_id: string
-		username: string
-		metric: string
-		total_duration_ms: number
-	}>
-	activeUsers?: Array<{
-		stable_user_id: string
-		username: string
-		plan: string
-		stripe_plan: string | null
-		entitlement_ladder: string | null
-		event_count: number
-	}>
-	runtimeByUser?: Record<string, number>
-	adminUserIds?: Array<string>
-	dynamicWorkerLeaders?: Array<{
-		stable_user_id: string
-		username: string
-		event_count: number
-	}>
-	dynamicWorkerDays?: number
-	uniqueWorkerDaysByUser?: Record<string, number>
-	onDurationQueryBind?: (params: Array<unknown>) => void
-	onEventCountQueryBind?: (params: Array<unknown>) => void
+type FleetUser = {
+	stableUserId: string
+	username: string
+	plan?: string
+	stripePlan?: string | null
+	ladder?: string
+	deletingAt?: string | null
+	admin?: boolean
+}
+type Rollup = [
+	userId: string,
+	metric: string,
+	month: string,
+	eventCount: number,
+	totalDurationMs: number,
+]
+
+async function createFleetDb(input: {
+	users: Array<FleetUser>
+	rollups: Array<Rollup>
 }) {
-	return {
-		prepare(query: string) {
-			const normalized = query.replace(/\s+/g, ' ').trim().toLowerCase()
-			return {
-				bind(...params: Array<unknown>) {
-					if (
-						normalized.includes('sum(total_duration_ms)') &&
-						normalized.includes('user_id in')
-					) {
-						input.onDurationQueryBind?.(params)
-					}
-					if (
-						normalized.includes('sum(r.event_count)') &&
-						normalized.includes('not in')
-					) {
-						input.onEventCountQueryBind?.(params)
-					}
-					return this
-				},
-				async first<T>() {
-					if (
-						normalized.includes("metric = 'dynamic_worker_day'") &&
-						normalized.includes('sum(event_count)')
-					) {
-						return {
-							unique_worker_days: input.dynamicWorkerDays ?? 0,
-						} as T
-					}
-					return null
-				},
-				async all<T>() {
-					if (
-						normalized.includes('sum(r.total_duration_ms)') &&
-						normalized.includes('limit ?') &&
-						!normalized.includes('partition by')
-					) {
-						return {
-							results: (input.runtimeLeaders ?? []) as Array<T>,
-						}
-					}
-					if (
-						normalized.includes('u.plan') &&
-						normalized.includes('entitlement_ladder') &&
-						normalized.includes('event_count')
-					) {
-						return {
-							results: (input.activeUsers ?? []) as Array<T>,
-						}
-					}
-					if (
-						normalized.includes("r.name = 'admin'") &&
-						normalized.includes('stable_user_id')
-					) {
-						return {
-							results: (input.adminUserIds ?? []).map((stable_user_id) => ({
-								stable_user_id,
-							})) as Array<T>,
-						}
-					}
-					if (
-						normalized.includes('sum(r.event_count)') &&
-						normalized.includes('limit ?')
-					) {
-						return {
-							results: (input.eventLeaders ?? []) as Array<T>,
-						}
-					}
-					if (
-						normalized.includes("metric = 'dynamic_worker_day'") &&
-						normalized.includes('user_id in')
-					) {
-						const rows = Object.entries(input.uniqueWorkerDaysByUser ?? {}).map(
-							([user_id, event_count]) => ({
-								user_id,
-								event_count,
-							}),
-						)
-						return { results: rows as Array<T> }
-					}
-					if (
-						normalized.includes("metric = 'dynamic_worker_day'") &&
-						normalized.includes('limit ?')
-					) {
-						return {
-							results: (input.dynamicWorkerLeaders ?? []) as Array<T>,
-						}
-					}
-					if (normalized.includes('row_number() over')) {
-						return {
-							results: (input.metricLeaders ?? []) as Array<T>,
-						}
-					}
-					if (
-						normalized.includes('sum(total_duration_ms)') &&
-						normalized.includes('user_id in')
-					) {
-						const rows = Object.entries(input.runtimeByUser ?? {}).map(
-							([user_id, total_duration_ms]) => ({
-								user_id,
-								total_duration_ms,
-							}),
-						)
-						return { results: rows as Array<T> }
-					}
-					throw new Error(`Unsupported fleet query: ${query}`)
-				},
-			}
-		},
-	} as unknown as D1Database
+	const database = await createTestDb()
+	for (const [index, user] of input.users.entries()) {
+		await database.pg.query(
+			`INSERT INTO users (id, username, email, password_hash, stable_user_id, plan, stripe_plan, entitlement_ladder, deleting_at)
+			 VALUES ($1, $2, $3, 'x', $4, $5, $6, $7, $8)`,
+			[
+				index + 1,
+				user.username,
+				`${user.username}@example.test`,
+				user.stableUserId,
+				user.plan ?? 'free',
+				user.stripePlan ?? null,
+				user.ladder ?? 'public',
+				user.deletingAt ?? null,
+			],
+		)
+		if (user.admin)
+			await database.pg.query(
+				`INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE name = 'admin'`,
+				[index + 1],
+			)
+	}
+	for (const row of input.rollups)
+		await database.pg.query(
+			`INSERT INTO usage_rollups (user_id, metric, month, event_count, total_duration_ms)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			row,
+		)
+	// Admin insights select this read-only fleet role after the permission check.
+	const db = createPgDatabase({
+		connection: database.pg,
+		role: 'kody_analytics',
+	})
+	return { ...database, db, env: { APP_DB: db } as unknown as Env }
 }
 
 test('loadFleetUsageInsights returns bounded consumer rankings and pressure panel', async () => {
-	entitlementMocks.readAdminEntitlementConsumption.mockResolvedValue([
-		{
-			resource: 'saved_packages',
-			label: 'saved packages',
-			current: 9,
-			limit: 10,
-			percentOfLimit: 0.9,
-			overEightyPercent: true,
-		},
-	])
-	const eventCountBinds: Array<Array<unknown>> = []
-	const db = createFleetDb({
-		runtimeLeaders: [
+	entitlementMocks.readAdminEntitlementConsumption.mockImplementation(
+		async (input) =>
+			input.usageUserId === 'user-a'
+				? [
+						{
+							resource: 'saved_packages',
+							label: 'saved packages',
+							current: 9,
+							limit: 10,
+							percentOfLimit: 0.9,
+							overEightyPercent: true,
+						},
+					]
+				: [],
+	)
+	await using fleet = await createFleetDb({
+		users: [
+			{ stableUserId: 'user-a', username: 'alice' },
+			{ stableUserId: 'user-b', username: 'bob' },
+			{ stableUserId: 'user-c', username: 'cara' },
 			{
-				stable_user_id: 'user-a',
-				username: 'alice',
-				total_duration_ms: 3_600_000,
+				stableUserId: 'user-gone',
+				username: 'gone',
+				deletingAt: '2026-07-01T00:00:00.000Z',
 			},
 		],
-		eventLeaders: [
-			{
-				stable_user_id: 'user-b',
-				username: 'bob',
-				event_count: 42,
-			},
+		rollups: [
+			['user-a', 'execute', '2026-07', 5, 1_000],
+			['user-a', 'job_run', '2026-07', 3, 3_599_000],
+			['user-a', 'dynamic_worker_day', '2026-07', 60, 0],
+			['user-b', 'outbound_fetch', '2026-07', 42, 0],
+			// Observe-only metrics never rank event-count consumers.
+			['user-b', 'dynamic_worker_invoke', '2026-07', 1_000, 0],
+			['user-c', 'dynamic_worker_day', '2026-07', 90, 0],
+			// Deleting accounts and other months stay out of every ranking.
+			['user-gone', 'execute', '2026-07', 999, 99_999_999],
+			['user-a', 'execute', '2026-06', 500, 50_000_000],
 		],
-		metricLeaders: [
-			{
-				user_id: 'user-a',
-				username: 'alice',
-				metric: 'execute',
-				total_duration_ms: 1_000,
-			},
-		],
-		activeUsers: [
-			{
-				stable_user_id: 'user-a',
-				username: 'alice',
-				plan: 'free',
-				stripe_plan: null,
-				entitlement_ladder: 'public',
-				event_count: 50,
-			},
-		],
-		dynamicWorkerDays: 150,
-		dynamicWorkerLeaders: [
-			{
-				stable_user_id: 'user-c',
-				username: 'cara',
-				event_count: 90,
-			},
-		],
-		onEventCountQueryBind(params) {
-			eventCountBinds.push(params)
-		},
 	})
 	const data = await loadFleetUsageInsights({
-		db,
-		env: { APP_DB: db } as Env,
+		db: fleet.db,
+		env: fleet.env,
 		now: new Date('2026-07-08T12:00:00.000Z'),
 	})
 	expect(data.topRuntimeDurationConsumers).toEqual([
@@ -235,27 +129,28 @@ test('loadFleetUsageInsights returns bounded consumer rankings and pressure pane
 		},
 	])
 	expect(data.topEventCountConsumers).toEqual([
-		{
-			stableUserId: 'user-b',
-			username: 'bob',
-			eventCount: 42,
-		},
+		{ stableUserId: 'user-c', username: 'cara', eventCount: 90 },
+		{ stableUserId: 'user-a', username: 'alice', eventCount: 68 },
+		{ stableUserId: 'user-b', username: 'bob', eventCount: 42 },
 	])
-	expect(eventCountBinds.length).toBeGreaterThan(0)
-	expect(eventCountBinds[0]?.slice(1, 6)).toEqual([
-		'dynamic_worker_invoke',
-		'dynamic_worker_cpu',
-		'durable_object_gb_seconds',
-		'durable_object_rows_read',
-		'durable_object_platform_rows_read',
-	])
-	expect(data.topDurationConsumersByMetric).toHaveLength(3)
-	expect(data.topDurationConsumersByMetric[0]?.consumers).toEqual([
+	expect(data.topDurationConsumersByMetric).toEqual([
 		{
-			stableUserId: 'user-a',
-			username: 'alice',
-			totalDurationMs: 1_000,
+			metric: 'execute',
+			consumers: [
+				{ stableUserId: 'user-a', username: 'alice', totalDurationMs: 1_000 },
+			],
 		},
+		{
+			metric: 'job_run',
+			consumers: [
+				{
+					stableUserId: 'user-a',
+					username: 'alice',
+					totalDurationMs: 3_599_000,
+				},
+			],
+		},
+		{ metric: 'workflow_run', consumers: [] },
 	])
 	expect(data.entitlementPressure).toEqual([
 		{
@@ -290,9 +185,19 @@ test('loadFleetUsageInsights returns bounded consumer rankings and pressure pane
 				paidSource: 'none',
 				risk: 'none',
 			},
+			expect.objectContaining({
+				stableUserId: 'user-a',
+				uniqueWorkerDays: 60,
+				estimatedGrossUsd: 0.12,
+			}),
 		],
 		riskConsumers: [],
 	})
+
+	// The fleet role sees counters and account labels, never contact details.
+	await expect(
+		fleet.db.prepare('SELECT email FROM users').all(),
+	).rejects.toThrow('permission denied')
 })
 
 test('detectFleetUsagePressure flags entitlement, runtime, and unique-worker cost', async () => {
@@ -325,50 +230,42 @@ test('detectFleetUsagePressure flags entitlement, runtime, and unique-worker cos
 			return []
 		},
 	)
-	let durationQueryBind: Array<unknown> | undefined
-	const db = createFleetDb({
-		activeUsers: [
+	await using fleet = await createFleetDb({
+		users: [
+			{ stableUserId: 'user-a', username: 'alice' },
+			{ stableUserId: 'user-b', username: 'bob', plan: 'pro' },
 			{
-				stable_user_id: 'user-a',
-				username: 'alice',
-				plan: 'free',
-				stripe_plan: null,
-				entitlement_ladder: 'public',
-				event_count: 50,
-			},
-			{
-				stable_user_id: 'user-b',
-				username: 'bob',
-				plan: 'pro',
-				stripe_plan: null,
-				entitlement_ladder: 'public',
-				event_count: 40,
-			},
-			{
-				stable_user_id: 'user-admin',
+				stableUserId: 'user-admin',
 				username: 'kentcdodds',
 				plan: 'max',
-				stripe_plan: null,
-				entitlement_ladder: 'public',
-				event_count: 90,
+				admin: true,
 			},
 		],
-		adminUserIds: ['user-admin'],
-		runtimeByUser: {
-			'user-b': fleetRuntimeDurationAlertThresholdMs + 1,
-			'user-admin': fleetRuntimeDurationAlertThresholdMs * 2,
-		},
-		uniqueWorkerDaysByUser: {
-			'user-a': 1000,
-			'user-admin': 50_000,
-		},
-		onDurationQueryBind(params) {
-			durationQueryBind = params
-		},
+		rollups: [
+			['user-a', 'execute', '2026-07', 50, 0],
+			['user-a', 'dynamic_worker_day', '2026-07', 1_000, 0],
+			// Duration outside the runtime metrics never pages.
+			['user-a', 'outbound_fetch', '2026-07', 1, 999_999_999],
+			[
+				'user-b',
+				'job_run',
+				'2026-07',
+				40,
+				fleetRuntimeDurationAlertThresholdMs + 1,
+			],
+			[
+				'user-admin',
+				'execute',
+				'2026-07',
+				90,
+				fleetRuntimeDurationAlertThresholdMs * 2,
+			],
+			['user-admin', 'dynamic_worker_day', '2026-07', 50_000, 0],
+		],
 	})
 	const issues = await detectFleetUsagePressure({
-		db,
-		env: { APP_DB: db } as Env,
+		db: fleet.db,
+		env: fleet.env,
 		now: new Date('2026-07-08T12:00:00.000Z'),
 	})
 	expect(issues).toEqual([
@@ -406,11 +303,6 @@ test('detectFleetUsagePressure flags entitlement, runtime, and unique-worker cos
 			username: 'bob',
 			totalDurationMs: fleetRuntimeDurationAlertThresholdMs + 1,
 		},
-	])
-	expect(durationQueryBind?.slice(1, 4)).toEqual([
-		'execute',
-		'job_run',
-		'workflow_run',
 	])
 	expect(
 		entitlementMocks.readAdminEntitlementConsumption.mock.calls.map(
@@ -452,28 +344,29 @@ test('fleet entitlement pressure scores legacy Standard against the legacy outbo
 			]
 		},
 	)
-	const db = createFleetDb({
-		activeUsers: [
+	await using fleet = await createFleetDb({
+		users: [
 			{
-				stable_user_id: 'grant',
+				stableUserId: 'grant',
 				username: 'grant',
 				plan: 'standard',
-				stripe_plan: 'standard',
-				entitlement_ladder: 'legacy',
-				event_count: 80,
+				stripePlan: 'standard',
+				ladder: 'legacy',
 			},
 			{
-				stable_user_id: 'pat',
+				stableUserId: 'pat',
 				username: 'pat',
 				plan: 'standard',
-				stripe_plan: 'standard',
-				entitlement_ladder: 'public',
-				event_count: 70,
+				stripePlan: 'standard',
 			},
+		],
+		rollups: [
+			['grant', 'execute', '2026-07', 80, 0],
+			['pat', 'execute', '2026-07', 70, 0],
 		],
 	})
 	const now = new Date('2026-07-08T12:00:00.000Z')
-	const env = { APP_DB: db } as Env
+	const { db, env } = fleet
 	const [snapshots, issues, insights] = await Promise.all([
 		loadFleetEntitlementCrossingSnapshots({ db, env, now }),
 		detectFleetUsagePressure({ db, env, now }),

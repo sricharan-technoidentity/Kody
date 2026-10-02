@@ -1,8 +1,5 @@
 import { expect, test } from 'vitest'
-import {
-	CAPABILITY_EMBEDDING_DIMENSIONS,
-	deterministicEmbedding,
-} from '#worker/vectorize/embedding.ts'
+import { deterministicEmbedding } from '#worker/search-index/embedding.ts'
 import {
 	createInMemoryUserMeterEnv,
 	createPermissiveAccountWriteLeaseDbHooks,
@@ -283,36 +280,29 @@ function createMemoryTestDb() {
 const env = (
 	db: D1Database,
 	bindings: Partial<
-		Pick<Env, 'AI' | 'CAPABILITY_VECTOR_INDEX' | 'SENTRY_ENVIRONMENT'>
+		Pick<Env, 'CAPABILITY_VECTOR_INDEX' | 'SENTRY_ENVIRONMENT'> & {
+			BEDROCK_EMBEDDINGS: {
+				embedTexts(texts: readonly string[]): Promise<number[][]>
+			}
+		}
 	> = {},
 	meter = createInMemoryUserMeterEnv(),
 ) =>
 	({
 		APP_DB: db,
-		USER_METER: meter.env.USER_METER,
+		USER_METERS: meter.env.USER_METERS,
 		...bindings,
-	}) satisfies Pick<Env, 'APP_DB' | 'USER_METER'> as Pick<
+	}) satisfies Pick<Env, 'APP_DB' | 'USER_METERS'> as Pick<
 		Env,
-		| 'APP_DB'
-		| 'USER_METER'
-		| 'AI'
-		| 'CAPABILITY_VECTOR_INDEX'
-		| 'SENTRY_ENVIRONMENT'
+		'APP_DB' | 'USER_METERS' | 'CAPABILITY_VECTOR_INDEX' | 'SENTRY_ENVIRONMENT'
 	>
 
-function createDeterministicAiBinding(): Ai {
+function createDeterministicEmbeddings() {
 	return {
-		async run(...args: Array<unknown>) {
-			const input = args[1] as { text?: unknown }
-			const texts = Array.isArray(input.text)
-				? input.text.map(String)
-				: [String(input.text ?? '')]
-			return {
-				data: texts.map((text) => deterministicEmbedding(text)),
-				shape: [texts.length, CAPABILITY_EMBEDDING_DIMENSIONS],
-			}
+		async embedTexts(texts: readonly string[]) {
+			return texts.map((text) => deterministicEmbedding(text))
 		},
-	} as unknown as Ai
+	}
 }
 
 test('memory service upserts, verifies, and soft deletes', async () => {
@@ -660,7 +650,7 @@ test('memory search online queries Vectorize first and hydrates vector hits by i
 	}> = []
 	const runtimeEnv = env(testDb.db, {
 		SENTRY_ENVIRONMENT: 'production',
-		AI: createDeterministicAiBinding(),
+		BEDROCK_EMBEDDINGS: createDeterministicEmbeddings(),
 		CAPABILITY_VECTOR_INDEX: {
 			async query(
 				_values: Array<number>,

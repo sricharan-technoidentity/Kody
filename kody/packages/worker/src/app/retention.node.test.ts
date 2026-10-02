@@ -1,5 +1,3 @@
-import { quoteSqlIdentifier } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
 	agentPackageConversationUseRetentionDays,
@@ -21,161 +19,74 @@ import {
 	shouldRunRetentionCron,
 	stripeWebhookEventRetentionDays,
 } from './retention.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createPgDatabase, type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestAuditDb } from '#worker/test-support/aws/test-audit-db.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
 import { type RepoSessionRow } from '#worker/repo/types.ts'
 
-function applyMigrations(db: DatabaseSync) {
-	const migrationsDir = new URL('../../migrations/', import.meta.url)
-	applyAllMigrations(db, migrationsDir)
-}
+type Rows = Array<Record<string, unknown>>
+type Sql = (query: string, ...params: Array<unknown>) => Promise<Rows>
 
-function createD1FromSqlite(
-	db: DatabaseSync,
-	options?: { maxBindings?: number },
-) {
-	function assertBindingCount(params: Array<unknown>) {
-		if (
-			options?.maxBindings !== undefined &&
-			params.length > options.maxBindings
-		) {
-			throw new Error(`too many SQL variables: ${params.length}`)
-		}
+/** Superuser fixture queries (`?` binds) that bypass RLS: seeding and assertions only. */
+function fixtureSql(pg: {
+	query: (sql: string, params: Array<unknown>) => Promise<{ rows: Rows }>
+}): Sql {
+	return async (query, ...params) => {
+		let index = 0
+		return (
+			await pg.query(
+				query.replace(/\?/g, () => `$${++index}`),
+				params,
+			)
+		).rows
 	}
-	return {
-		prepare(query: string) {
-			return {
-				bind(...params: Array<unknown>) {
-					assertBindingCount(params)
-					return {
-						async all<T>() {
-							const statement = db.prepare(query)
-							const rows = statement.all(...params) as Array<T>
-							return { results: rows, meta: { changes: 0 } }
-						},
-						async first<T>() {
-							const statement = db.prepare(query)
-							return (statement.get(...params) ?? null) as T | null
-						},
-						async run() {
-							const statement = db.prepare(query)
-							const result = statement.run(...params)
-							return { meta: { changes: result.changes } }
-						},
-					}
-				},
-				async all<T>() {
-					const statement = db.prepare(query)
-					const rows = statement.all() as Array<T>
-					return { results: rows, meta: { changes: 0 } }
-				},
-				async first<T>() {
-					const statement = db.prepare(query)
-					return (statement.get() ?? null) as T | null
-				},
-				async run() {
-					const statement = db.prepare(query)
-					const result = statement.run()
-					return { meta: { changes: result.changes } }
-				},
-			}
-		},
-	} as unknown as D1Database
 }
 
-function createRetentionDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec('PRAGMA foreign_keys = ON')
-	sqlite.exec(`
-		CREATE TABLE mcp_memory_conversation_suppressions (
-			user_id TEXT NOT NULL,
-			conversation_id TEXT NOT NULL,
-			memory_id TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			last_seen_at TEXT NOT NULL,
-			expires_at TEXT NOT NULL,
-			PRIMARY KEY (user_id, conversation_id, memory_id)
-		);
-		CREATE TABLE entity_sources (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			entity_kind TEXT NOT NULL,
-			entity_id TEXT NOT NULL,
-			repo_id TEXT NOT NULL,
-			published_commit TEXT,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-		CREATE TABLE published_bundle_artifacts (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			source_id TEXT NOT NULL,
-			published_commit TEXT NOT NULL,
-			artifact_kind TEXT NOT NULL,
-			artifact_name TEXT,
-			entry_point TEXT NOT NULL,
-			kv_key TEXT NOT NULL,
-			dependencies_json TEXT NOT NULL DEFAULT '[]',
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-		CREATE TABLE usage_rollups (
-			user_id TEXT NOT NULL,
-			metric TEXT NOT NULL,
-			month TEXT NOT NULL,
-			event_count INTEGER NOT NULL DEFAULT 0,
-			error_count INTEGER NOT NULL DEFAULT 0,
-			total_duration_ms INTEGER NOT NULL DEFAULT 0,
-			total_cpu_ms INTEGER NOT NULL DEFAULT 0,
-			total_bytes INTEGER NOT NULL DEFAULT 0,
-			updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-			PRIMARY KEY (user_id, metric, month)
-		);
-		CREATE TABLE feature_flag_exposure_rollups (
-			flag_key TEXT NOT NULL,
-			user_id TEXT NOT NULL,
-			day TEXT NOT NULL,
-			enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-			source TEXT NOT NULL,
-			exposure_count INTEGER NOT NULL DEFAULT 0,
-			updated_at TEXT NOT NULL,
-			PRIMARY KEY (flag_key, user_id, day, enabled, source)
-		);
-		CREATE TABLE audit_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-			category TEXT NOT NULL,
-			action TEXT NOT NULL,
-			result TEXT NOT NULL,
-			email_hash TEXT,
-			ip_hash TEXT,
-			client_id TEXT,
-			path TEXT,
-			reason TEXT,
-			timestamp TEXT NOT NULL
-		);
-		CREATE TABLE stripe_webhook_events (
-			event_id TEXT PRIMARY KEY NOT NULL,
-			event_type TEXT NOT NULL,
-			processed_at TEXT NOT NULL
-		);
-		CREATE TABLE platform_feedback (
-			id TEXT PRIMARY KEY NOT NULL,
-			submitter_user_id TEXT NOT NULL,
-			status TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-		CREATE TABLE agent_package_conversation_uses (
-			user_id TEXT NOT NULL,
-			package_id TEXT NOT NULL,
-			conversation_id TEXT NOT NULL,
-			first_used_at TEXT NOT NULL,
-			last_used_at TEXT NOT NULL,
-			PRIMARY KEY (user_id, package_id, conversation_id)
-		);
-	`)
+/** Fails a statement that binds more values than the limit, like D1. */
+function withMaxBindings(db: PgDatabase, maxBindings: number): PgDatabase {
 	return {
-		sqlite,
-		db: createD1FromSqlite(sqlite),
+		...db,
+		prepare(query: string) {
+			const statement = db.prepare(query)
+			return {
+				...statement,
+				bind(...params: Array<unknown>) {
+					if (params.length > maxBindings) {
+						throw new Error(`too many SQL variables: ${params.length}`)
+					}
+					return statement.bind(...params)
+				},
+			} as typeof statement
+		},
+	}
+}
+
+/**
+ * The application and audit databases, each seen through the retention
+ * lane's role: fleet-wide read and delete on the pruned tables only.
+ */
+async function createRetentionDb() {
+	const store = await createTestDb()
+	const audit = await createTestAuditDb()
+	const retentionDb = createPgDatabase({
+		connection: store.pg,
+		role: 'kody_retention',
+	})
+	return {
+		retentionDb,
+		db: retentionDb as unknown as D1Database,
+		auditDb: createPgDatabase({
+			connection: audit.pg,
+			role: 'kody_audit_retention',
+		}) as unknown as D1Database,
+		sql: fixtureSql(store.pg),
+		auditSql: fixtureSql(audit.pg),
+		store,
+		async [Symbol.asyncDispose]() {
+			await store[Symbol.asyncDispose]()
+			await audit[Symbol.asyncDispose]()
+		},
 	}
 }
 
@@ -185,41 +96,41 @@ function daysAgo(days: number) {
 	return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString()
 }
 
-function insertPlatformFeedback(
-	db: DatabaseSync,
-	input: { id: string; updatedAt: string },
+async function insertPlatformFeedback(
+	sql: Sql,
+	input: { id: string; updatedAt: string; status?: string },
 ) {
-	db.prepare(
+	await sql(
 		`INSERT INTO platform_feedback (
-			id, submitter_user_id, status, updated_at
-		) VALUES (?, 'user-1', 'resolved', ?)`,
-	).run(input.id, input.updatedAt)
+			id, submitter_user_id, category, summary, details, status,
+			created_at, updated_at, submitter_username, submitter_email
+		) VALUES (?, 'user-1', 'bug', 'summary', 'details', ?, ?, ?, 'user-1', 'user-1@example.com')`,
+		input.id,
+		input.status ?? 'resolved',
+		input.updatedAt,
+		input.updatedAt,
+	)
 }
 
-function insertAuditEvent(db: DatabaseSync, input: { timestamp: string }) {
-	db.prepare(
+async function insertAuditEvent(sql: Sql, input: { timestamp: string }) {
+	await sql(
 		`INSERT INTO audit_events (
 			category, action, result, timestamp
 		) VALUES ('auth', 'login', 'success', ?)`,
-	).run(input.timestamp)
+		input.timestamp,
+	)
 }
 
-function idsForAuditEvents(db: DatabaseSync) {
+async function idsForAuditEvents(sql: Sql) {
 	return (
-		db
-			.prepare(`SELECT timestamp FROM audit_events ORDER BY timestamp ASC`)
-			.all() as Array<{
-			timestamp: string
-		}>
+		await sql(`SELECT timestamp FROM audit_events ORDER BY timestamp ASC`)
 	).map((row) => row.timestamp)
 }
 
-function idsForTable(db: DatabaseSync, table: string) {
-	return (
-		db.prepare(`SELECT id FROM ${table} ORDER BY id ASC`).all() as Array<{
-			id: string
-		}>
-	).map((row) => row.id)
+async function idsForTable(sql: Sql, table: string) {
+	return (await sql(`SELECT id FROM ${table} ORDER BY id ASC`)).map(
+		(row) => row.id,
+	)
 }
 
 test('retention cron runs only on the hourly gate', () => {
@@ -232,7 +143,8 @@ test('retention cron runs only on the hourly gate', () => {
 })
 
 test('platform feedback retention prunes terminal rows in bounded batches and runs round-robin', async () => {
-	const { sqlite, db } = createRetentionDb()
+	await using retention = await createRetentionDb()
+	const { sql, db, auditDb } = retention
 	for (const [id, status, updatedAt] of [
 		[
 			'terminal-old-resolved',
@@ -252,13 +164,7 @@ test('platform feedback retention prunes terminal rows in bounded batches and ru
 			daysAgo(platformFeedbackRetentionDays + 10),
 		],
 	] as const) {
-		sqlite
-			.prepare(
-				`INSERT INTO platform_feedback (
-					id, submitter_user_id, status, updated_at
-				) VALUES (?, 'user-1', ?, ?)`,
-			)
-			.run(id, status, updatedAt)
+		await insertPlatformFeedback(sql, { id, status, updatedAt })
 	}
 
 	expect(
@@ -270,22 +176,19 @@ test('platform feedback retention prunes terminal rows in bounded batches and ru
 	expect(
 		await prunePlatformFeedbackForRetention({ db, now, batchSize: 1 }),
 	).toEqual({ selected: 0, deleted: 0 })
-	expect(idsForTable(sqlite, 'platform_feedback')).toEqual([
+	expect(await idsForTable(sql, 'platform_feedback')).toEqual([
 		'active-old-open',
 		'active-old-triaged',
 		'terminal-boundary',
 	])
 
-	sqlite
-		.prepare(
-			`INSERT INTO platform_feedback (
-				id, submitter_user_id, status, updated_at
-			) VALUES ('runner-delete', 'user-1', 'resolved', ?)`,
-		)
-		.run(daysAgo(platformFeedbackRetentionDays + 1))
+	await insertPlatformFeedback(sql, {
+		id: 'runner-delete',
+		updatedAt: daysAgo(platformFeedbackRetentionDays + 1),
+	})
 	const env = {
 		APP_DB: db,
-		AUDIT_DB: db,
+		AUDIT_DB: auditDb,
 		BUNDLE_ARTIFACTS_KV: { delete: vi.fn(async () => undefined) },
 		EMAIL_BLOBS: { delete: vi.fn(async () => undefined) },
 	} as unknown as Pick<
@@ -297,7 +200,7 @@ test('platform feedback retention prunes terminal rows in bounded batches and ru
 	expect(result.agentPackageConversationUses).toBe(0)
 	expect(result.batchesPerTable['platform_feedback']).toBe(1)
 	expect(result.batchesPerTable['agent_package_conversation_uses']).toBe(1)
-	expect(idsForTable(sqlite, 'platform_feedback')).toEqual([
+	expect(await idsForTable(sql, 'platform_feedback')).toEqual([
 		'active-old-open',
 		'active-old-triaged',
 		'terminal-boundary',
@@ -305,7 +208,8 @@ test('platform feedback retention prunes terminal rows in bounded batches and ru
 })
 
 test('memory suppression, audit, and stripe webhook retention respect boundaries', async () => {
-	const { sqlite, db } = createRetentionDb()
+	await using retention = await createRetentionDb()
+	const { sql, auditSql, db, auditDb } = retention
 	for (const [memoryId, lastSeenAt, expiresAt] of [
 		[
 			'memory-old-expired',
@@ -315,57 +219,58 @@ test('memory suppression, audit, and stripe webhook retention respect boundaries
 		['memory-boundary', daysAgo(memorySuppressionRetentionDays), daysAgo(1)],
 		['memory-active', daysAgo(memorySuppressionRetentionDays + 1), daysAgo(-1)],
 	]) {
-		sqlite
-			.prepare(
-				`INSERT INTO mcp_memory_conversation_suppressions (
+		await sql(
+			`INSERT INTO mcp_memories (id, user_id, subject, summary) VALUES (?, 'user-1', 's', 's')`,
+			memoryId,
+		)
+		await sql(
+			`INSERT INTO mcp_memory_conversation_suppressions (
 				user_id, conversation_id, memory_id, created_at, last_seen_at, expires_at
 			) VALUES ('user-1', 'conversation', ?, ?, ?, ?)`,
-			)
-			.run(memoryId, lastSeenAt, lastSeenAt, expiresAt)
+			memoryId,
+			lastSeenAt,
+			lastSeenAt,
+			expiresAt,
+		)
 	}
 	for (const [timestamp] of [
 		[daysAgo(auditEventRetentionDays + 1)],
 		[daysAgo(auditEventRetentionDays)],
 	]) {
-		sqlite
-			.prepare(
-				`INSERT INTO audit_events (
-				category, action, result, timestamp
-			) VALUES ('auth', 'login', 'success', ?)`,
-			)
-			.run(timestamp)
+		await insertAuditEvent(auditSql, { timestamp })
 	}
 	for (const [eventId, processedAt] of [
 		['evt_old', daysAgo(stripeWebhookEventRetentionDays + 1)],
 		['evt_boundary', daysAgo(stripeWebhookEventRetentionDays)],
 	]) {
-		sqlite
-			.prepare(
-				`INSERT INTO stripe_webhook_events (
+		await sql(
+			`INSERT INTO stripe_webhook_events (
 				event_id, event_type, processed_at
 			) VALUES (?, 'checkout.session.completed', ?)`,
-			)
-			.run(eventId, processedAt)
+			eventId,
+			processedAt,
+		)
 	}
 	for (const [packageId, lastUsedAt] of [
 		['pkg-old', daysAgo(agentPackageConversationUseRetentionDays + 1)],
 		['pkg-boundary', daysAgo(agentPackageConversationUseRetentionDays)],
 		['pkg-recent', daysAgo(1)],
 	]) {
-		sqlite
-			.prepare(
-				`INSERT INTO agent_package_conversation_uses (
+		await sql(
+			`INSERT INTO agent_package_conversation_uses (
 				user_id, package_id, conversation_id, first_used_at, last_used_at
 			) VALUES ('user-1', ?, 'conversation', ?, ?)`,
-			)
-			.run(packageId, lastUsedAt, lastUsedAt)
+			packageId,
+			lastUsedAt,
+			lastUsedAt,
+		)
 	}
 
 	expect(await pruneMemorySuppressionsForRetention({ db, now })).toEqual({
 		selected: 1,
 		deleted: 1,
 	})
-	expect(await pruneAuditEventsForRetention({ db, now })).toEqual({
+	expect(await pruneAuditEventsForRetention({ db: auditDb, now })).toEqual({
 		selected: 1,
 		deleted: 1,
 	})
@@ -380,72 +285,60 @@ test('memory suppression, audit, and stripe webhook retention respect boundaries
 		deleted: 1,
 	})
 
-	const memories = sqlite
-		.prepare(
-			`SELECT memory_id
+	const memories = (await sql(`SELECT memory_id
 			FROM mcp_memory_conversation_suppressions
-			ORDER BY memory_id`,
-		)
-		.all() as Array<{ memory_id: string }>
+			ORDER BY memory_id`)) as Array<{ memory_id: string }>
 	expect(memories.map((row) => row.memory_id)).toEqual([
 		'memory-active',
 		'memory-boundary',
 	])
-	const auditRows = sqlite
-		.prepare(`SELECT timestamp FROM audit_events ORDER BY timestamp`)
-		.all() as Array<{ timestamp: string }>
-	expect(auditRows.map((row) => row.timestamp)).toEqual([
+	expect(await idsForAuditEvents(auditSql)).toEqual([
 		daysAgo(auditEventRetentionDays),
 	])
 	expect(
 		(
-			sqlite
-				.prepare(`SELECT event_id FROM stripe_webhook_events ORDER BY event_id`)
-				.all() as Array<{ event_id: string }>
+			(await sql(
+				`SELECT event_id FROM stripe_webhook_events ORDER BY event_id`,
+			)) as Array<{ event_id: string }>
 		).map((row) => row.event_id),
 	).toEqual(['evt_boundary'])
 	expect(
 		(
-			sqlite
-				.prepare(
-					`SELECT package_id FROM agent_package_conversation_uses ORDER BY package_id`,
-				)
-				.all() as Array<{ package_id: string }>
+			(await sql(
+				`SELECT package_id FROM agent_package_conversation_uses ORDER BY package_id`,
+			)) as Array<{ package_id: string }>
 		).map((row) => row.package_id),
 	).toEqual(['pkg-boundary', 'pkg-recent'])
 })
 
 test('retention prune reports selected separately from deleted when rows vanish mid-batch', async () => {
-	const { sqlite } = createRetentionDb()
-	const baseDb = createD1FromSqlite(sqlite)
+	await using retention = await createRetentionDb()
+	const { sql, retentionDb } = retention
 	// Simulate a racing writer deleting one selected row before the batch
 	// DELETE runs: selected stays at the full batch size so hasMore-style
 	// decisions keep looping instead of marking the table drained.
 	const dbWithVanishingRow = {
+		...retentionDb,
 		prepare(query: string) {
-			const prepared = baseDb.prepare(query)
+			const prepared = retentionDb.prepare(query)
 			if (!query.includes('DELETE FROM platform_feedback')) return prepared
 			return {
+				...prepared,
 				bind(...params: Array<unknown>) {
 					const bound = prepared.bind(...params)
 					return {
+						...bound,
 						async run() {
-							sqlite
-								.prepare(
-									`DELETE FROM platform_feedback WHERE id = 'feedback-0'`,
-								)
-								.run()
+							await sql(`DELETE FROM platform_feedback WHERE id = 'feedback-0'`)
 							return bound.run()
 						},
-						all: bound.all,
-						first: bound.first,
-					}
+					} as typeof bound
 				},
-			}
+			} as typeof prepared
 		},
-	} as unknown as D1Database
+	} satisfies PgDatabase as unknown as D1Database
 	for (let index = 0; index < 2; index += 1) {
-		insertPlatformFeedback(sqlite, {
+		await insertPlatformFeedback(sql, {
 			id: `feedback-${index}`,
 			updatedAt: daysAgo(platformFeedbackRetentionDays + 1),
 		})
@@ -461,16 +354,17 @@ test('retention prune reports selected separately from deleted when rows vanish 
 })
 
 test('usage rollup retention respects month boundaries', async () => {
-	const { sqlite, db } = createRetentionDb()
+	await using retention = await createRetentionDb()
+	const { sql, db } = retention
 	// 24 months before 2026-07 keeps 2024-07 and later.
 	for (const month of ['2024-06', '2024-07', '2026-06']) {
-		sqlite
-			.prepare(
-				`INSERT INTO usage_rollups (
+		await sql(
+			`INSERT INTO usage_rollups (
 				user_id, metric, month, event_count, updated_at
 			) VALUES ('user-1', 'mcp_tool_call', ?, 1, ?)`,
-			)
-			.run(month, now.toISOString())
+			month,
+			now.toISOString(),
+		)
 	}
 
 	expect(await pruneUsageRollupsForRetention({ db, now })).toEqual({
@@ -478,36 +372,37 @@ test('usage rollup retention respects month boundaries', async () => {
 		deleted: 1,
 	})
 
-	const months = sqlite
-		.prepare(`SELECT month FROM usage_rollups ORDER BY month`)
-		.all() as Array<{ month: string }>
+	const months = (await sql(
+		`SELECT month FROM usage_rollups ORDER BY month`,
+	)) as Array<{ month: string }>
 	expect(months.map((row) => row.month)).toEqual(['2024-07', '2026-06'])
 })
 
 test('feature flag exposure rollup retention respects the day boundary', async () => {
-	const { sqlite, db } = createRetentionDb()
+	await using retention = await createRetentionDb()
+	const { sql, db } = retention
 	const cutoffDay = daysAgo(featureFlagExposureRetentionDays).slice(0, 10)
 	for (const day of [
 		daysAgo(featureFlagExposureRetentionDays + 1).slice(0, 10),
 		cutoffDay,
 		daysAgo(1).slice(0, 10),
 	]) {
-		sqlite
-			.prepare(
-				`INSERT INTO feature_flag_exposure_rollups (
+		await sql(
+			`INSERT INTO feature_flag_exposure_rollups (
 				flag_key, user_id, day, enabled, source, exposure_count, updated_at
 			) VALUES ('retired-flag', 'user-1', ?, 1, 'rollout', 1, ?)`,
-			)
-			.run(day, now.toISOString())
+			day,
+			now.toISOString(),
+		)
 	}
 
 	expect(await pruneFeatureFlagExposuresForRetention({ db, now })).toEqual({
 		selected: 1,
 		deleted: 1,
 	})
-	const days = sqlite
-		.prepare(`SELECT day FROM feature_flag_exposure_rollups ORDER BY day`)
-		.all() as Array<{ day: string }>
+	const days = (await sql(
+		`SELECT day FROM feature_flag_exposure_rollups ORDER BY day`,
+	)) as Array<{ day: string }>
 	expect(days.map((row) => row.day)).toEqual([
 		cutoffDay,
 		daysAgo(1).slice(0, 10),
@@ -515,7 +410,8 @@ test('feature flag exposure rollup retention respects the day boundary', async (
 })
 
 test('published bundle artifact retention deletes stale rows, KV blobs, and source snapshots', async () => {
-	const { sqlite, db } = createRetentionDb()
+	await using retention = await createRetentionDb()
+	const { sql, db } = retention
 	const kvDelete = vi.fn(async () => undefined)
 	const indexEnv = createInMemoryRepoSessionIndexEnv(db)
 	await indexEnv
@@ -554,21 +450,18 @@ test('published bundle artifact retention deletes stale rows, KV blobs, and sour
 		['source-stale', 'commit-current'],
 		['source-session', 'commit-current'],
 	]) {
-		sqlite
-			.prepare(
-				`INSERT INTO entity_sources (
+		await sql(
+			`INSERT INTO entity_sources (
 				id, user_id, entity_kind, entity_id, repo_id, published_commit,
 				created_at, updated_at
 			) VALUES (?, 'user-1', 'package', ?, ?, ?, ?, ?)`,
-			)
-			.run(
-				sourceId,
-				`pkg-${sourceId}`,
-				`repo-${sourceId}`,
-				publishedCommit,
-				daysAgo(60),
-				daysAgo(60),
-			)
+			sourceId,
+			`pkg-${sourceId}`,
+			`repo-${sourceId}`,
+			publishedCommit,
+			daysAgo(60),
+			daysAgo(60),
+		)
 	}
 	for (const [id, sourceId, commit, createdAt] of [
 		[
@@ -596,14 +489,20 @@ test('published bundle artifact retention deletes stale rows, KV blobs, and sour
 			daysAgo(publishedBundleArtifactRetentionDays + 1),
 		],
 	]) {
-		sqlite
-			.prepare(
-				`INSERT INTO published_bundle_artifacts (
+		await sql(
+			`INSERT INTO published_bundle_artifacts (
 				id, user_id, source_id, published_commit, artifact_kind, entry_point,
 				kv_key, created_at, updated_at
-			) VALUES (?, 'user-1', ?, ?, 'module', 'src/index.ts', ?, ?, ?)`,
-			)
-			.run(id, sourceId, commit, `kv:${id}`, createdAt, createdAt)
+			) VALUES (?, 'user-1', ?, ?, 'module', ?, ?, ?, ?)`,
+			id,
+			sourceId,
+			commit,
+			// One artifact per source identity (kind, name, entry point).
+			`src/${id}.ts`,
+			`kv:${id}`,
+			createdAt,
+			createdAt,
+		)
 	}
 
 	const result = await prunePublishedBundleArtifactsForRetention({
@@ -626,7 +525,7 @@ test('published bundle artifact retention deletes stale rows, KV blobs, and sour
 	expect(kvDelete).toHaveBeenCalledWith(
 		'source-manifest-snapshot:v1:source-stale:commit-old',
 	)
-	expect(idsForTable(sqlite, 'published_bundle_artifacts')).toEqual([
+	expect(await idsForTable(sql, 'published_bundle_artifacts')).toEqual([
 		'artifact-current',
 		'artifact-fresh',
 		'artifact-session',
@@ -634,41 +533,38 @@ test('published bundle artifact retention deletes stale rows, KV blobs, and sour
 })
 
 test('published bundle artifact retention rechecks staleness before deleting selected rows', async () => {
-	const { sqlite } = createRetentionDb()
-	const baseDb = createD1FromSqlite(sqlite)
+	await using retention = await createRetentionDb()
+	const { sql, retentionDb } = retention
 	const kvDelete = vi.fn(async () => undefined)
 	let refreshedBeforeDelete = false
 	const dbWithRefreshRace = {
+		...retentionDb,
 		prepare(query: string) {
-			const prepared = baseDb.prepare(query)
+			const prepared = retentionDb.prepare(query)
 			if (
 				query.includes('DELETE FROM published_bundle_artifacts') &&
 				query.includes('AND kv_key = ?')
 			) {
 				return {
+					...prepared,
 					bind(...params: Array<unknown>) {
 						const bound = prepared.bind(...params)
 						return {
+							...bound,
 							async run() {
 								refreshedBeforeDelete = true
-								sqlite
-									.prepare(
-										`UPDATE entity_sources
+								await sql(`UPDATE entity_sources
 										SET published_commit = 'commit-old'
-										WHERE id = 'source-race'`,
-									)
-									.run()
+										WHERE id = 'source-race'`)
 								return bound.run()
 							},
-							all: bound.all,
-							first: bound.first,
-						}
+						} as typeof bound
 					},
-				}
+				} as typeof prepared
 			}
 			return prepared
 		},
-	} as unknown as D1Database
+	} satisfies PgDatabase as unknown as D1Database
 	const env = {
 		APP_DB: dbWithRefreshRace,
 		BUNDLE_ARTIFACTS_KV: {
@@ -677,29 +573,26 @@ test('published bundle artifact retention rechecks staleness before deleting sel
 		REPO_SESSION_INDEX:
 			createInMemoryRepoSessionIndexEnv(dbWithRefreshRace).REPO_SESSION_INDEX,
 	} as unknown as Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV'>
-	sqlite
-		.prepare(
-			`INSERT INTO entity_sources (
+	await sql(
+		`INSERT INTO entity_sources (
 				id, user_id, entity_kind, entity_id, repo_id, published_commit,
 				created_at, updated_at
 			) VALUES ('source-race', 'user-1', 'package', 'pkg-race', 'repo-race',
 				'commit-current', ?, ?)`,
-		)
-		.run(daysAgo(60), daysAgo(60))
-	sqlite
-		.prepare(
-			`INSERT INTO published_bundle_artifacts (
+		daysAgo(60),
+		daysAgo(60),
+	)
+	await sql(
+		`INSERT INTO published_bundle_artifacts (
 				id, user_id, source_id, published_commit, artifact_kind, entry_point,
 				kv_key, created_at, updated_at
 			) VALUES (
 				'artifact-race', 'user-1', 'source-race', 'commit-old', 'module',
 				'src/index.ts', 'kv:artifact-race', ?, ?
 			)`,
-		)
-		.run(
-			daysAgo(publishedBundleArtifactRetentionDays + 1),
-			daysAgo(publishedBundleArtifactRetentionDays + 1),
-		)
+		daysAgo(publishedBundleArtifactRetentionDays + 1),
+		daysAgo(publishedBundleArtifactRetentionDays + 1),
+	)
 
 	const result = await prunePublishedBundleArtifactsForRetention({
 		env,
@@ -716,55 +609,60 @@ test('published bundle artifact retention rechecks staleness before deleting sel
 		hasMore: false,
 	})
 	expect(kvDelete).not.toHaveBeenCalled()
-	expect(idsForTable(sqlite, 'published_bundle_artifacts')).toEqual([
+	expect(await idsForTable(sql, 'published_bundle_artifacts')).toEqual([
 		'artifact-race',
 	])
 })
 
 test('retention pruning deletes only one configured batch per table invocation', async () => {
-	const { sqlite, db } = createRetentionDb()
+	await using retention = await createRetentionDb()
+	const { auditSql, auditDb } = retention
 	for (let index = 0; index < 3; index += 1) {
-		insertAuditEvent(sqlite, {
+		await insertAuditEvent(auditSql, {
 			timestamp: daysAgo(auditEventRetentionDays + 1 + index),
 		})
 	}
 
-	expect(await pruneAuditEventsForRetention({ db, now, batchSize: 2 })).toEqual(
-		{ selected: 2, deleted: 2 },
-	)
-	expect(idsForAuditEvents(sqlite)).toHaveLength(1)
-	expect(await pruneAuditEventsForRetention({ db, now, batchSize: 2 })).toEqual(
-		{ selected: 1, deleted: 1 },
-	)
-	expect(idsForAuditEvents(sqlite)).toEqual([])
+	expect(
+		await pruneAuditEventsForRetention({ db: auditDb, now, batchSize: 2 }),
+	).toEqual({ selected: 2, deleted: 2 })
+	expect(await idsForAuditEvents(auditSql)).toHaveLength(1)
+	expect(
+		await pruneAuditEventsForRetention({ db: auditDb, now, batchSize: 2 }),
+	).toEqual({ selected: 1, deleted: 1 })
+	expect(await idsForAuditEvents(auditSql)).toEqual([])
 })
 
 test('retention row deletes chunk ids to stay within the D1 binding limit', async () => {
-	const { sqlite } = createRetentionDb()
-	const db = createD1FromSqlite(sqlite, { maxBindings: 100 })
+	await using retention = await createRetentionDb()
+	const { auditSql } = retention
+	const auditDb = withMaxBindings(
+		retention.auditDb as unknown as PgDatabase,
+		100,
+	) as unknown as D1Database
 	for (let index = 0; index < 101; index += 1) {
-		insertAuditEvent(sqlite, {
+		await insertAuditEvent(auditSql, {
 			timestamp: daysAgo(auditEventRetentionDays + 1),
 		})
 	}
 
 	expect(
-		await pruneAuditEventsForRetention({ db, now, batchSize: 101 }),
+		await pruneAuditEventsForRetention({ db: auditDb, now, batchSize: 101 }),
 	).toEqual({ selected: 101, deleted: 101 })
-	expect(idsForAuditEvents(sqlite)).toEqual([])
+	expect(await idsForAuditEvents(auditSql)).toEqual([])
 })
 
 test('retention run loops batches per table until backlogs are drained', async () => {
-	const { sqlite, db } = createRetentionDb()
-	const { sqlite: auditSqlite, db: auditDb } = createRetentionDb()
+	await using retention = await createRetentionDb()
+	const { sql, auditSql, db, auditDb } = retention
 	for (let index = 0; index < 501; index += 1) {
-		insertPlatformFeedback(sqlite, {
+		await insertPlatformFeedback(sql, {
 			id: `feedback-${String(index).padStart(3, '0')}`,
 			updatedAt: daysAgo(platformFeedbackRetentionDays + 1),
 		})
 	}
 	for (let index = 0; index < 300; index += 1) {
-		insertAuditEvent(auditSqlite, {
+		await insertAuditEvent(auditSql, {
 			timestamp: daysAgo(auditEventRetentionDays + 1),
 		})
 	}
@@ -785,26 +683,25 @@ test('retention run loops batches per table until backlogs are drained', async (
 	expect(result.batchesPerTable['platform_feedback']).toBe(3)
 	expect(result.batchesPerTable['audit_events']).toBe(2)
 	expect(result.timeBudgetExhausted).toBe(false)
-	expect(idsForTable(sqlite, 'platform_feedback')).toEqual([])
-	expect(
-		auditSqlite.prepare(`SELECT COUNT(*) AS count FROM audit_events`).get(),
-	).toEqual({ count: 0 })
+	expect(await idsForTable(sql, 'platform_feedback')).toEqual([])
+	expect(await idsForAuditEvents(auditSql)).toEqual([])
 })
 
 test('retention run gives every table one batch and stops when the budget is exhausted', async () => {
-	const { sqlite, db } = createRetentionDb()
+	await using retention = await createRetentionDb()
+	const { sql, auditSql, db, auditDb } = retention
 	for (let index = 0; index < 300; index += 1) {
-		insertPlatformFeedback(sqlite, {
+		await insertPlatformFeedback(sql, {
 			id: `feedback-${String(index).padStart(3, '0')}`,
 			updatedAt: daysAgo(platformFeedbackRetentionDays + 1),
 		})
 	}
-	insertAuditEvent(sqlite, {
+	await insertAuditEvent(auditSql, {
 		timestamp: daysAgo(auditEventRetentionDays + 1),
 	})
 	const env = {
 		APP_DB: db,
-		AUDIT_DB: db,
+		AUDIT_DB: auditDb,
 		BUNDLE_ARTIFACTS_KV: { delete: vi.fn(async () => undefined) },
 		EMAIL_BLOBS: { delete: vi.fn(async () => undefined) },
 	} as unknown as Pick<
@@ -820,30 +717,37 @@ test('retention run gives every table one batch and stops when the budget is exh
 	expect(result.auditEvents).toBe(1)
 	expect(result.batchesPerTable['platform_feedback']).toBe(1)
 	expect(result.timeBudgetExhausted).toBe(true)
-	expect(idsForTable(sqlite, 'platform_feedback')).toHaveLength(50)
+	expect(await idsForTable(sql, 'platform_feedback')).toHaveLength(50)
 })
 
-test('retention coverage includes every live growth-pattern table or documented exemption', () => {
-	const db = new DatabaseSync(':memory:')
-	applyMigrations(db)
-	const tables = db
-		.prepare(
-			`SELECT name
-			FROM sqlite_schema
-			WHERE type = 'table'
-				AND name NOT LIKE 'sqlite_%'
-			ORDER BY name`,
+test('retention coverage includes every live growth-pattern table or documented exemption', async () => {
+	await using retention = await createRetentionDb()
+	// Application and audit databases together.
+	const columnRows = [
+		...(await retention.sql(
+			`SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'`,
+		)),
+		...(await retention.auditSql(
+			`SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'`,
+		)),
+	] as Array<{ table_name: string; column_name: string }>
+	const columnsByTable = new Map<string, Set<string>>()
+	for (const row of columnRows) {
+		columnsByTable.set(
+			row.table_name,
+			(columnsByTable.get(row.table_name) ?? new Set()).add(row.column_name),
 		)
-		.all() as Array<{ name: string }>
+	}
+	const tables = [...columnsByTable.keys()].map((name) => ({ name }))
+	// Job rows belong to the jobs service (ADR 0016), which owns their retention.
+	const jobsServiceTables = new Set(['jobs', 'archived_job_artifacts'])
 	const candidateTables = new Set<string>()
 	const growthPattern =
 		/(?:_runs|_logs|_events|_invocations|_suppressions|_artifacts|_messages|_threads|_attachments|_rollups|_counters|_memories)$/u
 	const growthTimeColumns = ['created_at', 'day', 'month']
 	for (const table of tables) {
-		const columns = db
-			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
-			.all() as Array<{ name: string }>
-		const columnNames = new Set(columns.map((column) => column.name))
+		if (jobsServiceTables.has(table.name)) continue
+		const columnNames = columnsByTable.get(table.name) ?? new Set<string>()
 		const hasUserCreatedGrowthShape =
 			columnNames.has('user_id') &&
 			growthTimeColumns.some((column) => columnNames.has(column)) &&
@@ -876,4 +780,21 @@ test('retention coverage includes every live growth-pattern table or documented 
 
 	expect(missing).toEqual([])
 	expect(stale).toEqual([])
+})
+
+test('the retention roles only read and delete the pruned tables', async () => {
+	await using retention = await createRetentionDb()
+	const auditRetention = retention.auditDb as unknown as PgDatabase
+	for (const [db, sql] of [
+		[retention.retentionDb, `SELECT email FROM users`],
+		[retention.retentionDb, `SELECT summary FROM mcp_memories`],
+		[
+			retention.retentionDb,
+			`UPDATE usage_rollups SET event_count = 0 WHERE month < '2000-01'`,
+		],
+		[auditRetention, `SELECT email_hash FROM audit_events`],
+		[auditRetention, `UPDATE audit_events SET reason = 'x' WHERE id = 0`],
+	] as const) {
+		await expect(db.prepare(sql).all()).rejects.toThrow(/permission denied/)
+	}
 })

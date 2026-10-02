@@ -247,7 +247,7 @@ export async function assertPackageCanAccessResolvedSecret(input: {
  * require an `allowed_packages` grant.
  */
 export async function assertCanSetSecrets(input: {
-	env: Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'>
+	env: Pick<Env, 'APP_DB' | 'SECRET_KMS'>
 	userId: string
 	baseUrl: string
 	secrets: Array<{

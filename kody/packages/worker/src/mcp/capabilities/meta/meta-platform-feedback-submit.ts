@@ -85,7 +85,7 @@ export const metaPlatformFeedbackSubmitCapability = defineDomainCapability(
 			})
 			try {
 				await enqueuePlatformFeedbackDispatch({
-					queue: ctx.env.PLATFORM_FEEDBACK_DISPATCH_QUEUE,
+					env: ctx.env,
 					feedbackId: feedback.id,
 				})
 			} catch (error) {

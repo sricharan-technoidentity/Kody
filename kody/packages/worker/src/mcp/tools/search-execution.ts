@@ -12,7 +12,7 @@ import { runPackageRetrievers } from '#worker/package-retrievers/service.ts'
 import {
 	createTextEmbeddingCache,
 	isCapabilitySearchOffline,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 
 import { consumeSearchRateLimit } from '#worker/search-rate-limit.ts'
 import { getUserPlan } from '#worker/entitlements/service.ts'

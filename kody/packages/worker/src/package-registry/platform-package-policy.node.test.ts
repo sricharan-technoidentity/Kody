@@ -1,9 +1,8 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { createPlatformAccount } from '#worker/identity/platform-account-creation.ts'
 import { insertSavedPackage } from '#worker/package-registry/repo.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	assertPersonOwnedPackageMayNotRunPlatformDependencies,
 	collectScopedPackageNamesFromSource,
@@ -13,26 +12,27 @@ import {
 	throwIfPersonPackagePlatformReference,
 } from './platform-package-policy.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
+/** A person (alice) checks scopes through her own writer; kody is a platform account. */
 async function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
+	const store = await createTestDb()
 	const platform = await createPlatformAccount({
-		db,
+		db: createPgDatabase({ connection: store.pg, role: 'kody_admin' }),
+		forUser: (id) => store.forUser(id).db,
 		email: 'kody@example.com',
 		username: 'kody',
 	})
-	return { db, platformUserId: platform.stableUserId }
+	return Object.assign(store, {
+		db: store.forUser('person-alice').db,
+		platformUserId: platform.stableUserId,
+	})
 }
 
 async function seedPackage(
-	db: D1Database,
+	store: Awaited<ReturnType<typeof createTestDb>>,
 	input: { userId: string; name: string; kodyId: string },
 ) {
 	const id = crypto.randomUUID()
-	await insertSavedPackage(db, {
+	await insertSavedPackage(store.forUser(input.userId).db, {
 		id,
 		user_id: input.userId,
 		name: input.name,
@@ -65,7 +65,8 @@ await packages.invoke('@kody/google/profile', { params: {} })
 })
 
 test('findPersonPackagePlatformReference names the official package and ignores person scopes', async () => {
-	const { db } = await createHarness()
+	await using store = await createHarness()
+	const { db } = store
 	await expect(
 		findPersonPackagePlatformReference({
 			db,
@@ -125,20 +126,18 @@ import shared from 'kody:@kody/shared/util'
 })
 
 test('already-published person artifacts with platformOwned deps fail closed; platform composers do not', async () => {
-	const { db, platformUserId } = await createHarness()
-	await db
-		.prepare(
-			`INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id, plan)
-			VALUES (?, ?, 'x', CURRENT_TIMESTAMP, ?, 'free')`,
-		)
-		.bind('alice', 'alice@example.com', 'person-alice')
-		.run()
-	const personPackageId = await seedPackage(db, {
+	await using store = await createHarness()
+	const { db, platformUserId } = store
+	await store.pg.query(
+		`INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id, plan)
+		VALUES ('alice', 'alice@example.com', 'x', 'now', 'person-alice', 'free')`,
+	)
+	const personPackageId = await seedPackage(store, {
 		userId: 'person-alice',
 		name: '@alice/helper',
 		kodyId: 'helper',
 	})
-	const platformPackageId = await seedPackage(db, {
+	const platformPackageId = await seedPackage(store, {
 		userId: platformUserId,
 		name: '@kody/github',
 		kodyId: 'github',
@@ -155,7 +154,7 @@ test('already-published person artifacts with platformOwned deps fail closed; pl
 	).rejects.toThrow(personPackagePlatformDependencyMessage)
 	await expect(
 		assertPersonOwnedPackageMayNotRunPlatformDependencies({
-			db,
+			db: store.forUser(platformUserId).db,
 			userId: platformUserId,
 			packageId: platformPackageId,
 			dependencies: platformOwned,

@@ -2,13 +2,13 @@ import {
 	embedTextForVectorize,
 	getCapabilityVectorIndex,
 	isCapabilitySearchOffline,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import {
 	recordVectorEmbedFingerprint,
 	shouldSkipVectorEmbed,
 	tryDeleteVectorEmbedFingerprint,
-} from '#worker/vectorize/embed-fingerprints.ts'
-import { userVectorNamespace } from '#worker/vectorize/vector-namespaces.ts'
+} from '#worker/search-index/embed-fingerprints.ts'
+import { userVectorNamespace } from '#worker/search-index/vector-namespaces.ts'
 import { savedPackageVectorId } from './repo.ts'
 
 export async function upsertSavedPackageVector(

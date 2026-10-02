@@ -1,9 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { communityForksDeleteCascadeStatements } from '#worker/community/community-forks-delete-cascade.ts'
 import { insertCommunityFork } from '#worker/community/repo.ts'
 import { resolveViewerListingInstalls } from '#worker/community/viewer-install.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 
 const mockModule = vi.hoisted(() => ({
@@ -101,107 +99,36 @@ const listingRef = {
 	pinnedCommit: 'commit-new',
 }
 
-function createDeleteForkDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE users (
-			stable_user_id TEXT PRIMARY KEY NOT NULL,
-			deleting_at TEXT
-		);
-		CREATE TABLE saved_packages (
-			id TEXT PRIMARY KEY NOT NULL,
-			user_id TEXT NOT NULL,
-			name TEXT NOT NULL,
-			kody_id TEXT NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			tags_json TEXT NOT NULL DEFAULT '[]',
-			search_text TEXT,
-			source_id TEXT NOT NULL,
-			has_app INTEGER NOT NULL DEFAULT 0,
-			hidden INTEGER NOT NULL DEFAULT 0,
-			is_private INTEGER NOT NULL DEFAULT 1,
-			locked_at TEXT,
-			created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-			updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-		);
-		CREATE TABLE entity_sources (
-			id TEXT PRIMARY KEY NOT NULL,
-			user_id TEXT NOT NULL,
-			entity_kind TEXT NOT NULL,
-			entity_id TEXT NOT NULL
-		);
-		CREATE TABLE community_forks (
-			id TEXT PRIMARY KEY NOT NULL,
-			listing_id TEXT NOT NULL,
-			forker_user_id TEXT NOT NULL,
-			origin_commit TEXT NOT NULL,
-			forked_package_id TEXT NOT NULL,
-			forked_source_id TEXT NOT NULL,
-			target_kody_id TEXT NOT NULL,
-			listing_name TEXT,
-			listing_kody_id TEXT,
-			adopted_at TEXT,
-			adoption_note TEXT,
-			actor TEXT,
-			created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-		);
-		CREATE TABLE package_kody_id_redirects (
-			user_id TEXT NOT NULL,
-			old_kody_id TEXT NOT NULL,
-			package_id TEXT NOT NULL,
-			created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-			PRIMARY KEY (user_id, old_kody_id)
-		);
-		CREATE TABLE package_invocation_tokens (
-			id TEXT PRIMARY KEY NOT NULL,
-			user_id TEXT NOT NULL,
-			package_id TEXT NOT NULL,
-			token_hash TEXT NOT NULL,
-			name TEXT NOT NULL,
-			export_names_json TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-		CREATE TABLE user_storage_buckets (
-			user_id TEXT NOT NULL,
-			storage_id TEXT NOT NULL,
-			kind TEXT NOT NULL DEFAULT 'package'
-		);
-		${communityForksDeleteCascadeStatements.join(';\n')}
-	`)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
 test('package delete removes community_forks so Fork outdated does not linger', async () => {
-	const { db } = createDeleteForkDb()
+	await using database = await createTestDb()
+	// The delete runs as kent; fixtures and assertions use the schema owner.
+	const db = database.forUser('user-kent').db
+	const pg = database.pg
 	const meter = createInMemoryUserMeterEnv()
 	const env = {
 		APP_DB: db,
-		USER_METER: meter.env.USER_METER,
-	} as Env
-	await db
-		.prepare(
-			`INSERT INTO users (stable_user_id, deleting_at) VALUES ('user-kent', NULL)`,
-		)
-		.run()
-	await db
-		.prepare(
-			`INSERT INTO entity_sources (id, user_id, entity_kind, entity_id)
-			VALUES ('source-live', 'user-kent', 'package', 'package-live'),
-				('source-inert', 'user-kent', 'package', 'package-inert'),
-				('source-other', 'user-other', 'package', 'package-other')`,
-		)
-		.run()
-	await db
-		.prepare(
-			`INSERT INTO saved_packages (
-				id, user_id, name, kody_id, description, source_id
-			) VALUES (
-				'package-live', 'user-kent', '@kentcdodds/plaid', 'plaid',
-				'Kent copy', 'source-live'
-			)`,
-		)
-		.run()
+		USER_METERS: meter.env.USER_METERS,
+	} as unknown as Env
+	await pg.query(
+		`INSERT INTO users (username, email, password_hash, stable_user_id)
+		VALUES ('kentcdodds', 'kent@example.com', 'x', 'user-kent')`,
+	)
+	await pg.query(
+		`INSERT INTO entity_sources (
+			id, user_id, entity_kind, entity_id, repo_id, manifest_path, source_root, created_at, updated_at
+		) VALUES
+			('source-live', 'user-kent', 'package', 'package-live', 'repo-live', 'package.json', '/', 'now', 'now'),
+			('source-inert', 'user-kent', 'package', 'package-inert', 'repo-inert', 'package.json', '/', 'now', 'now'),
+			('source-other', 'user-other', 'package', 'package-other', 'repo-other', 'package.json', '/', 'now', 'now')`,
+	)
+	await pg.query(
+		`INSERT INTO saved_packages (
+			id, user_id, name, kody_id, description, source_id
+		) VALUES (
+			'package-live', 'user-kent', '@kentcdodds/plaid', 'plaid',
+			'Kent copy', 'source-live'
+		)`,
+	)
 	await insertCommunityFork(db, {
 		id: 'fork-live',
 		listing_id: 'listing-plaid',
@@ -224,7 +151,7 @@ test('package delete removes community_forks so Fork outdated does not linger', 
 		listing_name: '@kody/plaid',
 		listing_kody_id: 'plaid',
 	})
-	await insertCommunityFork(db, {
+	await insertCommunityFork(database.forUser('user-other').db, {
 		id: 'fork-other',
 		listing_id: 'listing-plaid',
 		forker_user_id: 'user-other',
@@ -282,16 +209,18 @@ test('package delete removes community_forks so Fork outdated does not linger', 
 		packageId: 'package-live',
 	})
 
-	const remaining = await db
-		.prepare(
-			`SELECT id, forker_user_id, forked_package_id FROM community_forks
-			ORDER BY id`,
-		)
-		.all<{
-			id: string
-			forker_user_id: string
-			forked_package_id: string
-		}>()
+	const remaining = {
+		results: (
+			await pg.query<{
+				id: string
+				forker_user_id: string
+				forked_package_id: string
+			}>(
+				`SELECT id, forker_user_id, forked_package_id FROM community_forks
+				ORDER BY id`,
+			)
+		).rows,
+	}
 	expect(remaining.results).toEqual([
 		{
 			id: 'fork-inert',
@@ -305,10 +234,9 @@ test('package delete removes community_forks so Fork outdated does not linger', 
 		},
 	])
 	expect(
-		await db
-			.prepare(`SELECT id FROM saved_packages WHERE id = 'package-live'`)
-			.first(),
-	).toBeNull()
+		(await pg.query(`SELECT id FROM saved_packages WHERE id = 'package-live'`))
+			.rows,
+	).toEqual([])
 
 	const afterInstalls = resolveViewerListingInstalls({
 		listings: [listingRef],
@@ -390,8 +318,9 @@ test('package delete removes community_forks so Fork outdated does not linger', 
 
 	await db
 		.prepare(
-			`INSERT INTO entity_sources (id, user_id, entity_kind, entity_id)
-			VALUES ('source-trigger-2', 'user-kent', 'package', 'package-gone')`,
+			`INSERT INTO entity_sources (
+				id, user_id, entity_kind, entity_id, repo_id, manifest_path, source_root, created_at, updated_at
+			) VALUES ('source-trigger-2', 'user-kent', 'package', 'package-gone', 'repo-gone', 'package.json', '/', 'now', 'now')`,
 		)
 		.run()
 	await insertCommunityFork(db, {

@@ -80,7 +80,7 @@ export async function handleSystemInboundEmail(input: {
 		| 'APP_BASE_URL'
 		| 'USAGE_EVENTS'
 		| 'MAILBOX'
-		| 'USER_METER'
+		| 'USER_METERS'
 	>
 	recipient: string
 	localPart: SystemEmailLocal

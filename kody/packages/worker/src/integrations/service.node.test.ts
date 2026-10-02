@@ -1,38 +1,64 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import { upsertPlatformOauthApp } from './platform-apps.ts'
-import {
-	deleteIntegration,
-	deleteOauthAppIfUnused,
-	deleteOauthAppWithConnections,
-	findOauthAppForProviderSetup,
-	getAvailablePlatformApp,
-	getIntegration,
-	getOauthApp,
-	listAvailablePlatformApps,
-	listIntegrations,
-	listOauthApps,
-	listJoinedIntegrations,
-	rotateOauthAppClientCredentials,
-	upsertIntegration,
-	upsertOauthAppWithoutConnection,
-	upsertPlatformIntegration,
-} from './service.ts'
+import * as service from './service.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
+type TestEnv = Pick<Env, 'APP_DB' | 'SECRET_KMS'>
 
-function applyAllMigrations(db: DatabaseSync) {
-	applyRepositoryMigrations(db, migrationsDirectory)
-}
-
-function createEnv() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite)
+/**
+ * Every account gets its own RLS-scoped writer: the service calls below run
+ * with `envFor(input.userId)`, and platform apps are written as `kody_admin`.
+ */
+let database: Awaited<ReturnType<typeof createTestDb>>
+function envFor(userId: string): TestEnv {
 	return {
-		sqlite,
-		env: { APP_DB: createD1FromSqlite(sqlite) } as Pick<Env, 'APP_DB'>,
+		APP_DB: database.forUser(userId).db,
+		SECRET_KMS: testSecretKms,
+	} as unknown as TestEnv
+}
+function asUser<I extends { env: TestEnv; userId: string }, R>(
+	fn: (input: I) => R,
+) {
+	return (input: Omit<I, 'env'> & { env?: unknown }) =>
+		fn({ ...input, env: envFor(input.userId) } as unknown as I)
+}
+const deleteIntegration = asUser(service.deleteIntegration)
+const deleteOauthAppIfUnused = asUser(service.deleteOauthAppIfUnused)
+const deleteOauthAppWithConnections = asUser(
+	service.deleteOauthAppWithConnections,
+)
+const findOauthAppForProviderSetup = asUser(
+	service.findOauthAppForProviderSetup,
+)
+const getAvailablePlatformApp = asUser(service.getAvailablePlatformApp)
+const getIntegration = asUser(service.getIntegration)
+const getOauthApp = asUser(service.getOauthApp)
+const listAvailablePlatformApps = asUser(service.listAvailablePlatformApps)
+const listIntegrations = asUser(service.listIntegrations)
+const listOauthApps = asUser(service.listOauthApps)
+const listJoinedIntegrations = asUser(service.listJoinedIntegrations)
+const rotateOauthAppClientCredentials = asUser(
+	service.rotateOauthAppClientCredentials,
+)
+const upsertIntegration = asUser(service.upsertIntegration)
+const upsertOauthAppWithoutConnection = asUser(
+	service.upsertOauthAppWithoutConnection,
+)
+const upsertPlatformIntegration = asUser(service.upsertPlatformIntegration)
+
+async function createEnv() {
+	database = await createTestDb()
+	return {
+		env: { SECRET_KMS: testSecretKms } as unknown as TestEnv,
+		admin: createPgDatabase({
+			connection: database.pg,
+			role: 'kody_admin',
+		}) as unknown as D1Database,
+		q: pgQuery(database.pg),
+		[Symbol.asyncDispose]: () => database[Symbol.asyncDispose](),
 	}
 }
 
@@ -52,7 +78,8 @@ const baseGoogleConfig = {
 }
 
 test('upsertIntegration reuses matching app tuples, splits on endpoint mismatch, and normalizes required hosts', async () => {
-	const { env } = createEnv()
+	await using harness = await createEnv()
+	const { env } = harness
 	const reuseUserId = 'user-upsert'
 
 	const normalized = await upsertIntegration({
@@ -148,7 +175,8 @@ test('upsertIntegration reuses matching app tuples, splits on endpoint mismatch,
 })
 
 test('rotateOauthAppClientCredentials updates sibling joins, blocks delete while connected, and canonicalizes slugs', async () => {
-	const { env } = createEnv()
+	await using harness = await createEnv()
+	const { env } = harness
 	const userId = 'user-rotate'
 
 	await upsertIntegration({
@@ -217,50 +245,44 @@ test('rotateOauthAppClientCredentials updates sibling joins, blocks delete while
 })
 
 test('upsertIntegration reuses a confidential app that stored usePkce false as NULL', async () => {
-	const { env, sqlite } = createEnv()
+	await using harness = await createEnv()
+	const { env, q } = harness
 	const now = '2026-02-01T00:00:00.000Z'
-	sqlite
-		.prepare(
-			`INSERT INTO user_oauth_apps (
+	await q.run(
+		`INSERT INTO user_oauth_apps (
 				user_id, slug, provider, label, client_id,
 				token_url, authorize_url, api_base_url, flow, use_pkce,
 				token_exchange_style, scope_separator, extra_authorize_params_json,
 				created_at, updated_at
 			) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, 'confidential', NULL, ?, NULL, '{}', ?, ?)`,
-		)
-		.run(
-			'user-reuse',
-			'canva',
-			'canva',
-			'canva-client-id-value',
-			'https://api.canva.com/rest/v1/oauth/token',
-			'https://api.canva.com',
-			'basic-form',
-			now,
-			now,
-		)
-	sqlite
-		.prepare(
-			`INSERT INTO user_integrations (
+		'user-reuse',
+		'canva',
+		'canva',
+		'canva-client-id-value',
+		'https://api.canva.com/rest/v1/oauth/token',
+		'https://api.canva.com',
+		'basic-form',
+		now,
+		now,
+	)
+	await q.run(
+		`INSERT INTO user_integrations (
 				user_id, name, app_slug, account_label, description, scopes_json,
 				required_hosts_json,
 				connected_at, token_refreshed_at, created_at, updated_at
 			) VALUES (?, ?, ?, NULL, '', '[]', ?, NULL, NULL, ?, ?)`,
-		)
-		.run(
-			'user-reuse',
-			'canva',
-			'canva',
-			JSON.stringify(['api.canva.com']),
-			now,
-			now,
-		)
+		'user-reuse',
+		'canva',
+		'canva',
+		JSON.stringify(['api.canva.com']),
+		now,
+		now,
+	)
 
-	const stored = sqlite
-		.prepare(
-			`SELECT slug, flow, use_pkce FROM user_oauth_apps WHERE user_id = ?`,
-		)
-		.get('user-reuse') as {
+	const stored = (await q.get(
+		`SELECT slug, flow, use_pkce FROM user_oauth_apps WHERE user_id = ?`,
+		'user-reuse',
+	)) as {
 		slug: string
 		flow: string
 		use_pkce: number | null
@@ -303,7 +325,8 @@ test('upsertIntegration reuses a confidential app that stored usePkce false as N
 })
 
 test('shared app identity survives reuse and scope-only resaves across sibling connections', async () => {
-	const { env, sqlite } = createEnv()
+	await using harness = await createEnv()
+	const { env, q } = harness
 
 	const preserveUserId = 'user-provider-preserve'
 	await upsertIntegration({
@@ -319,13 +342,12 @@ test('shared app identity survives reuse and scope-only resaves across sibling c
 			name: 'google-calendar',
 		},
 	})
-	const before = sqlite
-		.prepare(
-			`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
+	const before = (await q.get(
+		`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
 			FROM user_oauth_apps
 			WHERE user_id = ? AND slug = 'google'`,
-		)
-		.get(preserveUserId) as {
+		preserveUserId,
+	)) as {
 		slug: string
 		provider: string
 		label: string | null
@@ -349,13 +371,12 @@ test('shared app identity survives reuse and scope-only resaves across sibling c
 			requiredHosts: ['www.googleapis.com'],
 		},
 	})
-	const afterReuse = sqlite
-		.prepare(
-			`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
+	const afterReuse = (await q.get(
+		`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
 			FROM user_oauth_apps
 			WHERE user_id = ? AND slug = 'google'`,
-		)
-		.get(preserveUserId) as typeof before
+		preserveUserId,
+	)) as typeof before
 	expect(afterReuse).toEqual(before)
 
 	const resaveUserId = 'user-four-shared'
@@ -380,12 +401,11 @@ test('shared app identity survives reuse and scope-only resaves across sibling c
 			},
 		})
 	}
-	const beforeResave = sqlite
-		.prepare(
-			`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
+	const beforeResave = await q.get(
+		`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
 			FROM user_oauth_apps WHERE user_id = ?`,
-		)
-		.get(resaveUserId)
+		resaveUserId,
+	)
 
 	await upsertIntegration({
 		env,
@@ -400,20 +420,18 @@ test('shared app identity survives reuse and scope-only resaves across sibling c
 			requiredHosts: ['gmail.googleapis.com'],
 		},
 	})
-	const afterResave = sqlite
-		.prepare(
-			`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
+	const afterResave = await q.get(
+		`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
 			FROM user_oauth_apps WHERE user_id = ?`,
-		)
-		.get(resaveUserId)
+		resaveUserId,
+	)
 	expect(afterResave).toEqual(beforeResave)
 
-	const connections = sqlite
-		.prepare(
-			`SELECT name, app_slug, scopes_json, required_hosts_json
+	const connections = (await q.all(
+		`SELECT name, app_slug, scopes_json, required_hosts_json
 			FROM user_integrations WHERE user_id = ? ORDER BY name`,
-		)
-		.all(resaveUserId) as Array<{
+		resaveUserId,
+	)) as Array<{
 		name: string
 		app_slug: string
 		scopes_json: string
@@ -428,7 +446,8 @@ test('shared app identity survives reuse and scope-only resaves across sibling c
 })
 
 test('rematch deletes orphan apps, keeps sibling apps intact, and converts sole user apps to platform', async () => {
-	const { env, sqlite } = createEnv()
+	await using harness = await createEnv()
+	const { env, q } = harness
 	const orphanUserId = 'user-orphan'
 
 	await upsertIntegration({
@@ -446,11 +465,10 @@ test('rematch deletes orphan apps, keeps sibling apps intact, and converts sole 
 		},
 	})
 	expect(
-		sqlite
-			.prepare(
-				`SELECT slug FROM user_oauth_apps WHERE user_id = ? ORDER BY slug`,
-			)
-			.all(orphanUserId),
+		await q.all(
+			`SELECT slug FROM user_oauth_apps WHERE user_id = ? ORDER BY slug`,
+			orphanUserId,
+		),
 	).toEqual([{ slug: 'google' }, { slug: 'solo-app' }])
 
 	await upsertIntegration({
@@ -463,19 +481,17 @@ test('rematch deletes orphan apps, keeps sibling apps intact, and converts sole 
 	})
 
 	expect(
-		sqlite
-			.prepare(
-				`SELECT slug FROM user_oauth_apps WHERE user_id = ? ORDER BY slug`,
-			)
-			.all(orphanUserId),
+		await q.all(
+			`SELECT slug FROM user_oauth_apps WHERE user_id = ? ORDER BY slug`,
+			orphanUserId,
+		),
 	).toEqual([{ slug: 'google' }])
 	expect(
-		sqlite
-			.prepare(
-				`SELECT name, app_slug FROM user_integrations
+		await q.all(
+			`SELECT name, app_slug FROM user_integrations
 				WHERE user_id = ? ORDER BY name`,
-			)
-			.all(orphanUserId),
+			orphanUserId,
+		),
 	).toEqual([
 		{ name: 'google', app_slug: 'google' },
 		{ name: 'solo-app', app_slug: 'google' },
@@ -504,12 +520,11 @@ test('rematch deletes orphan apps, keeps sibling apps intact, and converts sole 
 
 	expect(
 		(
-			sqlite
-				.prepare(
-					`SELECT count(*) AS count FROM user_integrations
+			(await q.get(
+				`SELECT count(*) AS count FROM user_integrations
 					WHERE user_id = ? AND app_slug = 'google'`,
-				)
-				.get(siblingUserId) as { count: number }
+				siblingUserId,
+			)) as { count: number }
 		).count,
 	).toBe(4)
 
@@ -523,34 +538,31 @@ test('rematch deletes orphan apps, keeps sibling apps intact, and converts sole 
 		},
 	})
 
-	const googleApp = sqlite
-		.prepare(
-			`SELECT slug, provider FROM user_oauth_apps
+	const googleApp = (await q.get(
+		`SELECT slug, provider FROM user_oauth_apps
 			WHERE user_id = ? AND slug = 'google'`,
-		)
-		.get(siblingUserId) as { slug: string; provider: string }
+		siblingUserId,
+	)) as { slug: string; provider: string }
 	expect(googleApp).toEqual({ slug: 'google', provider: 'google' })
 	expect(
 		(
-			sqlite
-				.prepare(
-					`SELECT count(*) AS count FROM user_integrations
+			(await q.get(
+				`SELECT count(*) AS count FROM user_integrations
 					WHERE user_id = ? AND app_slug = 'google'`,
-				)
-				.get(siblingUserId) as { count: number }
+				siblingUserId,
+			)) as { count: number }
 		).count,
 	).toBe(3)
 	expect(
-		sqlite
-			.prepare(
-				`SELECT name, app_slug FROM user_integrations
+		await q.get(
+			`SELECT name, app_slug FROM user_integrations
 				WHERE user_id = ? AND name = 'google-drive'`,
-			)
-			.get(siblingUserId),
+			siblingUserId,
+		),
 	).toEqual({ name: 'google-drive', app_slug: 'google-drive' })
 
-	const platformEnv = createPlatformEnv()
-	await provisionGithubPlatformApp(platformEnv.env)
+	const platformEnv = harness
+	await provisionGithubPlatformApp(harness)
 	const convertUserId = 'user-converts'
 
 	await upsertIntegration({
@@ -592,7 +604,8 @@ test('rematch deletes orphan apps, keeps sibling apps intact, and converts sole 
 })
 
 test('upsertOauthAppWithoutConnection covers setup, client-id reuse, and connected-app preservation', async () => {
-	const { env, sqlite } = createEnv()
+	await using harness = await createEnv()
+	const { env, q } = harness
 	const setupUserId = 'user-setup-then-connect'
 
 	const app = await upsertOauthAppWithoutConnection({
@@ -721,13 +734,12 @@ test('upsertOauthAppWithoutConnection covers setup, client-id reuse, and connect
 			},
 		},
 	})
-	const before = sqlite
-		.prepare(
-			`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
+	const before = (await q.get(
+		`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
 			FROM user_oauth_apps
 			WHERE user_id = ? AND slug = 'google'`,
-		)
-		.get(preserveUserId) as {
+		preserveUserId,
+	)) as {
 		slug: string
 		provider: string
 		label: string | null
@@ -753,18 +765,18 @@ test('upsertOauthAppWithoutConnection covers setup, client-id reuse, and connect
 		},
 	})
 	expect(secondSetup.slug).toBe('google')
-	const after = sqlite
-		.prepare(
-			`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
+	const after = (await q.get(
+		`SELECT slug, provider, label, client_id, token_url, created_at, updated_at
 			FROM user_oauth_apps
 			WHERE user_id = ? AND slug = 'google'`,
-		)
-		.get(preserveUserId) as typeof before
+		preserveUserId,
+	)) as typeof before
 	expect(after).toEqual(before)
 })
 
 test('findOauthAppForProviderSetup prefers an exact-slug setup app over family prefill', async () => {
-	const { env } = createEnv()
+	await using harness = await createEnv()
+	const { env } = harness
 	const userId = 'user-family-prefill'
 
 	await upsertIntegration({
@@ -799,23 +811,14 @@ test('findOauthAppForProviderSetup prefers an exact-slug setup app over family p
 	})
 })
 
-function createPlatformEnv() {
-	const base = createEnv()
-	return {
-		...base,
-		env: {
-			...base.env,
-			SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
-		} as Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'>,
-	}
-}
+const createPlatformEnv = createEnv
 
 async function provisionGithubPlatformApp(
-	env: Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'>,
+	harness: Awaited<ReturnType<typeof createEnv>>,
 ) {
 	return upsertPlatformOauthApp({
-		db: env.APP_DB,
-		env,
+		db: harness.admin,
+		env: harness.env,
 		app: {
 			slug: 'github',
 			clientId: 'platform-github-client-id',
@@ -832,8 +835,9 @@ async function provisionGithubPlatformApp(
 }
 
 test('upsertPlatformIntegration enforces connect policy, hides secrets, and deletes without orphaning the shared app', async () => {
-	const { env } = createPlatformEnv()
-	await provisionGithubPlatformApp(env)
+	await using harness = await createPlatformEnv()
+	const { env } = harness
+	await provisionGithubPlatformApp(harness)
 
 	const saved = await upsertPlatformIntegration({
 		env,
@@ -882,7 +886,7 @@ test('upsertPlatformIntegration enforces connect policy, hides secrets, and dele
 	expect(defaultScopes.authorization?.scopes).toEqual(['read:user'])
 
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: harness.admin,
 		env,
 		app: {
 			slug: 'github-strict',
@@ -925,10 +929,10 @@ test('upsertPlatformIntegration enforces connect policy, hides secrets, and dele
 	expect(await listIntegrations({ env, userId: 'user-deletes' })).toEqual([])
 	expect(await getAvailablePlatformApp({ env, slug: 'github' })).not.toBeNull()
 
-	const disabledEnv = createPlatformEnv()
-	const disabledApp = await provisionGithubPlatformApp(disabledEnv.env)
+	const disabledEnv = harness
+	const disabledApp = await provisionGithubPlatformApp(harness)
 	await upsertPlatformOauthApp({
-		db: disabledEnv.env.APP_DB,
+		db: harness.admin,
 		env: disabledEnv.env,
 		app: {
 			slug: disabledApp.slug,
@@ -940,7 +944,11 @@ test('upsertPlatformIntegration enforces connect policy, hides secrets, and dele
 		},
 	})
 
-	expect(await listAvailablePlatformApps({ env: disabledEnv.env })).toEqual([])
+	expect(
+		(await listAvailablePlatformApps({ env: disabledEnv.env })).map(
+			(app) => app.slug,
+		),
+	).not.toContain('github')
 	await expect(
 		upsertPlatformIntegration({
 			env: disabledEnv.env,
@@ -952,27 +960,25 @@ test('upsertPlatformIntegration enforces connect policy, hides secrets, and dele
 })
 
 test('loading a platform integration adds current app hosts without removing connection hosts', async () => {
-	const { env, sqlite } = createPlatformEnv()
-	const app = await provisionGithubPlatformApp(env)
+	await using harness = await createPlatformEnv()
+	const { env, q } = harness
+	const app = await provisionGithubPlatformApp(harness)
 	await upsertPlatformIntegration({
 		env,
 		userId: 'user-stale-platform-hosts',
 		platformAppSlug: app.slug,
 		scopes: [],
 	})
-	sqlite
-		.prepare(
-			`UPDATE user_integrations
+	await q.run(
+		`UPDATE user_integrations
 			SET required_hosts_json = ?
 			WHERE user_id = ? AND name = ?`,
-		)
-		.run(
-			JSON.stringify(['api.github.com', 'user-added.example.com']),
-			'user-stale-platform-hosts',
-			'github',
-		)
+		JSON.stringify(['api.github.com', 'user-added.example.com']),
+		'user-stale-platform-hosts',
+		'github',
+	)
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: harness.admin,
 		env,
 		app: {
 			slug: app.slug,
@@ -999,13 +1005,13 @@ test('loading a platform integration adds current app hosts without removing con
 	expect(
 		JSON.parse(
 			(
-				sqlite
-					.prepare(
-						`SELECT required_hosts_json
+				(await q.get(
+					`SELECT required_hosts_json
 						FROM user_integrations
 						WHERE user_id = ? AND name = ?`,
-					)
-					.get('user-stale-platform-hosts', 'github') as {
+					'user-stale-platform-hosts',
+					'github',
+				)) as {
 					required_hosts_json: string
 				}
 			).required_hosts_json,

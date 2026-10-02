@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { invalidateCommunityPublicCache } from '#app/data-cache.ts'
 import { parseListingOwnerUsername } from '#universal/community-links.ts'
@@ -14,12 +15,12 @@ import {
 	defaultCommunityListingSort,
 	type CommunityListingSort,
 } from '#universal/community-search.ts'
-import { deterministicEmbedding } from '#worker/vectorize/embedding.ts'
+import { deterministicEmbedding } from '#worker/search-index/embedding.ts'
 import {
 	blendLexicalAndVectorScore,
 	cosineSimilarity,
 	lexicalScore,
-} from '#worker/vectorize/scoring.ts'
+} from '#worker/search-index/scoring.ts'
 import { buildPackageReadmeDetail } from '#worker/package-registry/package-readme.ts'
 import {
 	getSavedPackageById,
@@ -61,6 +62,7 @@ import { normalizePackageNameInput } from '#worker/package-registry/package-name
 import { getPackageScopeByUserId } from '#worker/package-registry/user-scope.ts'
 import { enqueueCommunityActivityDispatch } from './activity-dispatch-queue-producer.ts'
 import { assertNotCommunityBanned } from './assert-not-community-banned.ts'
+import { getCommunityDb } from './community-db.ts'
 import { CommunityActionError } from './errors.ts'
 import { enqueueCommunityListingPublishedDispatch } from './listing-published-dispatch-queue-producer.ts'
 import { type CommunityListingPublishedProjection } from './listing-published-subscription-event.ts'
@@ -74,6 +76,7 @@ import {
 	deleteCommunityForksForPackage,
 	deleteCommunityListing,
 	deleteCommunityRatingsByListingId,
+	deleteOwnedCommunityListingEngagement,
 	getCommunityActivityByIdForAdmin,
 	getCommunityForkByForkedPackageId,
 	getCommunityForkByListingAndUser,
@@ -190,7 +193,7 @@ async function enqueueRecordedCommunityActivity(input: {
 }) {
 	try {
 		await enqueueCommunityActivityDispatch({
-			queue: input.env.COMMUNITY_ACTIVITY_DISPATCH_QUEUE,
+			env: input.env,
 			kind: input.kind,
 			activityId: input.activityId,
 		})
@@ -205,7 +208,7 @@ async function enqueuePublishedCommunityListing(input: {
 }) {
 	try {
 		await enqueueCommunityListingPublishedDispatch({
-			queue: input.env.COMMUNITY_LISTING_PUBLISHED_DISPATCH_QUEUE,
+			env: input.env,
 			listingId: input.listingId,
 		})
 	} catch (error) {
@@ -407,12 +410,17 @@ async function cleanupFailedCommunityFork(input: {
 	invalidateCommunityPublicCache()
 }
 
+/** Delisted listings are moderation state: only the admin environment sees them. */
+function listingReadDb(env: Env, includeDelisted: boolean) {
+	return includeDelisted ? env.APP_DB : getCommunityDb(env)
+}
+
 function buildListingSearchDocument(listing: CommunityListingRecord) {
 	return buildCommunityListingSearchDocument(listing)
 }
 
 async function attachListingAggregates(
-	db: D1Database,
+	db: SqlDatabase,
 	listing: CommunityListingRecord,
 ): Promise<CommunityListingWithAggregates> {
 	const [ratingAggregate, forkCounts] = await Promise.all([
@@ -429,7 +437,7 @@ async function attachListingAggregates(
 }
 
 export async function attachListingAggregatesBatch(
-	db: D1Database,
+	db: SqlDatabase,
 	listings: Array<CommunityListingRecord>,
 ): Promise<Array<CommunityListingWithAggregates>> {
 	if (listings.length === 0) return []
@@ -572,9 +580,9 @@ export async function publishCommunityListing(input: {
 	actorUserId?: string
 	packageId: string
 }): Promise<CommunityListingRecord> {
-	await assertNotCommunityBanned(input.env.APP_DB, input.userId)
+	await assertNotCommunityBanned(getCommunityDb(input.env), input.userId)
 	if (input.actorUserId && input.actorUserId !== input.userId) {
-		await assertNotCommunityBanned(input.env.APP_DB, input.actorUserId)
+		await assertNotCommunityBanned(getCommunityDb(input.env), input.actorUserId)
 	}
 
 	const savedPackage = await getSavedPackageById(input.env.APP_DB, {
@@ -801,7 +809,7 @@ export async function unpublishCommunityListing(input: {
 	listingId: string
 }): Promise<void> {
 	if (input.actorUserId && input.actorUserId !== input.userId) {
-		await assertNotCommunityBanned(input.env.APP_DB, input.actorUserId)
+		await assertNotCommunityBanned(getCommunityDb(input.env), input.actorUserId)
 	}
 	const listing = await getCommunityListingById(input.env.APP_DB, {
 		listingId: input.listingId,
@@ -821,6 +829,8 @@ export async function unpublishCommunityListing(input: {
 		)
 	}
 
+	// Engagement on the listing is cleared while the row still names its owner.
+	await deleteOwnedCommunityListingEngagement(input.env.APP_DB, input.listingId)
 	const deleted = await deleteCommunityListing(input.env.APP_DB, {
 		listingId: input.listingId,
 		ownerUserId: input.userId,
@@ -836,11 +846,6 @@ export async function unpublishCommunityListing(input: {
 		listingId: listing.id,
 		reason: 'unpublish',
 	})
-	await deleteCommunityRatingsByListingId(input.env.APP_DB, input.listingId)
-	await deleteCommunityActivityEventsByListingId(
-		input.env.APP_DB,
-		input.listingId,
-	)
 	await deleteCommunitySnapshot(input.env.BUNDLE_ARTIFACTS_KV, input.listingId)
 	await updateSavedPackage(input.env.APP_DB, {
 		userId: input.userId,
@@ -896,10 +901,11 @@ export async function listFeaturedCommunityListingsWithAggregates(input: {
 	env: Env
 	limit: number
 }): Promise<Array<CommunityListingWithAggregates>> {
-	const listings = await listFeaturedCommunityListingsFromDb(input.env.APP_DB, {
+	const db = getCommunityDb(input.env)
+	const listings = await listFeaturedCommunityListingsFromDb(db, {
 		limit: input.limit,
 	})
-	return await attachListingAggregatesBatch(input.env.APP_DB, listings)
+	return await attachListingAggregatesBatch(db, listings)
 }
 
 export async function getCommunityListingWithAggregates(input: {
@@ -907,13 +913,14 @@ export async function getCommunityListingWithAggregates(input: {
 	listingId: string
 	includeDelisted: boolean
 }): Promise<CommunityListingWithAggregates | null> {
-	const listing = await getCommunityListingById(input.env.APP_DB, {
+	const db = listingReadDb(input.env, input.includeDelisted)
+	const listing = await getCommunityListingById(db, {
 		listingId: input.listingId,
 		includeDelisted: input.includeDelisted,
 	})
 	if (!listing) return null
 	return await attachListingAggregates(
-		input.env.APP_DB,
+		db,
 		await withSnapshotPackageVersion(input.env, listing),
 	)
 }
@@ -947,7 +954,7 @@ async function withSnapshotPackageVersion(
  * `IN (...)` plus the two aggregate batch queries, then ordered by `ids`.
  */
 export async function getCommunityListingsByIds(
-	db: D1Database,
+	db: SqlDatabase,
 	ids: Array<string>,
 	options: { includeDelisted: boolean },
 ): Promise<Array<CommunityListingWithAggregates>> {
@@ -966,15 +973,13 @@ export async function listCommunityListingsWithAggregates(input: {
 	sort?: CommunityListingSort
 	category?: CommunityListingCategory | null
 }): Promise<Array<CommunityListingWithAggregates>> {
-	const listings = await listCommunityListingCandidates(input.env.APP_DB, {
+	const db = listingReadDb(input.env, input.includeDelisted)
+	const listings = await listCommunityListingCandidates(db, {
 		includeDelisted: input.includeDelisted,
 		limit: COMMUNITY_SEARCH_CANDIDATE_LIMIT,
 		category: input.category ?? null,
 	})
-	const withAggregates = await attachListingAggregatesBatch(
-		input.env.APP_DB,
-		listings,
-	)
+	const withAggregates = await attachListingAggregatesBatch(db, listings)
 	const sort = resolveCommunityListingSort(input.sort)
 	const filtered = filterCommunityListingsByCategory(
 		withAggregates,
@@ -988,7 +993,7 @@ export async function listCommunityListingsWithAggregates(input: {
 export async function getCommunityCategoryCounts(input: {
 	env: Env
 }): Promise<CommunityCategoryCounts> {
-	return countActiveCommunityListingsByCategory(input.env.APP_DB)
+	return countActiveCommunityListingsByCategory(getCommunityDb(input.env))
 }
 
 export type CommunityIndexOverviewGroup = {
@@ -1022,14 +1027,12 @@ export async function listCommunityIndexOverview(input: {
 			categoryCounts,
 		}
 	}
-	const rows = await listCommunityIndexOverviewCandidates(input.env.APP_DB, {
+	const db = getCommunityDb(input.env)
+	const rows = await listCommunityIndexOverviewCandidates(db, {
 		limitPerCategory: communityIndexOverviewCandidateLimitPerCategory,
 		categories: populated,
 	})
-	const withAggregates = await attachListingAggregatesBatch(
-		input.env.APP_DB,
-		rows,
-	)
+	const withAggregates = await attachListingAggregatesBatch(db, rows)
 	const byCategory = new Map<
 		CommunityListingCategory,
 		Array<CommunityListingWithAggregates>
@@ -1067,17 +1070,15 @@ export async function searchCommunityListings(input: {
 }): Promise<Array<CommunityListingSearchResult>> {
 	const trimmedQuery = input.query.trim()
 	const sort = resolveCommunityListingSort(input.sort)
-	let listings = await listCommunityListingCandidates(input.env.APP_DB, {
+	const db = getCommunityDb(input.env)
+	let listings = await listCommunityListingCandidates(db, {
 		includeDelisted: false,
 		limit: COMMUNITY_SEARCH_CANDIDATE_LIMIT,
 		query: trimmedQuery || null,
 		category: input.category ?? null,
 	})
 	if (!trimmedQuery) {
-		const withAggregates = await attachListingAggregatesBatch(
-			input.env.APP_DB,
-			listings,
-		)
+		const withAggregates = await attachListingAggregatesBatch(db, listings)
 		const relevanceOrdered = withAggregates.sort((left, right) =>
 			compareCommunityListingsForSort(left, right, sort),
 		)
@@ -1100,17 +1101,14 @@ export async function searchCommunityListings(input: {
 		// recent listings keep working. Skipped when the first query was
 		// already unfiltered (no LIKE tokens), since it would return the same
 		// candidates.
-		listings = await listCommunityListingCandidates(input.env.APP_DB, {
+		listings = await listCommunityListingCandidates(db, {
 			includeDelisted: false,
 			limit: COMMUNITY_SEARCH_CANDIDATE_LIMIT,
 			category: input.category ?? null,
 		})
 		matched = listings.filter(matchesQuery)
 	}
-	const withAggregates = await attachListingAggregatesBatch(
-		input.env.APP_DB,
-		matched,
-	)
+	const withAggregates = await attachListingAggregatesBatch(db, matched)
 	const queryEmbedding = deterministicEmbedding(trimmedQuery)
 	const scored = withAggregates.map((listing) => {
 		const document = buildListingSearchDocument(listing)
@@ -1180,7 +1178,7 @@ function finalizeCommunitySearchResults(
 }
 
 export async function listCommunityActivityForAdmin(input: {
-	db: D1Database
+	db: SqlDatabase
 	page?: number
 	pageSize?: number
 	kind?: CommunityActivityKind
@@ -1211,7 +1209,7 @@ export async function listCommunityActivityForAdmin(input: {
 }
 
 export async function getCommunityActivityForAdmin(input: {
-	db: D1Database
+	db: SqlDatabase
 	kind: CommunityActivityKind
 	activityId: string
 }) {
@@ -1220,7 +1218,7 @@ export async function getCommunityActivityForAdmin(input: {
 }
 
 export async function getCommunityListingPublishedForAdmin(input: {
-	db: D1Database
+	db: SqlDatabase
 	baseUrl: string
 	listingId: string
 }): Promise<CommunityListingPublishedProjection | null> {
@@ -1319,8 +1317,8 @@ export async function prepareCommunityFork(
 	// overlapping them shaves fork preflight latency before the Artifacts
 	// bootstrap (the dominant cost) begins.
 	const [, listing, snapshot] = await Promise.all([
-		assertNotCommunityBanned(input.env.APP_DB, input.userId),
-		getCommunityListingById(input.env.APP_DB, {
+		assertNotCommunityBanned(getCommunityDb(input.env), input.userId),
+		getCommunityListingById(getCommunityDb(input.env), {
 			listingId: input.listingId,
 			includeDelisted: false,
 		}),
@@ -1331,7 +1329,10 @@ export async function prepareCommunityFork(
 			`Catalog entry "${input.listingId}" was not found.`,
 		)
 	}
-	const source = await getEntitySourceById(input.env.APP_DB, listing.sourceId)
+	const source = await getEntitySourceById(
+		getCommunityDb(input.env),
+		listing.sourceId,
+	)
 	let originCommit = listing.pinnedCommit
 	if (source) {
 		try {
@@ -1921,7 +1922,7 @@ export async function absorbCommunityForkUpstream(input: {
 		)
 	}
 
-	const listing = await getCommunityListingById(input.env.APP_DB, {
+	const listing = await getCommunityListingById(getCommunityDb(input.env), {
 		listingId: fork.listingId,
 		includeDelisted: false,
 	})
@@ -1970,9 +1971,9 @@ export async function rateCommunityListing(input: {
 	adaptationEffort: number
 	note?: string
 }): Promise<CommunityRatingRecord> {
-	await assertNotCommunityBanned(input.env.APP_DB, input.userId)
+	await assertNotCommunityBanned(getCommunityDb(input.env), input.userId)
 
-	const listing = await getCommunityListingById(input.env.APP_DB, {
+	const listing = await getCommunityListingById(getCommunityDb(input.env), {
 		listingId: input.listingId,
 		includeDelisted: false,
 	})
@@ -2017,11 +2018,12 @@ export async function reportCommunityListing(input: {
 	listingId: string
 	reason: string
 }): Promise<CommunityReportRecord> {
-	await assertNotCommunityBanned(input.env.APP_DB, input.userId)
+	await assertNotCommunityBanned(getCommunityDb(input.env), input.userId)
 
-	const listing = await getCommunityListingById(input.env.APP_DB, {
+	// Reporters see what visitors see: a delisted listing is already moderated.
+	const listing = await getCommunityListingById(getCommunityDb(input.env), {
 		listingId: input.listingId,
-		includeDelisted: true,
+		includeDelisted: false,
 	})
 	if (!listing) {
 		throw new CommunityActionError(

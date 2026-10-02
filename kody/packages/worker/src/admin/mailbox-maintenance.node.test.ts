@@ -1,4 +1,7 @@
 import { expect, test, vi } from 'vitest'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { systemEmailOwnerId } from '#worker/email/email-owner.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const mocks = vi.hoisted(() => ({
 	mailboxRpc: vi.fn(),
@@ -72,43 +75,33 @@ vi.mock('#worker/email/delivery-alert-events.ts', () => ({
 }))
 
 const {
+	listUsersForAdminMailboxRetention,
 	loadAdminMailboxMaintenanceStatus,
 	runAdminMailboxMaintenanceDeleteMessage,
 	runAdminMailboxMaintenanceRetention,
 } = await import('./mailbox-maintenance.ts')
 
-function createUsersDb(userIds: ReadonlyArray<string>) {
-	const prepare = vi.fn((sql: string) => ({
-		bind: (...params: Array<unknown>) => ({
-			async first() {
-				if (sql.includes('COUNT(*) AS trackedOwners')) {
-					return { trackedOwners: userIds.length }
-				}
-				throw new Error(`Unexpected first query: ${sql}`)
-			},
-			async all() {
-				if (!sql.includes('FROM users u')) {
-					throw new Error(`Unexpected all query: ${sql}`)
-				}
-				const startAfter =
-					params.length === 3 && typeof params[1] === 'string'
-						? params[1]
-						: null
-				const limit = Number(params.at(-1))
-				return {
-					results: userIds
-						.filter((userId) => startAfter == null || userId > startAfter)
-						.slice(0, limit)
-						.map((userId) => ({ userId })),
-				}
-			},
-		}),
-	}))
-	return { prepare } as unknown as D1Database
+async function createUsersDb(userIds: ReadonlyArray<string>) {
+	const database = await createTestDb()
+	for (const [stableUserId, deletingAt] of [
+		...userIds.map((id) => [id, null] as const),
+		// Neither the system mailbox nor deleting accounts join owner retention.
+		[systemEmailOwnerId, null] as const,
+		['user-0-deleting', '2026-08-01T00:00:00.000Z'] as const,
+	])
+		await database.pg.query(
+			`INSERT INTO users (username, email, password_hash, stable_user_id, deleting_at)
+			 VALUES ($1, $2, 'x', $1, $3)`,
+			[stableUserId, `${stableUserId}@example.test`, deletingAt],
+		)
+	// Operator maintenance selects the account-administration role after authorization.
+	const db = createPgDatabase({ connection: database.pg, role: 'kody_admin' })
+	return { ...database, db: db as unknown as D1Database }
 }
 
 test('maintenance status reports authority and coordination health', async () => {
-	const db = createUsersDb(['user-1', 'user-2'])
+	await using users = await createUsersDb(['user-1', 'user-2'])
+	const { db } = users
 	const status = await loadAdminMailboxMaintenanceStatus({
 		db,
 		now: new Date('2026-08-03T00:00:00.000Z'),
@@ -134,7 +127,8 @@ test('maintenance status reports authority and coordination health', async () =>
 })
 
 test('maintenance retention fans out only to owner Mailbox RPCs', async () => {
-	const db = createUsersDb(['user-1', 'user-2'])
+	await using users = await createUsersDb(['user-1', 'user-2'])
+	const { db } = users
 	const runRetentionNow = vi.fn(async () => ({
 		before: { threads: 2, messages: 3, attachments: 1, deliveryEvents: 4 },
 		after: { threads: 1, messages: 2, attachments: 0, deliveryEvents: 3 },
@@ -163,10 +157,22 @@ test('maintenance retention fans out only to owner Mailbox RPCs', async () => {
 		before: { threads: 4, messages: 6, attachments: 2, deliveryEvents: 8 },
 		after: { threads: 2, messages: 4, attachments: 0, deliveryEvents: 6 },
 	})
+	expect(runRetentionNow.mock.calls).toEqual([
+		[{ ownerId: 'user-1' }],
+		[{ ownerId: 'user-2' }],
+	])
+	await expect(
+		listUsersForAdminMailboxRetention({
+			db,
+			limit: 5,
+			startAfterUserId: 'user-1',
+		}),
+	).resolves.toEqual([{ userId: 'user-2' }])
 })
 
 test('maintenance USER delete removes Mailbox/R2 data and only the thin provider index', async () => {
-	const db = createUsersDb([])
+	await using users = await createUsersDb([])
+	const { db } = users
 	const deleteMessageWithBlobs = vi.fn(async () => ({
 		status: 'deleted' as const,
 		attachmentsSeen: 1,

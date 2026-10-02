@@ -1,4 +1,5 @@
 import { type Action } from 'remix/router'
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 import {
 	auditDatabaseFromEnv,
 	getRequestIp,
@@ -44,6 +45,7 @@ export function createVerifyEmailChangeHandler(env: Env) {
 			setAuthSessionSecret(env.COOKIE_SECRET)
 			const result = await verifyEmailChangeToken({
 				db: env.APP_DB,
+				forUser: getAccountWriterFactory(env),
 				token: url.searchParams.get('token'),
 			})
 			const requestIp = getRequestIp(request) ?? undefined

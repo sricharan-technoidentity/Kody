@@ -1,7 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestObjectBucket } from '#worker/test-support/aws/fake-s3.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	createFakeImagesBinding,
 	tinyPngBytes,
@@ -22,39 +22,22 @@ import {
 	upsertPlatformProviderMark,
 } from './provider-marks.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const objects = new Map<string, Uint8Array>()
+/** Provider marks are operator configuration (`kody_admin` writes them). */
+async function createHarness() {
+	const database = await createTestDb()
+	const assets = createTestObjectBucket('kody-test-community-assets')
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
-		COMMUNITY_ASSETS: {
-			async put(key: string, bytes: Uint8Array) {
-				objects.set(key, bytes)
-			},
-			async get(key: string) {
-				const stored = objects.get(key)
-				if (!stored) return null
-				return {
-					body: new Blob([stored]).stream(),
-					size: stored.byteLength,
-					httpEtag: `"etag-${key}"`,
-					async arrayBuffer() {
-						const copy = new Uint8Array(stored.byteLength)
-						copy.set(stored)
-						return copy.buffer
-					},
-				}
-			},
-			async delete(key: string) {
-				objects.delete(key)
-			},
-		} as unknown as R2Bucket,
+		APP_DB: createPgDatabase({ connection: database.pg, role: 'kody_admin' }),
+		COMMUNITY_ASSETS: assets.bucket,
 		IMAGES: createFakeImagesBinding(),
-	} as Env
-	return { env, objects }
+	} as unknown as Env
+	return {
+		env,
+		get objects() {
+			return assets.objects
+		},
+		[Symbol.asyncDispose]: () => database[Symbol.asyncDispose](),
+	}
 }
 
 test('provider mark matching prefers exact slug then family then host aliases', () => {
@@ -289,7 +272,8 @@ test('catalog attachment resolves MCP servers by name and host', () => {
 })
 
 test('upsert, logo write, and delete persist operator provider marks', async () => {
-	const { env, objects } = createHarness()
+	await using harness = await createHarness()
+	const { env } = harness
 	const created = await upsertPlatformProviderMark({
 		db: env.APP_DB,
 		slug: 'Google',
@@ -307,7 +291,7 @@ test('upsert, logo write, and delete persist operator provider marks', async () 
 		sourceBytes: tinyPngBytes,
 	})
 	expect(withLogo.logoKey).toMatch(/^platform-provider-marks\/google\//)
-	expect(objects.has(withLogo.logoKey!)).toBe(true)
+	expect(harness.objects.has(withLogo.logoKey!)).toBe(true)
 	const cleared = await setPlatformProviderMarkLogo({
 		db: env.APP_DB,
 		env,
@@ -315,7 +299,7 @@ test('upsert, logo write, and delete persist operator provider marks', async () 
 		sourceBytes: null,
 	})
 	expect(cleared.logoKey).toBeNull()
-	expect(objects.has(withLogo.logoKey!)).toBe(false)
+	expect(harness.objects.has(withLogo.logoKey!)).toBe(false)
 	const restored = await setPlatformProviderMarkLogo({
 		db: env.APP_DB,
 		env,
@@ -323,7 +307,7 @@ test('upsert, logo write, and delete persist operator provider marks', async () 
 		sourceBytes: tinyPngBytes,
 	})
 	expect(restored.logoKey).toMatch(/^platform-provider-marks\/google\//)
-	expect(objects.has(restored.logoKey!)).toBe(true)
+	expect(harness.objects.has(restored.logoKey!)).toBe(true)
 	expect(
 		resolveProviderMarkLogoPath({
 			marks: await listPlatformProviderMarks({ db: env.APP_DB }),

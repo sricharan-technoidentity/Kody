@@ -1,5 +1,3 @@
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { RequestContext } from 'remix/router'
 import { beforeAll, expect, test } from 'vitest'
 import {
@@ -11,27 +9,24 @@ import { verifyEmailClaimReleaseToken } from '#app/email-claim-release.ts'
 import { hashVerificationToken } from '#app/email-verification.ts'
 import { formerEmailClaimedSignupCode } from '#universal/email-claim-errors.ts'
 import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createPgDatabase, type SqlDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	consoleError,
 	consoleWarn,
 } from '#worker/test-support/console-spies.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
+import { allocateSignupIdentity } from '#worker/identity/email-claims.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { createAccountEmailClaimReleaseHandler } from './account-email-claim-release.ts'
 import { createAuthHandler } from './auth.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
 
 async function seedUser(
-	sqlite: DatabaseSync,
+	store: TestDb,
 	input: {
 		id: number
 		email: string
@@ -43,27 +38,24 @@ async function seedUser(
 	const passwordHash = await createPasswordHash(input.password)
 	const stableUserId =
 		input.stableUserId ?? (await createStableUserIdFromEmail(input.email))
-	sqlite.exec(`
-		INSERT INTO users (
-			id, username, email, stable_user_id, password_hash, email_verified_at
-		) VALUES (
-			${input.id},
-			${quoteSqlString(input.username)},
-			${quoteSqlString(input.email)},
-			${quoteSqlString(stableUserId)},
-			${quoteSqlString(passwordHash)},
-			CURRENT_TIMESTAMP
-		);
-	`)
+	await store.pg.query(
+		`INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
+		 VALUES ($1, $2, $3, $4, $5, '2026-01-01T00:00:00.000Z')`,
+		[input.id, input.username, input.email, stableUserId, passwordHash],
+	)
 	return stableUserId
 }
 
-function createAppEnv(db: D1Database) {
+function createAppEnv(
+	db: SqlDatabase,
+	overrides: Record<string, unknown> = {},
+) {
 	return {
 		APP_DB: db,
 		APP_BASE_URL: 'http://example.com',
 		COOKIE_SECRET: testCookieSecret,
 		SENTRY_ENVIRONMENT: 'test',
+		...overrides,
 	} as unknown as Env
 }
 
@@ -90,27 +82,27 @@ beforeAll(() => {
 	setAuthSessionSecret(testCookieSecret)
 })
 
-test('release re-verifies a former address then allows a new account without reminting', async () => {
+test('signed-out release link re-verifies a former address, then signup allocates a fresh identity', async () => {
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createMigratedDb()
+	await using store = await createTestDb()
 	const formerEmail = 'personal@example.com'
 	const currentEmail = 'work@example.com'
-	const stableUserId = await seedUser(sqlite, {
+	const stableUserId = await seedUser(store, {
 		id: 1,
 		email: currentEmail,
 		username: 'jamie',
 		password: 'correct-password',
 		stableUserId: await createStableUserIdFromEmail(formerEmail),
 	})
-	sqlite.exec(`
-		INSERT INTO user_email_claims (user_id, email, status)
-		VALUES (1, ${quoteSqlString(currentEmail)}, 'claimed');
-		INSERT INTO user_email_claims (user_id, email, status)
-		VALUES (1, ${quoteSqlString(formerEmail)}, 'claimed');
-	`)
+	await store.pg.query(
+		`INSERT INTO user_email_claims (user_id, email, status)
+		 VALUES (1, $1, 'claimed'), (1, $2, 'claimed')`,
+		[currentEmail, formerEmail],
+	)
 
-	const env = createAppEnv(db)
-	const handler = createAccountEmailClaimReleaseHandler(env)
+	const handler = createAccountEmailClaimReleaseHandler(
+		createAppEnv(store.forUser(stableUserId).db),
+	)
 	const session = {
 		stableUserId: testStableUserIdFromEmail(formerEmail),
 		email: currentEmail,
@@ -128,7 +120,9 @@ test('release re-verifies a former address then allows a new account without rem
 	} as never)
 	expect(currentEmailResponse.status).toBe(400)
 
-	const signupHandler = createAuthHandler(env)
+	// Identity allocation is a trusted account-administration operation.
+	const adminDb = createPgDatabase({ connection: store.pg, role: 'kody_admin' })
+	const signupHandler = createAuthHandler(createAppEnv(adminDb))
 	const blockedSignup = await signupHandler.handler(
 		new RequestContext(
 			new Request('http://example.com/auth', {
@@ -160,82 +154,77 @@ test('release re-verifies a former address then allows a new account without rem
 	expect(requestResponse.status).toBe(200)
 	expect(await requestResponse.json()).toMatchObject({ ok: true })
 
-	const pending = sqlite
-		.prepare(
+	const [pending] = (
+		await store.pg.query<{ token_hash: string }>(
 			`SELECT token_hash FROM pending_email_claim_releases WHERE user_id = 1`,
 		)
-		.get() as { token_hash: string }
-	expect(pending.token_hash).toEqual(expect.any(String))
+	).rows
+	expect(pending?.token_hash).toEqual(expect.any(String))
 
 	const token = 'release-former-email-token'
-	const tokenHash = await hashVerificationToken(token)
-	sqlite.exec(`
-		UPDATE pending_email_claim_releases
-		SET token_hash = ${quoteSqlString(tokenHash)}
-		WHERE user_id = 1
-	`)
+	await store.pg.query(
+		`UPDATE pending_email_claim_releases SET token_hash = $1 WHERE user_id = 1`,
+		[await hashVerificationToken(token)],
+	)
 
-	const verified = await verifyEmailClaimReleaseToken({
-		db,
-		token,
-	})
+	// The link is opened signed out: the pre-auth writer sees no pending rows.
+	const signedOut = {
+		db: store.forUser().db,
+		forUser: (userId: string) => store.forUser(userId).db,
+	}
+	expect(
+		await verifyEmailClaimReleaseToken({ ...signedOut, token: 'unknown' }),
+	).toEqual({ ok: false, reason: 'invalid_token' })
+	const verified = await verifyEmailClaimReleaseToken({ ...signedOut, token })
 	expect(verified).toEqual({
 		ok: true,
 		userId: 1,
 		email: formerEmail,
 	})
 	expect(
-		sqlite
-			.prepare(
-				`SELECT status FROM user_email_claims WHERE user_id = 1 AND email = ?`,
+		(
+			await store.pg.query(
+				`SELECT status FROM user_email_claims WHERE user_id = 1 AND email = $1`,
+				[formerEmail],
 			)
-			.get(formerEmail) as { status: string },
-	).toEqual({ status: 'released' })
+		).rows,
+	).toEqual([{ status: 'released' }])
 	expect(
-		sqlite.prepare(`SELECT stable_user_id FROM users WHERE id = 1`).get() as {
-			stable_user_id: string
-		},
-	).toEqual({ stable_user_id: stableUserId })
+		(await store.pg.query(`SELECT stable_user_id FROM users WHERE id = 1`))
+			.rows,
+	).toEqual([{ stable_user_id: stableUserId }])
 
-	const allowedSignup = await signupHandler.handler(
-		new RequestContext(
-			new Request('http://example.com/auth', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					email: formerEmail,
-					username: 'new-jamie',
-					password: 'password123',
-					mode: 'signup',
-				}),
-			}),
-		),
-	)
-	expect(allowedSignup.status).toBe(200)
-	const created = sqlite
-		.prepare(`SELECT email, stable_user_id FROM users WHERE email = ?`)
-		.get(formerEmail) as { email: string; stable_user_id: string }
-	expect(created.email).toBe(formerEmail)
-	expect(created.stable_user_id).not.toBe(stableUserId)
-	expect(created.stable_user_id).toMatch(/^[a-f0-9]{64}$/)
+	// After release, signup allocation no longer reserves the address and mints
+	// a fresh identity. Completing the signup on the new account's writer is
+	// the auth-handler batch's scoped account setup.
+	const allocated = await allocateSignupIdentity(adminDb, formerEmail)
+	expect(allocated).toEqual({ ok: true, stableUserId: expect.any(String) })
+	expect(allocated.ok && allocated.stableUserId).not.toBe(stableUserId)
+	expect(allocated.ok && allocated.stableUserId).toMatch(/^[a-f0-9]{64}$/)
 })
 
 test('release requests are rate limited and refuse another account email', async () => {
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createMigratedDb()
-	await seedUser(sqlite, {
+	await using store = await createTestDb()
+	const ownerId = await seedUser(store, {
 		id: 1,
 		email: 'owner@example.com',
 		username: 'owner',
 		password: 'correct-password',
 	})
-	await seedUser(sqlite, {
+	await seedUser(store, {
 		id: 2,
 		email: 'other@example.com',
 		username: 'other',
 		password: 'other-password',
 	})
-	const handler = createAccountEmailClaimReleaseHandler(createAppEnv(db))
+	await store.pg.exec(`
+		INSERT INTO user_email_claims (user_id, email, status)
+		VALUES (2, 'other@example.com', 'claimed')
+	`)
+	const handler = createAccountEmailClaimReleaseHandler(
+		createAppEnv(store.forUser(ownerId).db),
+	)
 	const session = {
 		stableUserId: testStableUserIdFromEmail('owner@example.com'),
 		email: 'owner@example.com',
@@ -289,24 +278,22 @@ test('release requests are rate limited and refuse another account email', async
 
 test('refunds the request limiter when the release email cannot be sent', async () => {
 	consoleError.mockImplementation(() => {})
-	const { sqlite, db } = createMigratedDb()
-	await seedUser(sqlite, {
+	await using store = await createTestDb()
+	const ownerId = await seedUser(store, {
 		id: 1,
 		email: 'owner@example.com',
 		username: 'owner',
 		password: 'correct-password',
 	})
-	sqlite.exec(`
+	await store.pg.exec(`
 		INSERT INTO user_email_claims (user_id, email, status)
-		VALUES (1, 'owner@example.com', 'claimed');
-		INSERT INTO user_email_claims (user_id, email, status)
-		VALUES (1, 'old@example.com', 'claimed');
+		VALUES (1, 'owner@example.com', 'claimed'), (1, 'old@example.com', 'claimed')
 	`)
-	const env = {
-		...createAppEnv(db),
-		SENTRY_ENVIRONMENT: 'production',
-	} as Env
-	const handler = createAccountEmailClaimReleaseHandler(env)
+	const handler = createAccountEmailClaimReleaseHandler(
+		createAppEnv(store.forUser(ownerId).db, {
+			SENTRY_ENVIRONMENT: 'production',
+		}),
+	)
 	const session = {
 		stableUserId: testStableUserIdFromEmail('owner@example.com'),
 		email: 'owner@example.com',
@@ -326,4 +313,12 @@ test('refunds the request limiter when the release email cannot be sent', async 
 		expect(response.status).toBe(502)
 	}
 	expect(consoleError).toHaveBeenCalled()
+	// Every failed send discarded its token.
+	expect(
+		(
+			await store.pg.query(
+				`SELECT COUNT(*)::int AS count FROM pending_email_claim_releases`,
+			)
+		).rows,
+	).toEqual([{ count: 0 }])
 })

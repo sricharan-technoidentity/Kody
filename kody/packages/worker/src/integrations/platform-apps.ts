@@ -183,7 +183,7 @@ export type PlatformOauthAppSaveInput = {
 
 export async function upsertPlatformOauthApp(input: {
 	db: D1Database
-	env: Pick<Env, 'SECRET_STORE_KEY'>
+	env: Pick<Env, 'SECRET_KMS'>
 	app: PlatformOauthAppSaveInput
 }): Promise<PlatformOauthApp> {
 	const slug = canonicalIntegrationName(input.app.slug)
@@ -344,7 +344,7 @@ export async function upsertPlatformOauthApp(input: {
  */
 export async function renamePlatformOauthApp(input: {
 	db: D1Database
-	env: Pick<Env, 'SECRET_STORE_KEY'>
+	env: Pick<Env, 'SECRET_KMS'>
 	slug: string
 	newSlug: string
 }): Promise<PlatformOauthApp> {
@@ -481,7 +481,7 @@ export async function countConnectionsForPlatformApp(input: {
  */
 export async function getPlatformOauthAppClientSecret(input: {
 	db: D1Database
-	env: Pick<Env, 'SECRET_STORE_KEY'>
+	env: Pick<Env, 'SECRET_KMS'>
 	slug: string
 }): Promise<string | null> {
 	const slug = canonicalIntegrationName(input.slug)

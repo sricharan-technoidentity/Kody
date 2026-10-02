@@ -18,6 +18,9 @@ import {
 	insertEmailVerificationToken,
 	retireOtherEmailVerificationTokens,
 } from '#worker/identity/email-verification-tokens.ts'
+import { resolveTokenOwnerDb } from '#worker/identity/token-owner-db.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 
 /**
  * The read-only verification check moved to
@@ -162,7 +165,9 @@ export type VerifyEmailResult =
 	| { ok: false; reason: 'missing_token' | 'invalid_token' | 'expired_token' }
 
 export async function verifyEmailToken(input: {
-	db: D1Database
+	db: SqlDatabase
+	/** Owner-scoped writers; required on PostgreSQL, where RLS hides the token. */
+	forUser?: (stableUserId: string) => SqlDatabase
 	token: unknown
 	now?: Date
 }): Promise<VerifyEmailResult> {
@@ -170,7 +175,14 @@ export async function verifyEmailToken(input: {
 	if (!token) return { ok: false, reason: 'missing_token' }
 
 	const tokenHash = await hashVerificationToken(token)
-	const record = await input.db
+	const db = await resolveTokenOwnerDb({
+		db: input.db,
+		forUser: input.forUser,
+		kind: 'email_verification',
+		key: tokenHash,
+	})
+	if (!db) return { ok: false, reason: 'invalid_token' }
+	const record = await db
 		.prepare(
 			`SELECT ev.id, ev.user_id, ev.expires_at, u.email,
 			        u.stable_user_id, u.email_verified_at
@@ -191,7 +203,7 @@ export async function verifyEmailToken(input: {
 
 	if (!record) return { ok: false, reason: 'invalid_token' }
 	if (record.expires_at < now.getTime()) {
-		await input.db
+		await db
 			.prepare(`DELETE FROM email_verifications WHERE id = ?`)
 			.bind(record.id)
 			.run()
@@ -199,7 +211,7 @@ export async function verifyEmailToken(input: {
 	}
 
 	try {
-		await assertAccountWritableDb(input.db, record.stable_user_id)
+		await assertAccountWritableDb(db, record.stable_user_id)
 	} catch (error) {
 		if (error instanceof AccountDeletionInProgressError) {
 			return { ok: false, reason: 'invalid_token' }
@@ -209,22 +221,22 @@ export async function verifyEmailToken(input: {
 
 	const newlyVerified = !record.email_verified_at
 	const verifiedAt = now.toISOString()
-	const stamped = await input.db
+	const stamped = await db
 		.prepare(
 			`UPDATE users
 			 SET email_verified_at = COALESCE(email_verified_at, ?),
-			     updated_at = CURRENT_TIMESTAMP
+			     updated_at = ?
 			 WHERE id = ? AND deleting_at IS NULL`,
 		)
-		.bind(verifiedAt, record.user_id)
+		.bind(verifiedAt, utcSqliteTimestamp(now), record.user_id)
 		.run()
 	if ((stamped.meta.changes ?? 0) !== 1) {
 		return { ok: false, reason: 'invalid_token' }
 	}
-	await clearUserEmailVerificationDelivery(input.db, record.user_id).catch(
+	await clearUserEmailVerificationDelivery(db, record.user_id).catch(
 		() => undefined,
 	)
-	await input.db
+	await db
 		.prepare(`DELETE FROM email_verifications WHERE user_id = ?`)
 		.bind(record.user_id)
 		.run()

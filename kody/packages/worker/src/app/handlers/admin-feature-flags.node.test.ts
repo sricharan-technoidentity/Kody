@@ -1,3 +1,4 @@
+import { createTestFeatureFlagsDb } from '#worker/test-support/aws/test-feature-flags-db.ts'
 import { expect, test, vi } from 'vitest'
 import { type PermissionString, type RoleName } from '#universal/permissions.ts'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
@@ -22,30 +23,6 @@ vi.mock('#worker/audit-log.ts', async (importOriginal) => {
 	}
 })
 
-type GlobalRow = {
-	key: string
-	enabled: number
-	rollout_percent: number | null
-	audience: string
-	note: string
-	updated_by: number | null
-	updated_at: string
-}
-
-type OverrideRow = {
-	flag_key: string
-	user_id: number
-	enabled: number
-	updated_by: number | null
-	updated_at: string
-}
-
-type UserRow = {
-	id: number
-	username: string
-	stable_user_id?: string
-}
-
 function stableUserId(id: number) {
 	return id.toString(16).padStart(64, '0')
 }
@@ -69,269 +46,6 @@ function createAdminActor(roles: Array<RoleName>) {
 			username: 'admin-user',
 			displayName: 'admin-user',
 		},
-	}
-}
-
-function createFeatureFlagsTestEnv(
-	input: {
-		globals?: Array<GlobalRow>
-		overrides?: Array<OverrideRow>
-		users?: Array<UserRow>
-	} = {},
-) {
-	const globals = new Map(
-		(input.globals ?? []).map((row) => [row.key, { ...row }]),
-	)
-	const overrides = new Map(
-		(input.overrides ?? []).map((row) => [
-			`${row.flag_key}:${row.user_id}`,
-			{ ...row },
-		]),
-	)
-	const users = new Map(
-		(input.users ?? []).map((row) => [
-			row.id,
-			{ ...row, stable_user_id: row.stable_user_id ?? stableUserId(row.id) },
-		]),
-	)
-	let clock = 0
-
-	function nextTimestamp() {
-		clock += 1
-		return `2026-07-19T00:00:${String(clock).padStart(2, '0')}.000Z`
-	}
-
-	function normalize(query: string) {
-		return query.replace(/\s+/g, ' ').trim().toLowerCase()
-	}
-
-	function createStatement(query: string, params: Array<unknown> = []) {
-		const normalized = normalize(query)
-		return {
-			bind(...nextParams: Array<unknown>) {
-				return createStatement(query, nextParams)
-			},
-			async first<T>() {
-				if (
-					normalized.includes(
-						'select id, stable_user_id from users where stable_user_id = ?',
-					)
-				) {
-					const user = [...users.values()].find(
-						(row) => row.stable_user_id === params[0],
-					)
-					return (
-						user ? { id: user.id, stable_user_id: user.stable_user_id } : null
-					) as T | null
-				}
-				if (
-					normalized.includes(
-						'select id, stable_user_id from users where username = ?',
-					)
-				) {
-					const username = String(params[0])
-					for (const user of users.values()) {
-						if (user.username === username) {
-							return {
-								id: user.id,
-								stable_user_id: user.stable_user_id,
-							} as T
-						}
-					}
-					return null
-				}
-				if (
-					normalized.includes('from feature_flag_user_overrides') &&
-					normalized.includes('where flag_key = ? and user_id = ?')
-				) {
-					const row = overrides.get(`${params[0]}:${params[1]}`)
-					return (row ? { enabled: row.enabled } : null) as T | null
-				}
-				if (
-					normalized.includes('from feature_flags') &&
-					normalized.includes('where key = ?')
-				) {
-					const row = globals.get(String(params[0]))
-					return (
-						row
-							? {
-									enabled: row.enabled,
-									rollout_percent: row.rollout_percent,
-								}
-							: null
-					) as T | null
-				}
-				throw new Error(`Unsupported first query: ${query}`)
-			},
-			async all<T>() {
-				if (
-					normalized.includes('from feature_flags') &&
-					!normalized.includes('where')
-				) {
-					return {
-						results: [...globals.values()].map((row) => ({
-							...row,
-							updated_by_stable_user_id:
-								users.get(row.updated_by ?? -1)?.stable_user_id ?? null,
-						})),
-						meta: { changes: 0 },
-					} as { results: Array<T>; meta: { changes: number } }
-				}
-				if (
-					normalized.includes('from feature_flag_user_overrides o') &&
-					normalized.includes('join users u')
-				) {
-					const rows = [...overrides.values()]
-						.map((row) => {
-							const user = users.get(row.user_id)
-							if (!user) return null
-							return {
-								flag_key: row.flag_key,
-								user_id: row.user_id,
-								enabled: row.enabled,
-								updated_at: row.updated_at,
-								username: user.username,
-								stable_user_id: user.stable_user_id,
-							}
-						})
-						.filter((row) => row !== null)
-						.sort((left, right) => {
-							const byKey = left.flag_key.localeCompare(right.flag_key)
-							if (byKey !== 0) return byKey
-							return left.username.localeCompare(right.username)
-						})
-					return {
-						results: rows,
-						meta: { changes: 0 },
-					} as { results: Array<T>; meta: { changes: number } }
-				}
-				// Metric readout queries (D1 fallback path); no data in this test.
-				if (normalized.includes('from feature_flag_exposure_rollups')) {
-					return {
-						results: [],
-						meta: { changes: 0 },
-					} as { results: Array<T>; meta: { changes: number } }
-				}
-				if (normalized.includes('from usage_rollups')) {
-					return {
-						results: [],
-						meta: { changes: 0 },
-					} as { results: Array<T>; meta: { changes: number } }
-				}
-				throw new Error(`Unsupported all query: ${query}`)
-			},
-			async run() {
-				if (
-					normalized.startsWith('insert into feature_flags') &&
-					normalized.includes('on conflict(key) do update')
-				) {
-					const key = String(params[0])
-					const enabled = Number(params[1])
-					const rolloutPercent =
-						params[2] === null || params[2] === undefined
-							? null
-							: Number(params[2])
-					const noteParam =
-						params[3] === null || params[3] === undefined
-							? null
-							: String(params[3])
-					const note = noteParam ?? globals.get(key)?.note ?? ''
-					const exists = globals.has(key)
-					const insertAudience =
-						params[4] === null || params[4] === undefined
-							? 'everyone'
-							: String(params[4])
-					const updateAudienceParam = params[7]
-					const audience = exists
-						? updateAudienceParam === null || updateAudienceParam === undefined
-							? (globals.get(key)?.audience ?? 'everyone')
-							: String(updateAudienceParam)
-						: insertAudience
-					const updatedBy = Number(params[5])
-					const updatedAt = nextTimestamp()
-					globals.set(key, {
-						key,
-						enabled,
-						rollout_percent: rolloutPercent,
-						audience,
-						note,
-						updated_by: updatedBy,
-						updated_at: updatedAt,
-					})
-					return { meta: { changes: 1 } }
-				}
-				if (
-					normalized.startsWith('insert into feature_flag_user_overrides') &&
-					normalized.includes('on conflict(flag_key, user_id) do update')
-				) {
-					const flagKey = String(params[0])
-					const userId = Number(params[1])
-					const enabled = Number(params[2])
-					const updatedBy = Number(params[3])
-					const updatedAt = nextTimestamp()
-					overrides.set(`${flagKey}:${userId}`, {
-						flag_key: flagKey,
-						user_id: userId,
-						enabled,
-						updated_by: updatedBy,
-						updated_at: updatedAt,
-					})
-					return { meta: { changes: 1 } }
-				}
-				if (
-					normalized.startsWith('delete from feature_flag_user_overrides') &&
-					normalized.includes('where flag_key = ? and user_id = ?')
-				) {
-					const mapKey = `${params[0]}:${params[1]}`
-					const existed = overrides.delete(mapKey)
-					return { meta: { changes: existed ? 1 : 0 } }
-				}
-				if (
-					normalized.startsWith('delete from feature_flag_user_overrides') &&
-					normalized.includes('where flag_key = ?')
-				) {
-					const flagKey = String(params[0])
-					let changes = 0
-					// Snapshot keys so deletes during this loop do not skip entries.
-					// oxlint-disable-next-line unicorn/no-useless-spread
-					for (const mapKey of [...overrides.keys()]) {
-						if (mapKey.startsWith(`${flagKey}:`)) {
-							overrides.delete(mapKey)
-							changes += 1
-						}
-					}
-					return { meta: { changes } }
-				}
-				if (
-					normalized.startsWith('delete from feature_flags') &&
-					normalized.includes('where key = ?')
-				) {
-					const existed = globals.delete(String(params[0]))
-					return { meta: { changes: existed ? 1 : 0 } }
-				}
-				throw new Error(`Unsupported run query: ${query}`)
-			},
-		}
-	}
-
-	return {
-		COOKIE_SECRET: 'secret',
-		APP_DB: {
-			prepare(query: string) {
-				return createStatement(query)
-			},
-			async batch(
-				statements: Array<{
-					run: () => Promise<{ meta: { changes: number } }>
-				}>,
-			) {
-				const results = []
-				for (const statement of statements) {
-					results.push(await statement.run())
-				}
-				return results
-			},
-		} as unknown as D1Database,
 	}
 }
 
@@ -361,7 +75,14 @@ function createHandlerRequest(
 }
 
 test('admin feature flags HTTP lifecycle: auth, list, set_global, and validation errors', async () => {
-	const env = createFeatureFlagsTestEnv() as unknown as Env
+	await using db = await createTestFeatureFlagsDb({
+		users: [{ id: 1, username: 'admin-user', stable_user_id: stableUserId(1) }],
+	})
+	const env = {
+		COOKIE_SECRET: 'secret',
+		APP_DB: db,
+		FLAG_EXPOSURES: {},
+	} as unknown as Env
 	const handler = createAdminFeatureFlagsApiHandler(env)
 
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(
@@ -421,7 +142,7 @@ test('admin feature flags HTTP lifecycle: auth, list, set_global, and validation
 					rolloutPercent: 25,
 					audience: 'everyone',
 					note: 'canary',
-					updatedByStableUserId: null,
+					updatedByStableUserId: stableUserId(1),
 				}),
 			}),
 		]),
@@ -515,18 +236,17 @@ test('admin feature flags set_user_override validates user identity and existenc
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(
 		createAdminActor(['admin']),
 	)
-	const handler = createAdminFeatureFlagsApiHandler(
-		createFeatureFlagsTestEnv({
-			users: [
-				{
-					id: 1,
-					username: 'admin-user',
-					stable_user_id: stableUserId(1),
-				},
-				{ id: 2, username: 'jane', stable_user_id: stableUserId(2) },
-			],
-		}) as unknown as Env,
-	)
+	await using db = await createTestFeatureFlagsDb({
+		users: [
+			{ id: 1, username: 'admin-user', stable_user_id: stableUserId(1) },
+			{ id: 2, username: 'jane', stable_user_id: stableUserId(2) },
+		],
+	})
+	const handler = createAdminFeatureFlagsApiHandler({
+		COOKIE_SECRET: 'secret',
+		APP_DB: db,
+		FLAG_EXPOSURES: {},
+	} as unknown as Env)
 
 	const neither = await handler.handler(
 		createHandlerRequest({

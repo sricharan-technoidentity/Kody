@@ -27,13 +27,11 @@
 	},
 	"include": [
 		"./playwright.config.ts",
-		"./wrangler-env.ts",
 		"./cli.ts",
 		"./packages/worker/src/mcp/execute-modules/**/*.ts",
 		"./packages/worker/src/mcp/mcp-server.mcp-e2e.test.ts",
 		"./packages/worker/src/mcp/test-process.ts",
 		"./packages/worker/src/test-support/msw-node-server.ts",
-		"./packages/worker/src/test-support/cloudflare-mock-server.ts",
 		"./tools/**/*.ts",
 		"./packages/shared/src/**/*.ts",
 		// Worker identity modules imported by the seeding tools.

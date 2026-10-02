@@ -2,8 +2,6 @@ import { dispatchPlatformFeedbackSubmittedSubscriptionEvent } from './package-su
 import { type PlatformFeedbackDispatchQueueMessage } from './dispatch-queue-producer.ts'
 import { PlatformFeedbackDispatchCancelledError } from './errors.ts'
 
-const platformFeedbackDispatchRetryDelaySeconds = 30
-
 function parsePlatformFeedbackDispatchQueueMessage(
 	body: unknown,
 ): PlatformFeedbackDispatchQueueMessage | null {
@@ -20,36 +18,25 @@ function parsePlatformFeedbackDispatchQueueMessage(
 	return { feedbackId: feedbackId.trim() }
 }
 
-export async function handlePlatformFeedbackDispatchQueue(
-	batch: MessageBatch<unknown>,
+/** One `platform-feedback-dispatch` message (a `QueueMessage` workflow). */
+export async function processPlatformFeedbackDispatchMessage(
+	body: unknown,
 	env: Env,
-	_ctx: ExecutionContext,
-) {
-	for (const queueMessage of batch.messages) {
-		const parsed = parsePlatformFeedbackDispatchQueueMessage(queueMessage.body)
-		if (!parsed) {
-			queueMessage.ack()
-			continue
-		}
-		try {
-			await dispatchPlatformFeedbackSubmittedSubscriptionEvent({
-				env,
-				feedbackId: parsed.feedbackId,
-			})
-			queueMessage.ack()
-		} catch (error) {
-			if (error instanceof PlatformFeedbackDispatchCancelledError) {
-				queueMessage.ack()
-				continue
-			}
-			console.error('platform-feedback-dispatch-queue-processing-failed', {
-				queueMessageId: queueMessage.id,
-				feedbackId: parsed.feedbackId,
-				error,
-			})
-			queueMessage.retry({
-				delaySeconds: platformFeedbackDispatchRetryDelaySeconds,
-			})
-		}
+): Promise<'ack' | 'retry'> {
+	const parsed = parsePlatformFeedbackDispatchQueueMessage(body)
+	if (!parsed) return 'ack'
+	try {
+		await dispatchPlatformFeedbackSubmittedSubscriptionEvent({
+			env,
+			feedbackId: parsed.feedbackId,
+		})
+		return 'ack'
+	} catch (error) {
+		if (error instanceof PlatformFeedbackDispatchCancelledError) return 'ack'
+		console.error('platform-feedback-dispatch-queue-processing-failed', {
+			feedbackId: parsed.feedbackId,
+			error,
+		})
+		return 'retry'
 	}
 }

@@ -115,9 +115,10 @@ This project uses the following resources:
   - Preview: `kody-capabilities-preview`
   - Create once per account, for example:
     `wrangler vectorize create kody-capabilities-prod --dimensions=384 --metric=cosine`
-    (same for preview). **Dimensions must match** the embedding model in
-    `packages/worker/src/vectorize/embedding.ts` (`@cf/baai/bge-small-en-v1.5`,
-    384 dimensions, `cls` pooling).
+    (same for preview). The migration POC no longer writes to this index:
+    `packages/worker/src/search-index/embedding.ts` embeds with Bedrock Titan v2
+    (1,024 dimensions) into pgvector
+    (`packages/worker/migrations-pg/0003_vectors.sql`).
 - Cloudflare Images binding for package-icon and integration-logo ingest
   - `binding`: `IMAGES`
   - Origin (`packages/worker/wrangler.jsonc`) and platform

@@ -33,12 +33,3 @@ export function readMainWorkerWranglerCompatibility(): WranglerCompatibilitySett
 		new URL('../../wrangler.jsonc', import.meta.url),
 	)
 }
-
-export function readMockCloudflareWranglerCompatibility(): WranglerCompatibilitySettings {
-	return readWranglerCompatibilitySettings(
-		new URL(
-			'../../../../packages/mock-servers/cloudflare/wrangler.jsonc',
-			import.meta.url,
-		),
-	)
-}

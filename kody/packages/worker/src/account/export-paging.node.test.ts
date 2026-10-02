@@ -5,14 +5,39 @@ import {
 	readAccountExportSection,
 } from './export.ts'
 import {
+	createRunRow,
+	createTestRunRecords,
+} from '#worker/test-support/run-records.ts'
+import {
 	createMigratedDb,
 	createMailboxBinding,
 	createSignedR2Cursor,
 } from '#worker/test-support/account-export.ts'
 
+/** Run store whose finished runs reference `storageIds`. */
+async function runRecordsWithStorageIds(
+	userId: string,
+	storageIds: Array<string>,
+) {
+	const runRecords = createTestRunRecords()
+	for (const [index, storageId] of storageIds.entries()) {
+		await runRecords.forUser(userId).finishRun({
+			run: createRunRow({
+				id: `run-${index}`,
+				storageId,
+				status: 'success',
+				finishedAt: new Date().toISOString(),
+			}),
+			logs: [],
+		})
+	}
+	return runRecords.records
+}
+
 test('R2 export pages owned payloads in bounded chunks and reports missing objects', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id, avatar_key
@@ -147,10 +172,11 @@ test('R2 export pages owned payloads in bounded chunks and reports missing objec
 
 test('R2 export performs bounded keyset work independent of mailbox size', async () => {
 	const queries: Array<string> = []
-	const { sqlite, db } = createMigratedDb({
+	await using database = await createMigratedDb({
 		onQuery: (query) => queries.push(query),
 	})
-	sqlite.exec(`
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -197,8 +223,9 @@ test('R2 export performs bounded keyset work independent of mailbox size', async
 })
 
 test('R2 export cursor detects object overwrite before continuing bytes', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id, avatar_key
@@ -268,8 +295,9 @@ test('R2 export cursor detects object overwrite before continuing bytes', async 
 })
 
 test('R2 export cursor keeps stable row identity when inventory mutates', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -401,8 +429,9 @@ test('durable object discovery pages high-cardinality storage ids without nested
 })
 
 test('account export includes run_records section with runs, ledger, and dedicated state', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -412,46 +441,50 @@ test('account export includes run_records section with runs, ledger, and dedicat
 			'2026-07-05', '2026-07-05', 'user-aaa'
 		);
 	`)
-	const run = {
-		id: 'run-export-1',
-		surface: 'job' as const,
-		status: 'success' as const,
-		name: 'nightly',
-		packageId: null,
-		kodyId: null,
-		sourceId: null,
-		publishedCommit: null,
-		storageId: 'job:nightly',
-		jobId: 'job-1',
-		workflowId: null,
-		invocationId: null,
-		sessionId: null,
-		idempotencyKey: null,
-		parentRunId: null,
-		startedAt: '2026-07-26T00:00:00.000Z',
-		finishedAt: '2026-07-26T00:00:01.000Z',
-		durationMs: 1000,
-		errorName: null,
-		errorMessage: null,
-		metadata: {},
-		logCount: 2,
-	}
-	const logs = [
+	const runRecords = createTestRunRecords()
+	await runRecords.forUser('user-aaa').finishRun({
+		run: createRunRow({
+			id: 'run-export-1',
+			surface: 'job',
+			status: 'success',
+			name: 'nightly',
+			packageId: 'pkg-1',
+			storageId: 'job:nightly',
+			jobId: 'job-1',
+			finishedAt: new Date().toISOString(),
+			durationMs: 1000,
+		}),
+		logs: [
+			{ sequence: 0, level: 'log', message: 'starting', fieldsJson: null },
+			{
+				sequence: 1,
+				level: 'info',
+				message: 'done',
+				fieldsJson: '{"ok":true}',
+			},
+		],
+	})
+	const stored = await runRecords
+		.forUser('user-aaa')
+		.getRun({ runId: 'run-export-1' })
+	const run = stored!.run
+	const logs = stored!.logs
+	expect(logs).toEqual([
 		{
 			runId: 'run-export-1',
 			sequence: 0,
-			level: 'log' as const,
+			level: 'log',
 			message: 'starting',
 			fields: null,
 		},
 		{
 			runId: 'run-export-1',
 			sequence: 1,
-			level: 'info' as const,
+			level: 'info',
 			message: 'done',
 			fields: { ok: true },
 		},
-	]
+	])
 	// Keyed package-invocation idempotency ledger row stored in the same
 	// RunLog DO; exported through the same run_records section.
 	const packageInvocation = {
@@ -487,27 +520,24 @@ test('account export includes run_records section with runs, ledger, and dedicat
 		completedAt: '2026-07-31T00:00:01.000Z',
 		lastError: null,
 	}
-	const jobRunObservability = {
-		jobId: 'job-export-1',
-		lastRunAt: '2026-07-31T00:00:00.000Z',
-		lastRunStatus: 'success' as const,
-		lastRunError: null,
-		lastDurationMs: 12,
-		runCount: 1,
+	// Derived from the terminal run above in the same run store.
+	const jobRunObservability = await runRecords
+		.forUser('user-aaa')
+		.getJobRunObservability({ jobId: 'job-1' })
+	const [packageRunSuccess] = await runRecords
+		.forUser('user-aaa')
+		.listPackageRunSuccesses()
+	const [activationMilestone] = await runRecords
+		.forUser('user-aaa')
+		.listActivationMilestones()
+	expect(packageRunSuccess).toMatchObject({
+		packageId: 'pkg-1',
 		successCount: 1,
-		errorCount: 0,
-		updatedAt: '2026-07-31T00:00:01.000Z',
-	}
-	const packageRunSuccess = {
+	})
+	expect(activationMilestone).toMatchObject({
+		milestone: 'package_run_succeeded',
 		packageId: 'pkg-1',
-		successCount: 2,
-		updatedAt: '2026-07-31T00:00:01.000Z',
-	}
-	const activationMilestone = {
-		milestone: 'package_activated' as const,
-		reachedAt: '2026-07-31T00:00:01.000Z',
-		packageId: 'pkg-1',
-	}
+	})
 	const env = {
 		APP_DB: db,
 		STORAGE_RUNNER: {
@@ -521,29 +551,12 @@ test('account export includes run_records section with runs, ledger, and dedicat
 				}),
 			}),
 		},
-		RUN_LOG: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({
-				exportRuns: async () => ({
-					runs: [run],
-					logs,
+		RUN_RECORDS: runRecords.records,
+		RUN_STATE: {
+			forUser: () => ({
+				exportState: async () => ({
 					packageInvocations: [packageInvocation],
 					workflowProjections: [workflowProjection],
-					jobRunObservability: [jobRunObservability],
-					packageRunSuccesses: [packageRunSuccess],
-					activationMilestones: [activationMilestone],
-					nextStartAfter: null,
-					truncated: false,
-				}),
-				listStorageIds: async () => ['job:nightly'],
-				summarize: async () => ({
-					since: '1970-01-01T00:00:00.000Z',
-					total: 1,
-					errors: 0,
-					ignored: 0,
-					resolved: 0,
-					running: 0,
-					bySurface: [],
 				}),
 			}),
 		},
@@ -557,7 +570,7 @@ test('account export includes run_records section with runs, ledger, and dedicat
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 	})
-	// One run plus one row from each RunLog export phase.
+	// One run plus one row from each run-records export phase.
 	expect(accountExport.manifest.sections.run_records?.count).toBe(6)
 	expect(accountExport.durableObjects.runRecords).toEqual({
 		runs: [run],
@@ -602,8 +615,9 @@ test('account export includes run_records section with runs, ledger, and dedicat
 })
 
 test('account export includes user_meter counters, pages them, and warns on truncation', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -678,13 +692,10 @@ test('account export includes user_meter counters, pages them, and warns on trun
 			}
 		},
 	)
-	const idFromName = vi.fn((name: string) => name as unknown as DurableObjectId)
+	const forUser = vi.fn((_userId: string) => ({ exportCounters }))
 	const env = {
 		APP_DB: db,
-		USER_METER: {
-			idFromName,
-			get: () => ({ exportCounters }),
-		},
+		USER_METERS: { forUser },
 	} as unknown as Env
 
 	const accountExport = await createAccountExport({
@@ -692,7 +703,7 @@ test('account export includes user_meter counters, pages them, and warns on trun
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 	})
-	expect(idFromName).toHaveBeenCalledWith('user-aaa')
+	expect(forUser).toHaveBeenCalledWith('user-aaa')
 	// 3 counters + storage state + deletingAt + 1 lease
 	expect(accountExport.manifest.sections.user_meter?.count).toBe(6)
 	expect(accountExport.durableObjects.userMeter).toEqual({
@@ -765,8 +776,9 @@ test('account export includes user_meter counters, pages them, and warns on trun
 })
 
 test('account export includes mailbox rows, pages them, and warns on truncation', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -929,8 +941,9 @@ test('account export includes mailbox rows, pages them, and warns on truncation'
 })
 
 test('run_records section paging preserves exportRuns cursor across dedicated phases', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -940,30 +953,24 @@ test('run_records section paging preserves exportRuns cursor across dedicated ph
 			'2026-07-05', '2026-07-05', 'user-aaa'
 		);
 	`)
-	const run = {
-		id: 'run-page-1',
-		surface: 'job' as const,
-		status: 'success' as const,
-		name: 'page',
-		packageId: null,
-		kodyId: null,
-		sourceId: null,
-		publishedCommit: null,
-		storageId: null,
+	const runRecords = createTestRunRecords()
+	const user = runRecords.forUser('user-aaa')
+	await user.finishRun({
+		run: createRunRow({
+			id: 'run-page-1',
+			surface: 'job',
+			status: 'success',
+			name: 'page',
+			jobId: 'job-page',
+			finishedAt: new Date().toISOString(),
+			durationMs: 1000,
+		}),
+		logs: [],
+	})
+	const run = (await user.getRun({ runId: 'run-page-1' }))!.run
+	const jobRunObservability = await user.getJobRunObservability({
 		jobId: 'job-page',
-		workflowId: null,
-		invocationId: null,
-		sessionId: null,
-		idempotencyKey: null,
-		parentRunId: null,
-		startedAt: '2026-07-26T00:00:00.000Z',
-		finishedAt: '2026-07-26T00:00:01.000Z',
-		durationMs: 1000,
-		errorName: null,
-		errorMessage: null,
-		metadata: {},
-		logCount: 0,
-	}
+	})
 	const workflowProjection = {
 		id: 'wf-page-1',
 		bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
@@ -982,71 +989,42 @@ test('run_records section paging preserves exportRuns cursor across dedicated ph
 		completedAt: '2026-07-31T00:00:01.000Z',
 		lastError: null,
 	}
-	const exportRuns = vi
-		.fn()
-		.mockResolvedValueOnce({
-			runs: [run],
-			logs: [],
-			packageInvocations: [],
-			workflowProjections: [],
-			jobRunObservability: [],
-			packageRunSuccesses: [],
-			activationMilestones: [],
-			nextStartAfter: 'invocation-ledger:',
-			truncated: true,
-		})
-		.mockResolvedValueOnce({
-			runs: [],
-			logs: [],
-			packageInvocations: [],
-			workflowProjections: [workflowProjection],
-			jobRunObservability: [],
-			packageRunSuccesses: [],
-			activationMilestones: [],
-			nextStartAfter: null,
-			truncated: false,
-		})
+	const exportState = vi.fn().mockResolvedValue({
+		packageInvocations: [],
+		workflowProjections: [workflowProjection],
+	})
 	const env = {
 		APP_DB: db,
-		RUN_LOG: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({ exportRuns }),
-		},
+		RUN_RECORDS: runRecords.records,
+		RUN_STATE: { forUser: () => ({ exportState }) },
 	} as unknown as Env
 
-	const first = await readAccountExportSection({
-		env,
-		dbUserId: 1,
-		mcpUserId: 'user-aaa',
-		section: 'run_records',
-		pageSize: 1,
-	})
-	expect(first.items).toEqual([{ run, logs: [] }])
-	expect(first.truncated).toBe(true)
-	expect(first.nextStartAfter).toBe('invocation-ledger:')
-
-	const second = await readAccountExportSection({
-		env,
-		dbUserId: 1,
-		mcpUserId: 'user-aaa',
-		section: 'run_records',
-		pageSize: 1,
-		startAfter: first.nextStartAfter ?? undefined,
-	})
-	expect(second.items).toEqual([{ workflowProjection }])
-	expect(second.truncated).toBe(false)
-	expect(exportRuns).toHaveBeenNthCalledWith(
-		2,
-		expect.objectContaining({
+	const pages: Array<{ items: Array<unknown>; next: string | null }> = []
+	let startAfter: string | undefined
+	do {
+		const page = await readAccountExportSection({
+			env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'run_records',
 			pageSize: 1,
-			startAfter: 'invocation-ledger:',
-		}),
-	)
+			startAfter,
+		})
+		pages.push({ items: page.items, next: page.nextStartAfter ?? null })
+		startAfter = page.truncated ? (page.nextStartAfter ?? undefined) : undefined
+	} while (startAfter)
+	expect(pages).toEqual([
+		{ items: [{ run, logs: [] }], next: 'job-run-observability:' },
+		{ items: [{ jobRunObservability }], next: 'package-run-successes:' },
+		{ items: [{ workflowProjection }], next: null },
+	])
+	expect(exportState).toHaveBeenCalledOnce()
 })
 
 test('storage_runners count matches ids enumerable by discovery paging', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -1078,16 +1056,11 @@ test('storage_runners count matches ids enumerable by discovery paging', async (
 
 	const env = {
 		APP_DB: db,
-		RUN_LOG: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({
-				listStorageIds: async () => [
-					'exec:adhoc',
-					'exec:runlog-only',
-					'job:job-1',
-				],
-			}),
-		},
+		RUN_RECORDS: await runRecordsWithStorageIds('user-aaa', [
+			'exec:adhoc',
+			'exec:runlog-only',
+			'job:job-1',
+		]),
 	} as unknown as Env
 	const manifest = await createAccountExportManifest({
 		env,
@@ -1120,8 +1093,9 @@ test('storage_runners count matches ids enumerable by discovery paging', async (
 })
 
 test('storage_runner section exports a RunLog-only storage id', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -1145,12 +1119,9 @@ test('storage_runner section exports a RunLog-only storage id', async () => {
 			idFromName: (name: string) => name as unknown as DurableObjectId,
 			get: () => ({ exportStorage }),
 		},
-		RUN_LOG: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({
-				listStorageIds: async () => ['exec:runlog-export-only'],
-			}),
-		},
+		RUN_RECORDS: await runRecordsWithStorageIds('user-aaa', [
+			'exec:runlog-export-only',
+		]),
 	} as unknown as Env
 
 	const manifest = await createAccountExportManifest({
@@ -1178,8 +1149,9 @@ test('storage_runner section reads do not load manifests for D1-known rows', asy
 	)
 	loadManifest.mockRejectedValue(new Error('manifest should not be loaded'))
 	try {
-		const { sqlite, db } = createMigratedDb()
-		sqlite.exec(`
+		await using database = await createMigratedDb()
+		const { db } = database
+		await database.exec(`
 			INSERT INTO users (
 				id, username, email, password_hash, created_at, updated_at,
 				email_verified_at, stable_user_id

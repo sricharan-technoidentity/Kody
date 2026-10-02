@@ -15,7 +15,10 @@ import {
 	listPackageEmittedEvents,
 	listPackageSubscriptions,
 } from '#worker/package-registry/manifest.ts'
-import { type PackageEventsDispatchQueueMessage } from '#worker/package-events/dispatch-queue-producer.ts'
+import {
+	startPackageEventFanout,
+	type PackageEventsDispatchQueueMessage,
+} from '#worker/package-events/dispatch-queue-producer.ts'
 import {
 	buildPackageSubscriptionArtifactName,
 	normalizePackageSubscriptionTopic,
@@ -41,8 +44,9 @@ import { invokeSavedPackageModule } from './idempotent-module-invocation.ts'
 import { buildJsonErrorResponse } from './responses.ts'
 
 /**
- * Package event payloads ride inside a Queue message (128 KiB limit), so
- * the payload itself is capped well below that to leave envelope headroom.
+ * Package event payloads ride inside Temporal payloads (events carry data,
+ * not storage), so the payload is capped well below the 2 MB payload limit
+ * and the former 128 KiB queue message limit.
  */
 export const maxPackageEventPayloadBytes = 64 * 1024
 
@@ -191,10 +195,10 @@ export type PackageEventDeliveryResult = {
 }
 
 /**
- * Queue-consumer side of package event dispatch: resolve the emitting
+ * Inline package event dispatch (no Temporal binding): resolve the emitting
  * user's matching subscriptions and invoke each handler with exactly-once
  * idempotency. Throws when subscriber discovery fails or an invocation
- * fails before user code ran (both retryable via Queue redelivery); user
+ * fails before user code ran (both retryable); user
  * handler failures are terminal and reported in the returned summary (the
  * idempotency ledger would replay a stored failure on retry anyway).
  */
@@ -206,72 +210,24 @@ export async function deliverPackageEventWithToolFactories(input: {
 	waitUntil?: (promise: Promise<unknown>) => void
 }): Promise<PackageEventDeliveryResult> {
 	const message = input.message
-	const subscriptions = await loadMatchingPackageEventSubscriptions({
-		env: input.env,
-		baseUrl: input.baseUrl,
-		userId: message.userId,
-		topic: message.topic,
-		payload: message.payload,
-	})
-	const envelope = stripUntrustedSubscriptionEnvelopeFields({
-		event: message.topic,
-		source: {
-			type: 'package',
-			package_id: message.source.packageId,
-			kody_id: message.source.kodyId,
-		},
-		idempotency_key: message.idempotencyKey,
-		payload: message.payload,
-	}) as Record<string, unknown>
+	const subscriptions = await listPackageEventSubscribers(input)
 	const subscribers: PackageEventDeliveryResult['subscribers'] = []
 	const retryableInfrastructureErrors: Array<Error> = []
 	await runQueueableDynamicWorkerWork(async () => {
 		for (const { savedPackage, subscription } of subscriptions) {
-			const response = await invokePackageSubscriptionWithToolFactories({
-				env: input.env,
-				baseUrl: input.baseUrl,
+			const delivery = await deliverPackageEventToSubscriberWithToolFactories({
+				...input,
 				savedPackage,
-				topic: message.topic,
-				params: envelope,
-				idempotencyKey: await buildPackageEventSubscriptionIdempotencyKey({
-					sourcePackageId: message.source.packageId,
-					subscriberPackageId: savedPackage.id,
-					topic: message.topic,
-					idempotencyKey: message.idempotencyKey,
-				}),
-				source: `package:${message.source.kodyId}`,
-				actorTokenId: `${internalPackageEventSubscriptionTokenId}:${message.source.packageId}`,
-				runtimeInvokeDepth: message.invokeDepth,
-				toolFactories: input.toolFactories,
-				waitUntil: input.waitUntil,
+				handler: subscription.handler,
 			})
-			const retryableCode =
-				readPreExecutionPackageInvocationInfrastructureCode(response)
-			if (retryableCode) {
+			if (delivery.retryableCode) {
 				retryableInfrastructureErrors.push(
 					new Error(
-						`Retryable package invocation infrastructure response: ${retryableCode}.`,
+						`Retryable package invocation infrastructure response: ${delivery.retryableCode}.`,
 					),
 				)
 			}
-			const replayed =
-				(response.body['idempotency'] as { replayed?: unknown } | undefined)
-					?.replayed === true
-			const status =
-				response.status >= 200 && response.status < 400
-					? replayed
-						? 'replayed'
-						: 'completed'
-					: 'failed'
-			subscribers.push({
-				packageId: savedPackage.id,
-				kodyId: savedPackage.kodyId,
-				handler: subscription.handler,
-				status,
-				...(status === 'failed'
-					? { error: readInvocationError(response) }
-					: {}),
-			})
+			subscribers.push(delivery.subscriber)
 		}
 	})
 	if (retryableInfrastructureErrors.length > 0) {
@@ -293,6 +249,86 @@ export async function deliverPackageEventWithToolFactories(input: {
 		subscribers,
 		delivered: subscribers.length - failed,
 		failed,
+	}
+}
+
+/** The emitting user's packages subscribed to this event (fan-out listing). */
+export async function listPackageEventSubscribers(input: {
+	env: Env
+	baseUrl: string
+	message: PackageEventsDispatchQueueMessage
+}) {
+	return await loadMatchingPackageEventSubscriptions({
+		env: input.env,
+		baseUrl: input.baseUrl,
+		userId: input.message.userId,
+		topic: input.message.topic,
+		payload: input.message.payload,
+	})
+}
+
+/**
+ * Invoke one subscriber's handler with exactly-once idempotency. A
+ * `retryableCode` means the invocation failed before user code ran; user
+ * handler failures are terminal (`status: 'failed'`).
+ */
+export async function deliverPackageEventToSubscriberWithToolFactories(input: {
+	env: Env
+	baseUrl: string
+	message: PackageEventsDispatchQueueMessage
+	savedPackage: SavedPackageRecord
+	handler: string
+	toolFactories: PackageRuntimeToolFactories
+	waitUntil?: (promise: Promise<unknown>) => void
+}) {
+	const { message, savedPackage } = input
+	const envelope = stripUntrustedSubscriptionEnvelopeFields({
+		event: message.topic,
+		source: {
+			type: 'package',
+			package_id: message.source.packageId,
+			kody_id: message.source.kodyId,
+		},
+		idempotency_key: message.idempotencyKey,
+		payload: message.payload,
+	}) as Record<string, unknown>
+	const response = await invokePackageSubscriptionWithToolFactories({
+		env: input.env,
+		baseUrl: input.baseUrl,
+		savedPackage,
+		topic: message.topic,
+		params: envelope,
+		idempotencyKey: await buildPackageEventSubscriptionIdempotencyKey({
+			sourcePackageId: message.source.packageId,
+			subscriberPackageId: savedPackage.id,
+			topic: message.topic,
+			idempotencyKey: message.idempotencyKey,
+		}),
+		source: `package:${message.source.kodyId}`,
+		actorTokenId: `${internalPackageEventSubscriptionTokenId}:${message.source.packageId}`,
+		runtimeInvokeDepth: message.invokeDepth,
+		toolFactories: input.toolFactories,
+		waitUntil: input.waitUntil,
+	})
+	const replayed =
+		(response.body['idempotency'] as { replayed?: unknown } | undefined)
+			?.replayed === true
+	const status: PackageEventDeliveryResult['subscribers'][number]['status'] =
+		response.status >= 200 && response.status < 400
+			? replayed
+				? 'replayed'
+				: 'completed'
+			: 'failed'
+	return {
+		retryableCode:
+			readPreExecutionPackageInvocationInfrastructureCode(response),
+		subscriber: {
+			packageId: savedPackage.id,
+			kodyId: savedPackage.kodyId,
+			handler: input.handler,
+			status,
+			...(status === 'failed' ? { error: readInvocationError(response) } : {}),
+		},
 	}
 }
 
@@ -371,11 +407,10 @@ export function createPackageEventToolsWithToolFactories(input: {
 				},
 				invokeDepth: packageInvokeDepth + 1,
 			}
-			const queue = (input.env as Partial<Env>).PACKAGE_EVENTS_DISPATCH_QUEUE
 			let enqueued = false
-			if (queue) {
+			if (input.env.TEMPORAL) {
 				try {
-					await queue.send(message)
+					await startPackageEventFanout(input.env, message)
 					enqueued = true
 				} catch (error) {
 					console.error('package-events-dispatch-enqueue-failed', {
@@ -386,7 +421,7 @@ export function createPackageEventToolsWithToolFactories(input: {
 				}
 			}
 			if (!enqueued) {
-				// No Queue binding (local dev / preview) or enqueue failure:
+				// No Temporal binding (local dev / tests) or Start failure:
 				// deliver inline with the same consumer code path so events
 				// still reach subscribers. Delivery failures are logged, never
 				// surfaced to the emitter — matching queued semantics.

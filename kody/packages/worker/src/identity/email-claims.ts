@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { normalizeEmail } from '#worker/identity/normalize-email.ts'
 import { getUniqueConstraintField } from '#worker/database-errors.ts'
 import {
@@ -34,7 +35,7 @@ export type ReleasableEmailClaimResult =
 const randomStableUserIdAttempts = 8
 
 export async function findActiveEmailClaim(
-	db: D1Database,
+	db: SqlDatabase,
 	email: string,
 ): Promise<ActiveEmailClaim | null> {
 	const normalized = normalizeEmail(email)
@@ -64,7 +65,7 @@ export async function findActiveEmailClaim(
 }
 
 export async function listFormerEmailClaims(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: number; currentEmail: string },
 ): Promise<Array<FormerEmailClaim>> {
 	const currentEmail = normalizeEmail(input.currentEmail)
@@ -83,7 +84,7 @@ export async function listFormerEmailClaims(
 	}))
 }
 
-export async function isEmailClaimReleased(db: D1Database, email: string) {
+export async function isEmailClaimReleased(db: SqlDatabase, email: string) {
 	const normalized = normalizeEmail(email)
 	if (!normalized) return false
 	const active = await findActiveEmailClaim(db, normalized)
@@ -106,12 +107,20 @@ export async function isEmailClaimReleased(db: D1Database, email: string) {
  * `stable_user_id` and has not released it.
  */
 export async function isEmailReservedForOtherAccount(
-	db: D1Database,
+	db: SqlDatabase,
 	email: string,
 	exceptUserId?: number,
 ) {
 	const normalized = normalizeEmail(email)
 	if (!normalized) return false
+	// RLS hides other accounts; the directory definer answers only true/false.
+	if ('dialect' in db && db.dialect === 'postgres') {
+		const row = await db
+			.prepare(`SELECT kody_email_reserved_for_other(?, ?) AS reserved`)
+			.bind(normalized, exceptUserId ?? null)
+			.first<{ reserved: boolean }>()
+		return row?.reserved === true
+	}
 
 	const currentOwner = await db
 		.prepare(`SELECT id FROM users WHERE email = ?`)
@@ -135,7 +144,7 @@ export async function isEmailReservedForOtherAccount(
 }
 
 export async function resolveReleasableEmailClaim(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	stableUserId: string
 	currentEmail: string
@@ -173,7 +182,7 @@ export async function resolveReleasableEmailClaim(input: {
 }
 
 export async function claimAccountEmail(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: number; email: string; now?: Date },
 ) {
 	const email = normalizeEmail(input.email)
@@ -223,7 +232,7 @@ export async function claimAccountEmail(
 }
 
 export async function releaseAccountEmailClaim(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: number; email: string; now?: Date },
 ) {
 	const email = normalizeEmail(input.email)
@@ -266,7 +275,7 @@ export async function releaseAccountEmailClaim(
 }
 
 export async function countRecentEmailClaimReleases(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: number; windowSeconds: number; now?: Date },
 ) {
 	const now = input.now ?? new Date()
@@ -285,11 +294,37 @@ export async function countRecentEmailClaimReleases(
 }
 
 export async function allocateSignupIdentity(
-	db: D1Database,
+	db: SqlDatabase,
 	email: string,
 ): Promise<AllocateSignupIdentityResult> {
 	const normalized = normalizeEmail(email)
 	if (!normalized) return { ok: false, reason: 'current_email' }
+	// Signup runs before the account exists, so RLS hides every other row.
+	if ('dialect' in db && db.dialect === 'postgres') {
+		const row = await db
+			.prepare(`SELECT kody_signup_identity(?) AS outcome`)
+			.bind(normalized)
+			.first<{
+				outcome:
+					| 'current_email'
+					| 'former_email_claimed'
+					| 'preferred'
+					| 'random'
+			}>()
+		switch (row?.outcome) {
+			case 'preferred':
+				return {
+					ok: true,
+					stableUserId: await createStableUserIdFromEmail(normalized),
+				}
+			case 'random':
+				return { ok: true, stableUserId: createRandomStableUserId() }
+			case 'current_email':
+				return { ok: false, reason: 'current_email' }
+			default:
+				return { ok: false, reason: 'former_email_claimed' }
+		}
+	}
 
 	const currentOwner = await db
 		.prepare(`SELECT id FROM users WHERE email = ?`)
@@ -330,7 +365,7 @@ export class EmailClaimConflictError extends Error {
 	}
 }
 
-async function createUnusedRandomStableUserId(db: D1Database) {
+async function createUnusedRandomStableUserId(db: SqlDatabase) {
 	for (let attempt = 0; attempt < randomStableUserIdAttempts; attempt++) {
 		const stableUserId = createRandomStableUserId()
 		const existing = await db

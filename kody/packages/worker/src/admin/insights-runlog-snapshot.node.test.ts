@@ -1,4 +1,6 @@
 import { expect, test, vi } from 'vitest'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { type RunLogAdminInsightsSnapshot } from '#worker/run-records/admin-insights-snapshot.ts'
 import {
 	adminInsightsRunLogConcurrency,
@@ -49,28 +51,30 @@ function createMemoryKv() {
 	} as unknown as KVNamespace & { store: Map<string, string> }
 }
 
-function createUsersDb(
+async function createUsersDb(
 	users: Array<{ stable_user_id: string; email_verified_at: string | null }>,
 ) {
+	const database = await createTestDb()
+	await database.pg.query(
+		`INSERT INTO users (username, email, password_hash, stable_user_id, email_verified_at)
+		 SELECT u->>'stable_user_id', (u->>'stable_user_id') || '@example.test', 'x',
+			u->>'stable_user_id', u->>'email_verified_at'
+		 FROM jsonb_array_elements($1::jsonb) AS u`,
+		[JSON.stringify(users)],
+	)
+	// Deleting accounts never join the fan-out.
+	await database.pg.query(
+		`INSERT INTO users (username, email, password_hash, stable_user_id, deleting_at)
+		 VALUES ('gone', 'gone@example.test', 'x', 'user-gone', '2026-09-01T00:00:00.000Z')`,
+	)
 	return {
-		prepare(query: string) {
-			const statement = {
-				bind() {
-					return statement
-				},
-				async all<T>() {
-					if (
-						query.includes('stable_user_id') &&
-						query.includes('deleting_at IS NULL')
-					) {
-						return { results: users as Array<T> }
-					}
-					throw new Error(`Unsupported query: ${query}`)
-				},
-			}
-			return statement
-		},
-	} as unknown as D1Database
+		...database,
+		// The scheduled insights lane reads fleet columns through this role.
+		APP_DB: createPgDatabase({
+			connection: database.pg,
+			role: 'kody_analytics',
+		}),
+	}
 }
 
 test('refreshAdminInsightsRunLogSnapshot writes a content-free KV snapshot and bounds concurrency', async () => {
@@ -101,20 +105,12 @@ test('refreshAdminInsightsRunLogSnapshot writes a content-free KV snapshot and b
 	})
 	const kv = createMemoryKv()
 	const now = new Date('2026-09-10T18:00:00.000Z')
+	await using users = await createUsersDb([
+		{ stable_user_id: 'user-a', email_verified_at: '2026-09-01T00:00:00.000Z' },
+		{ stable_user_id: 'user-b', email_verified_at: '2026-09-02T00:00:00.000Z' },
+	])
 	const snapshot = await refreshAdminInsightsRunLogSnapshot({
-		env: {
-			APP_DB: createUsersDb([
-				{
-					stable_user_id: 'user-a',
-					email_verified_at: '2026-09-01T00:00:00.000Z',
-				},
-				{
-					stable_user_id: 'user-b',
-					email_verified_at: '2026-09-02T00:00:00.000Z',
-				},
-			]),
-			BUNDLE_ARTIFACTS_KV: kv,
-		} as Env,
+		env: { APP_DB: users.APP_DB, BUNDLE_ARTIFACTS_KV: kv } as unknown as Env,
 		now,
 	})
 
@@ -152,16 +148,14 @@ test('readAdminInsightsRunLogSnapshot degrades when KV is missing or empty', asy
 })
 
 test('refreshAdminInsightsRunLogSnapshot throws when BUNDLE_ARTIFACTS_KV is missing', async () => {
+	await using users = await createUsersDb([
+		{ stable_user_id: 'user-a', email_verified_at: '2026-09-01T00:00:00.000Z' },
+	])
 	await expect(
 		refreshAdminInsightsRunLogSnapshot({
 			env: {
-				APP_DB: createUsersDb([
-					{
-						stable_user_id: 'user-a',
-						email_verified_at: '2026-09-01T00:00:00.000Z',
-					},
-				]),
-			} as Env,
+				APP_DB: users.APP_DB,
+			} as unknown as Env,
 			now: new Date('2026-09-10T18:00:00.000Z'),
 		}),
 	).rejects.toThrow(/BUNDLE_ARTIFACTS_KV is required/)
@@ -173,17 +167,15 @@ test('refreshAdminInsightsRunLogSnapshot throws when the KV write fails', async 
 	kv.put = async () => {
 		throw new Error('kv write failed')
 	}
+	await using users = await createUsersDb([
+		{ stable_user_id: 'user-a', email_verified_at: '2026-09-01T00:00:00.000Z' },
+	])
 	await expect(
 		refreshAdminInsightsRunLogSnapshot({
 			env: {
-				APP_DB: createUsersDb([
-					{
-						stable_user_id: 'user-a',
-						email_verified_at: '2026-09-01T00:00:00.000Z',
-					},
-				]),
+				APP_DB: users.APP_DB,
 				BUNDLE_ARTIFACTS_KV: kv,
-			} as Env,
+			} as unknown as Env,
 			now: new Date('2026-09-10T18:00:00.000Z'),
 		}),
 	).rejects.toThrow(/kv write failed/)
@@ -193,18 +185,20 @@ test('refreshAdminInsightsRunLogSnapshot caps per-tick fanout and marks the snap
 	runLogMocks.getAdminInsightsSnapshot.mockReset()
 	runLogMocks.getAdminInsightsSnapshot.mockResolvedValue(emptySnapshot())
 	const kv = createMemoryKv()
-	const users = Array.from(
-		{ length: adminInsightsRunLogMaxUsersPerTick + 1 },
-		(_, index) => ({
-			stable_user_id: `user-${String(index + 1).padStart(4, '0')}`,
-			email_verified_at: '2026-09-01T00:00:00.000Z',
-		}),
+	await using users = await createUsersDb(
+		Array.from(
+			{ length: adminInsightsRunLogMaxUsersPerTick + 1 },
+			(_, index) => ({
+				stable_user_id: `user-${String(index + 1).padStart(4, '0')}`,
+				email_verified_at: '2026-09-01T00:00:00.000Z',
+			}),
+		),
 	)
 	const snapshot = await refreshAdminInsightsRunLogSnapshot({
 		env: {
-			APP_DB: createUsersDb(users),
+			APP_DB: users.APP_DB,
 			BUNDLE_ARTIFACTS_KV: kv,
-		} as Env,
+		} as unknown as Env,
 		now: new Date('2026-09-10T18:00:00.000Z'),
 	})
 

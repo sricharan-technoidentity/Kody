@@ -20,8 +20,8 @@ function createAvatarTestEnv(input: {
 	return {
 		APP_DB: input.db,
 		COMMUNITY_ASSETS: input.communityAssets,
-		USER_METER: meter.env.USER_METER,
-	} as Pick<Env, 'APP_DB' | 'COMMUNITY_ASSETS' | 'USER_METER'>
+		USER_METERS: meter.env.USER_METERS,
+	} as Pick<Env, 'APP_DB' | 'COMMUNITY_ASSETS' | 'USER_METERS'>
 }
 
 function createAvatarDeletionRaceDbMock() {

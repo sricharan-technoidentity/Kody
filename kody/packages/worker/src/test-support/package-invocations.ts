@@ -1,9 +1,12 @@
+import { createDynamoInvocationLedger } from '#worker/aws/dynamo-invocation-ledger.ts'
+import { createFakeDynamo } from './aws/fake-dynamo.ts'
 import { expect, vi } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import {
 	createPackageRuntimeInvokeTools,
 	createPackageEventTools,
 } from '#worker/package-invocations/service.ts'
+import { createTestRunRecords } from '#worker/test-support/run-records.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 
 export const packageInvocationsRepoMockModule = (() => {
@@ -55,301 +58,101 @@ export type FakeLedgerRow = {
 	updatedAt: string
 }
 
-/**
- * In-memory stand-in for the RunLog Durable Object's package-invocation
- * ledger RPCs (the real DO semantics are covered by
- * run-records/invocation-ledger.workers.test.ts against the actual binding).
- */
+/** Production invocation ledger over the command-interpreting DynamoDB fake,
+ * plus production run records over DynamoDB and S3 fakes. */
 export function createFakeRunLog(
 	options: { failClaim?: boolean; failFinish?: boolean } = {},
 ) {
-	const ledgerRows: Array<FakeLedgerRow> = []
-	const runRows = new Map<string, Record<string, unknown>>()
-	const jobObservability = new Map<
-		string,
-		{
-			jobId: string
-			lastRunAt: string | null
-			lastRunStatus: 'success' | 'error' | null
-			lastRunError: string | null
-			lastDurationMs: number | null
-			runCount: number
-			successCount: number
-			errorCount: number
-			updatedAt: string
-		}
-	>()
-	const packageRunSuccesses = new Map<
-		string,
-		{ packageId: string; successCount: number; updatedAt: string }
-	>()
-	const activationMilestones = new Map<
-		string,
-		{ milestone: string; reachedAt: string; packageId: string | null }
-	>()
-	const runLogs = new Map<string, Array<string>>()
-	const clone = <T>(value: T): T => structuredClone(value)
-	const logMessage = (entry: unknown) => {
-		if (typeof entry === 'string') return entry
-		if (entry && typeof entry === 'object' && 'message' in entry) {
-			return String((entry as { message: unknown }).message)
-		}
-		return String(entry)
-	}
-	const findByKey = (key: {
-		tokenId: string
-		packageId: string
-		exportName: string
-		idempotencyKey: string
-	}) =>
-		ledgerRows.find(
-			(row) =>
-				row.tokenId === key.tokenId &&
-				row.packageId === key.packageId &&
-				row.exportName === key.exportName &&
-				row.idempotencyKey === key.idempotencyKey,
-		) ?? null
-	const rpc = {
-		async claimPackageInvocation(input: {
-			invocation: Omit<
-				FakeLedgerRow,
-				'status' | 'responseJson' | 'createdAt' | 'updatedAt'
-			>
-			staleBefore: string
-			run: Record<string, unknown> | null
-			initialLogs?: Array<unknown>
-		}) {
-			if (options.failClaim) throw new Error('RunLog unavailable')
-			const now = new Date().toISOString()
-			const existing = findByKey(input.invocation)
-			if (existing) {
-				const reclaimable =
-					existing.status === 'in_progress' &&
-					existing.requestHash === input.invocation.requestHash &&
-					existing.updatedAt <= input.staleBefore
-				if (!reclaimable) {
-					return { outcome: 'existing' as const, record: clone(existing) }
-				}
-				existing.updatedAt = now
-				if (input.run) {
-					const runId = String(input.run['id'])
-					runRows.set(runId, clone({ ...input.run, invocationId: existing.id }))
-					runLogs.set(runId, (input.initialLogs ?? []).map(logMessage))
-				}
-				return {
-					outcome: 'claimed' as const,
-					invocationId: existing.id,
-					claimUpdatedAt: now,
-					reclaimed: true,
-				}
-			}
-			ledgerRows.push({
-				...clone(input.invocation),
-				status: 'in_progress',
-				responseJson: null,
-				createdAt: now,
-				updatedAt: now,
-			})
-			if (input.run) {
-				const runId = String(input.run['id'])
-				runRows.set(
-					runId,
-					clone({ ...input.run, invocationId: input.invocation.id }),
-				)
-				runLogs.set(runId, (input.initialLogs ?? []).map(logMessage))
-			}
-			return {
-				outcome: 'claimed' as const,
-				invocationId: input.invocation.id,
-				claimUpdatedAt: now,
-				reclaimed: false,
-			}
-		},
-		async getPackageInvocation(key: {
-			tokenId: string
-			packageId: string
-			exportName: string
-			idempotencyKey: string
-		}) {
-			const row = findByKey(key)
-			return row ? clone(row) : null
-		},
-		async finishPackageInvocation(input: {
-			invocationId: string
-			claimUpdatedAt: string
-			status: 'completed' | 'failed'
-			responseJson: string | null
-			run: Record<string, unknown> | null
-			logs: Array<unknown>
-		}) {
-			if (options.failFinish) throw new Error('RunLog finish unavailable')
-			const row =
-				ledgerRows.find((candidate) => candidate.id === input.invocationId) ??
-				null
-			let ledgerUpdated = false
+	const dynamo = createFakeDynamo()
+	const tableName = 'kody-test-idempotency'
+	const ledger = createDynamoInvocationLedger({
+		region: 'us-east-1',
+		tableName,
+		send: async (command) => {
+			if (options.failClaim && command.constructor.name === 'PutItemCommand')
+				throw new Error('RunLog unavailable')
 			if (
-				row &&
-				row.status === 'in_progress' &&
-				row.updatedAt === input.claimUpdatedAt
-			) {
-				row.status = input.status
-				row.responseJson = input.responseJson
-				row.updatedAt = new Date().toISOString()
-				ledgerUpdated = true
-			}
-			if (input.run) {
-				const runId = String(input.run['id'])
-				runLogs.set(runId, input.logs.map(logMessage))
-				const previous = runRows.get(runId)
-				const previousStatus =
-					previous && typeof previous['status'] === 'string'
-						? String(previous['status'])
-						: null
-				runRows.set(String(input.run['id']), clone(input.run))
-				// Mirror RunLog terminal side effects used by finish seeding:
-				// activation increments and job observability for genuine new
-				// terminal writes (replay of an already-terminal row is a no-op).
-				const runStatus = String(input.run['status'] ?? '')
-				const alreadyTerminal =
-					previousStatus === 'success' || previousStatus === 'error'
-				if (!alreadyTerminal && runStatus === 'success') {
-					const packageId =
-						typeof input.run['packageId'] === 'string'
-							? input.run['packageId'].trim()
-							: ''
-					const surface =
-						typeof input.run['surface'] === 'string'
-							? input.run['surface']
-							: null
-					// Match RunLog: once global package_activated exists, counters
-					// stop changing for every package.
-					if (
-						packageId &&
-						surface !== 'webhook' &&
-						surface !== 'app_fetch' &&
-						!activationMilestones.has('package_activated')
-					) {
-						const reachedAt =
-							typeof input.run['finishedAt'] === 'string'
-								? input.run['finishedAt']
-								: new Date().toISOString()
-						const existing = packageRunSuccesses.get(packageId)
-						const successCount = (existing?.successCount ?? 0) + 1
-						packageRunSuccesses.set(packageId, {
-							packageId,
-							successCount,
-							updatedAt: reachedAt,
-						})
-						if (!activationMilestones.has('package_run_succeeded')) {
-							activationMilestones.set('package_run_succeeded', {
-								milestone: 'package_run_succeeded',
-								reachedAt,
-								packageId,
-							})
-						}
-						if (successCount >= 2) {
-							activationMilestones.set('package_activated', {
-								milestone: 'package_activated',
-								reachedAt,
-								packageId,
-							})
-						}
-					}
-				}
-				if (
-					!alreadyTerminal &&
-					(runStatus === 'success' || runStatus === 'error')
-				) {
-					const jobId =
-						typeof input.run['jobId'] === 'string'
-							? input.run['jobId'].trim()
-							: ''
-					if (jobId) {
-						const existing = jobObservability.get(jobId)
-						const ranAt =
-							typeof input.run['finishedAt'] === 'string'
-								? input.run['finishedAt']
-								: new Date().toISOString()
-						const durationMs =
-							typeof input.run['durationMs'] === 'number'
-								? input.run['durationMs']
-								: null
-						const error =
-							runStatus === 'error' &&
-							typeof input.run['errorMessage'] === 'string'
-								? input.run['errorMessage']
-								: null
-						jobObservability.set(jobId, {
-							jobId,
-							lastRunAt: ranAt,
-							lastRunStatus: runStatus,
-							lastRunError: error,
-							lastDurationMs: durationMs,
-							runCount: (existing?.runCount ?? 0) + 1,
-							successCount:
-								(existing?.successCount ?? 0) +
-								(runStatus === 'success' ? 1 : 0),
-							errorCount:
-								(existing?.errorCount ?? 0) + (runStatus === 'error' ? 1 : 0),
-							updatedAt: ranAt,
-						})
-					}
-				}
-			}
-			return {
-				ledgerUpdated,
-				record: ledgerUpdated ? null : row ? clone(row) : null,
-			}
-		},
-		async releasePackageInvocation(input: {
-			invocationId: string
-			claimUpdatedAt: string
-			runId: string | null
-		}) {
-			const index = ledgerRows.findIndex(
-				(candidate) => candidate.id === input.invocationId,
+				options.failFinish &&
+				command.constructor.name === 'PutItemCommand' &&
+				'Item' in command.input &&
+				command.input.Item?.status?.S !== 'in_progress'
 			)
-			const row = index >= 0 ? ledgerRows[index] : null
-			let released = false
-			if (
-				row &&
-				row.status === 'in_progress' &&
-				row.updatedAt === input.claimUpdatedAt
-			) {
-				ledgerRows.splice(index, 1)
-				released = true
-			}
-			if (input.runId) {
-				const run = runRows.get(input.runId)
-				if (run && run['status'] === 'running') {
-					runRows.delete(input.runId)
-				}
-			}
-			return {
-				released,
-				record: released || !row ? null : clone(row),
-			}
+				throw new Error('RunLog finish unavailable')
+			return await dynamo.send(command)
 		},
-		async getJobRunObservability(input: { jobId: string }) {
-			const row = jobObservability.get(input.jobId)
-			return row ? clone(row) : null
-		},
+	})
+	const ledgerRows = () =>
+		dynamo
+			.items(tableName)
+			.map((item) => JSON.parse(item.record!.S!) as FakeLedgerRow)
+	const save = (row: FakeLedgerRow) => {
+		const previous = dynamo
+			.items(tableName)
+			.find((item) => JSON.parse(item.record!.S!).id === row.id)
+		dynamo.putItem(tableName, {
+			pk: previous?.pk ?? { S: 'user-123' },
+			sk: previous?.sk ?? {
+				S: `invocation#${JSON.stringify([row.tokenId, row.packageId, row.exportName, row.idempotencyKey])}`,
+			},
+			record: { S: JSON.stringify(row) },
+			id: { S: row.id },
+			status: { S: row.status },
+			updatedAt: { S: row.updatedAt },
+			...(row.status === 'in_progress'
+				? {}
+				: {
+						expiresAt: {
+							N: String(Math.floor(Date.now() / 1000) + 90 * 86400),
+						},
+					}),
+		})
 	}
+	const runRecords = createTestRunRecords()
+
 	return {
-		namespace: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => rpc,
+		state: { forUser: ledger.forUser },
+		get ledgerRows() {
+			return ledgerRows()
 		},
-		ledgerRows,
-		runRows,
-		runLogs,
+		runRecords,
+		/** Run items by id, attribute values unwrapped. */
+		get runRows() {
+			return new Map(
+				runRecords.dynamo
+					.items(runRecords.tableName)
+					.filter((item) => item.sk?.S?.startsWith('run#'))
+					.map((item) => [
+						item.id!.S!,
+						Object.fromEntries(
+							Object.entries(item).map(([name, value]) => [
+								name,
+								value.S ?? (value.N === undefined ? null : Number(value.N)),
+							]),
+						) as Record<string, unknown>,
+					]),
+			)
+		},
+		/** Log messages by run id. */
+		get runLogs() {
+			return new Map(
+				[...runRecords.logs.objects].map(([key, object]) => [
+					key.slice(key.lastIndexOf('/') + 1, -'.json'.length),
+					(
+						JSON.parse(new TextDecoder().decode(object.bytes)) as Array<{
+							message: string
+						}>
+					).map((line) => line.message),
+				]),
+			)
+		},
 		corruptStoredResponses() {
-			for (const row of ledgerRows) {
+			for (const row of ledgerRows()) {
 				row.responseJson = '{"status":200,"body":null}'
+				save(row)
 			}
 		},
 		seedStaleInvocation(idempotencyKey: string) {
-			const completed = ledgerRows[0]
+			const completed = ledgerRows()[0]
 			if (!completed) throw new Error('Expected completed invocation seed.')
 			const row: FakeLedgerRow = {
 				...structuredClone(completed),
@@ -360,14 +163,14 @@ export function createFakeRunLog(
 				createdAt: '2026-01-01T00:00:00.000Z',
 				updatedAt: '2026-01-01T00:00:00.000Z',
 			}
-			ledgerRows.push(row)
+			save(row)
 			return structuredClone(row)
 		},
 		seedFreshInvocation(idempotencyKey: string) {
-			const completed = ledgerRows[0]
+			const completed = ledgerRows()[0]
 			if (!completed) throw new Error('Expected completed invocation seed.')
 			const now = new Date().toISOString()
-			ledgerRows.push({
+			save({
 				...structuredClone(completed),
 				id: crypto.randomUUID(),
 				idempotencyKey,
@@ -378,21 +181,22 @@ export function createFakeRunLog(
 			})
 		},
 		completeInvocation(idempotencyKey: string) {
-			const row = ledgerRows.find(
+			const row = ledgerRows().find(
 				(candidate) => candidate.idempotencyKey === idempotencyKey,
 			)
-			const completed = ledgerRows[0]
+			const completed = ledgerRows()[0]
 			if (!row || !completed) throw new Error('Expected invocation rows.')
 			row.status = 'completed'
 			row.responseJson = completed.responseJson
 			row.updatedAt = new Date().toISOString()
+			save(row)
 		},
 	}
 }
 
 /**
  * Fake D1 that rejects EVERY `package_invocations` statement (the table is
- * dropped; the ledger lives in the RunLog DO) and every write. Keyed tests
+ * dropped; the ledger lives in DynamoDB) and every write. Keyed tests
  * passing against this is the proof that no D1 ledger read or write remains
  * anywhere on the invoke path.
  */
@@ -437,16 +241,17 @@ export function createEnv(
 	overrides: Record<string, unknown> = {},
 ) {
 	const meter =
-		overrides['USER_METER'] == null ? createInMemoryUserMeterEnv() : null
+		overrides['USER_METERS'] == null ? createInMemoryUserMeterEnv() : null
 	return {
 		APP_DB: db,
-		RUN_LOG: db.runLog.namespace,
+		RUN_STATE: db.runLog.state,
+		RUN_RECORDS: db.runLog.runRecords.records,
 		BUNDLE_ARTIFACTS_KV: {
 			get: async () => null,
 			put: async () => undefined,
 			delete: async () => undefined,
 		},
-		...(meter ? { USER_METER: meter.env.USER_METER } : {}),
+		...(meter ? { USER_METERS: meter.env.USER_METERS } : {}),
 		...overrides,
 	} as unknown as Env
 }
@@ -461,7 +266,7 @@ export function createEnvWithUserMeter(
 	const meter = createInMemoryUserMeterEnv()
 	return {
 		env: createEnv(db, {
-			USER_METER: meter.env.USER_METER,
+			USER_METERS: meter.env.USER_METERS,
 			...overrides,
 		}),
 		meter,

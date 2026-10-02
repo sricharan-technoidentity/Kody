@@ -1,4 +1,5 @@
 import { dnsSafeUsernamePattern } from '@kody-internal/shared/public-urls.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	builtInReservedUsernameList,
 	computeEffectiveReservedUsernames,
@@ -292,7 +293,7 @@ export async function removeReservedUsernames(input: {
 const conflictQueryPageSize = 200
 
 export async function findReservedUsernameConflicts(
-	db: D1Database,
+	db: SqlDatabase,
 	effectiveUsernames: ReadonlySet<string>,
 	added?: Iterable<string>,
 ) {

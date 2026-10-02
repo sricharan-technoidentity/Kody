@@ -1,3 +1,5 @@
+import { type KodyTemporal } from '#worker/temporal/client.ts'
+import { startQueueMessage } from '#worker/temporal/start.ts'
 import { type CommunityActivityKind } from './types.ts'
 
 export type CommunityActivityDispatchQueueMessage = {
@@ -7,13 +9,18 @@ export type CommunityActivityDispatchQueueMessage = {
 }
 
 export async function enqueueCommunityActivityDispatch(input: {
-	queue: Pick<Queue<CommunityActivityDispatchQueueMessage>, 'send'>
+	env: { TEMPORAL?: KodyTemporal }
 	kind: CommunityActivityKind
 	activityId: string
 }) {
-	await input.queue.send({
+	const body: CommunityActivityDispatchQueueMessage = {
 		eventId: crypto.randomUUID(),
 		kind: input.kind,
 		activityId: input.activityId,
+	}
+	await startQueueMessage(input.env, {
+		queue: 'community-activity-dispatch',
+		key: body.eventId,
+		body,
 	})
 }

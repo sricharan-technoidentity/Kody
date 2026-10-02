@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test, vi } from 'vitest'
 import { type CommunityListingWithAggregates } from '#worker/community/types.ts'
 import {
@@ -29,7 +30,8 @@ import {
 } from '#worker/blog/catalog.ts'
 import { resetDataCacheForTests } from '#app/data-cache.ts'
 import { firstPartySecurityHeaders } from '#app/security-headers.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { BLOG_PLACEHOLDER_CALLOUT } from '#universal/blog-display.ts'
 import { getScrollRestorationInlineScript } from '#universal/router-scroll-restoration.ts'
@@ -136,82 +138,31 @@ type TestUser = {
 	updated_at: string
 }
 
-function createUserTestDb(users: Array<TestUser>) {
-	const userRecords = new Map(users.map((user) => [user.id, { ...user }]))
-
-	function createStatement(query: string, params: Array<unknown> = []) {
-		const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-		const executeAll = async () => {
-			if (
-				normalizedQuery.startsWith('select') &&
-				normalizedQuery.includes('from "users"') &&
-				/"stable_user_id"\s*=/.test(normalizedQuery)
-			) {
-				const user = [...userRecords.values()].find(
-					(row) => row.stable_user_id === params[0],
-				)
-				return {
-					results: user ? [{ ...user }] : [],
-					meta: { changes: 0, last_row_id: 0 },
-				}
-			}
-			if (normalizedQuery.includes('from user_roles')) {
-				return {
-					results: [],
-					meta: { changes: 0, last_row_id: 0 },
-				}
-			}
-			// Feature-flag evaluation during SSR session load; empty state uses
-			// registry defaults without throwing.
-			if (
-				normalizedQuery.includes('from feature_flags') ||
-				normalizedQuery.includes('from feature_flag_user_overrides')
-			) {
-				return {
-					results: [],
-					meta: { changes: 0, last_row_id: 0 },
-				}
-			}
-			return {
-				results: [],
-				meta: { changes: 0, last_row_id: 0 },
-			}
-		}
-		return {
-			query,
-			bind(...nextParams: Array<unknown>) {
-				return createStatement(query, nextParams)
-			},
-			async all() {
-				return executeAll()
-			},
-			async first() {
-				const result = await executeAll()
-				return result.results[0] ?? null
-			},
-			async run() {
-				return { meta: { changes: 0, last_row_id: 0 } }
-			},
-		}
+/** PGlite with the given accounts; `db` is the first account's scoped writer. */
+async function createUserTestDb(users: Array<TestUser>) {
+	const store = await createTestDb({ userId: users[0]?.stable_user_id })
+	for (const user of users) {
+		await store.pg.query(
+			`INSERT INTO users (id, email, username, password_hash, stable_user_id, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			[
+				user.id,
+				user.email,
+				user.username,
+				user.password_hash,
+				user.stable_user_id,
+				user.created_at,
+				user.updated_at,
+			],
+		)
 	}
-
-	return {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
+	return store
 }
 
-function createTestEnv(db: D1Database) {
+function createTestEnv(db: PgDatabase) {
 	return {
 		COOKIE_SECRET: testCookieSecret,
-		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		SECRET_KMS: testSecretKms,
 		...testOidcSigningEnv,
 		APP_DB: db,
 		BUNDLE_ARTIFACTS_KV: createMemoryKv(),
@@ -312,19 +263,18 @@ test('resolveOriginClientEntry maps Remix entry IDs onto the Vite client href', 
 test('SSR HTML routes render page content and embedded loader data', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(
-		createUserTestDb([
-			{
-				id: 1,
-				email: 'user@example.com',
-				username: 'account-user',
-				password_hash: 'unused',
-				stable_user_id: testStableUserIdFromEmail('user@example.com'),
-				created_at: new Date(0).toISOString(),
-				updated_at: new Date(0).toISOString(),
-			},
-		]),
-	)
+	await using store = await createUserTestDb([
+		{
+			id: 1,
+			email: 'user@example.com',
+			username: 'account-user',
+			password_hash: 'unused',
+			stable_user_id: testStableUserIdFromEmail('user@example.com'),
+			created_at: new Date(0).toISOString(),
+			updated_at: new Date(0).toISOString(),
+		},
+	])
+	const env = createTestEnv(store.db)
 
 	communityMockModule.listCommunityIndexOverview.mockReset()
 	communityMockModule.listCommunityIndexOverview.mockResolvedValue({
@@ -722,7 +672,8 @@ test('SSR HTML routes render page content and embedded loader data', async () =>
 test('renderAppPage embeds the Fathom tracker only when FATHOM_SITE_ID is set', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	const withoutFathom = await renderAppPage({
 		request: new Request('https://example.com/login'),
@@ -769,7 +720,8 @@ test('renderAppPage embeds the Fathom tracker only when FATHOM_SITE_ID is set', 
 test('renderAppPage emits a pre-hydration scroll restoration script in the document body', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 	const restoreScript = getScrollRestorationInlineScript()
 
 	const response = await renderAppPage({
@@ -793,7 +745,8 @@ test('renderAppPage emits a doctype, meta description, and inlines the styleshee
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
 	resetInlineStylesheetCache()
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	// Without an ASSETS binding: doctype plus the stylesheet <link> fallback.
 	const withoutAssets = await renderAppPage({
@@ -877,7 +830,8 @@ test('renderAppPage emits a doctype, meta description, and inlines the styleshee
 test('renderAppPage caches anonymous marketing HTML and keeps session pages private', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	const anonymousHome = await renderAppPage({
 		request: new Request('https://example.com/'),
@@ -939,7 +893,8 @@ test('renderAppPage caches anonymous marketing HTML and keeps session pages priv
 test('renderAppPage embeds the homepage factory-loop conversation teaser', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 	const response = await renderAppPage({
 		request: new Request('https://example.com/'),
 		env,
@@ -963,7 +918,8 @@ test('renderAppPage embeds the homepage factory-loop conversation teaser', async
 test('signup social buttons are icon-only with accessible names', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 	const response = await renderAppPage({
 		request: new Request('https://example.com/signup'),
 		env,
@@ -991,19 +947,18 @@ test('signup social buttons are icon-only with accessible names', async () => {
 test('renderAppPage configures session secret and server-renders oauth authorize', async () => {
 	resetDataCacheForTests()
 	resetAuthSessionSecretForTests()
-	const env = createTestEnv(
-		createUserTestDb([
-			{
-				id: 1,
-				email: 'user@example.com',
-				username: 'account-user',
-				password_hash: 'unused',
-				stable_user_id: testStableUserIdFromEmail('user@example.com'),
-				created_at: new Date(0).toISOString(),
-				updated_at: new Date(0).toISOString(),
-			},
-		]),
-	)
+	await using store = await createUserTestDb([
+		{
+			id: 1,
+			email: 'user@example.com',
+			username: 'account-user',
+			password_hash: 'unused',
+			stable_user_id: testStableUserIdFromEmail('user@example.com'),
+			created_at: new Date(0).toISOString(),
+			updated_at: new Date(0).toISOString(),
+		},
+	])
+	const env = createTestEnv(store.db)
 
 	const anonymousAuthorizeUrl =
 		'https://example.com/oauth/authorize?response_type=code&client_id=client-1&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&scope=profile'
@@ -1082,7 +1037,8 @@ test('renderAppPage configures session secret and server-renders oauth authorize
 test('renderAppPage server-renders connect-oauth provider visits without a loading flash', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	// A stored user-lane confidential google connection whose client secret
 	// already exists: the page must SSR straight into "ready to connect"
@@ -1344,19 +1300,18 @@ test('renderAppPage server-renders connect-oauth provider visits without a loadi
 test('renderAppPage server-renders simplified integration and secret-approval pages', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(
-		createUserTestDb([
-			{
-				id: 1,
-				email: 'user@example.com',
-				username: 'account-user',
-				password_hash: 'unused',
-				stable_user_id: testStableUserIdFromEmail('user@example.com'),
-				created_at: new Date(0).toISOString(),
-				updated_at: new Date(0).toISOString(),
-			},
-		]),
-	)
+	await using store = await createUserTestDb([
+		{
+			id: 1,
+			email: 'user@example.com',
+			username: 'account-user',
+			password_hash: 'unused',
+			stable_user_id: testStableUserIdFromEmail('user@example.com'),
+			created_at: new Date(0).toISOString(),
+			updated_at: new Date(0).toISOString(),
+		},
+	])
+	const env = createTestEnv(store.db)
 	const cookie = await createAuthCookie(
 		{
 			stableUserId: testStableUserIdFromEmail('user@example.com'),
@@ -1671,7 +1626,8 @@ test('renderAppPage server-renders simplified integration and secret-approval pa
 test('renderAppPage renders the redesigned blog index', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	const posts = listBlogPosts().map(toBlogPostSummary)
 	const response = await renderAppPage({
@@ -1691,7 +1647,8 @@ test('renderAppPage renders the redesigned blog index', async () => {
 test('canonical package URL SSR renders the redesigned article', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	const detailListing = {
 		...sampleListing,
@@ -1748,7 +1705,8 @@ test('canonical package URL SSR renders the redesigned article', async () => {
 test('listing-uuid URLs redirect to the canonical pair when possible and keep serving otherwise', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	communityMockModule.getCommunityListingWithAggregates.mockResolvedValue({
 		...sampleListing,
@@ -1800,19 +1758,18 @@ test('unlisted package rename redirects stay owner-only and uncached', async () 
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
 	const ownerUserId = testStableUserIdFromEmail('owner@example.com')
-	const env = createTestEnv(
-		createUserTestDb([
-			{
-				id: 1,
-				email: 'owner@example.com',
-				username: 'owner',
-				password_hash: 'unused',
-				stable_user_id: ownerUserId,
-				created_at: new Date(0).toISOString(),
-				updated_at: new Date(0).toISOString(),
-			},
-		]),
-	)
+	await using store = await createUserTestDb([
+		{
+			id: 1,
+			email: 'owner@example.com',
+			username: 'owner',
+			password_hash: 'unused',
+			stable_user_id: ownerUserId,
+			created_at: new Date(0).toISOString(),
+			updated_at: new Date(0).toISOString(),
+		},
+	])
+	const env = createTestEnv(store.db)
 	communityMockModule.resolvePackagePageUrl.mockResolvedValue({
 		kind: 'redirect',
 		username: 'owner',
@@ -1854,7 +1811,8 @@ test('unlisted package rename redirects stay owner-only and uncached', async () 
 test('listed package rename does not 301 anonymous visitors to the unpublished id', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 	const detailListing = {
 		...sampleListing,
 		id: 'listing-detail-1',
@@ -1913,7 +1871,8 @@ test('listed package rename does not 301 anonymous visitors to the unpublished i
 test('renderAppPage renders the redesigned blog post', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	// A real catalog post whose own title and read-next title carry no
 	// apostrophes (JSX escaping would rewrite them in the HTML output).
@@ -1958,7 +1917,8 @@ test('renderAppPage renders the redesigned blog post', async () => {
 test('renderAppPage shows reviewed blog artwork and hides the placeholder callout', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
-	const env = createTestEnv(createUserTestDb([]))
+	await using store = await createUserTestDb([])
+	const env = createTestEnv(store.db)
 
 	const post = listBlogPosts().find(
 		(candidate) => candidate.slug === 'kody-vs-executor',

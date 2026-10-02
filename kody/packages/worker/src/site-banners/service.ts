@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	isSiteBannerAudience,
 	isSiteBannerIcon,
@@ -9,6 +10,8 @@ import {
 	type SiteBannerRecord,
 } from '#universal/site-banners.ts'
 import { parsePlanName, type PlanName } from '#universal/plans.ts'
+
+type BannerDatabase = Pick<SqlDatabase, 'prepare'>
 
 type SiteBannerRow = {
 	id: string
@@ -44,7 +47,7 @@ const listColumns = `id, enabled, priority, title, body, cta_href, cta_label,
 	dismissible, starts_at, ends_at, created_by, updated_by, created_at, updated_at`
 
 export async function listSiteBannersForAdmin(
-	db: D1Database,
+	db: BannerDatabase,
 ): Promise<Array<SiteBannerRecord>> {
 	const result = await db
 		.prepare(
@@ -57,7 +60,7 @@ export async function listSiteBannersForAdmin(
 }
 
 export async function listEnabledSiteBanners(
-	db: D1Database,
+	db: BannerDatabase,
 ): Promise<Array<SiteBannerRecord>> {
 	const result = await db
 		.prepare(
@@ -71,7 +74,7 @@ export async function listEnabledSiteBanners(
 }
 
 export async function getSiteBanner(
-	db: D1Database,
+	db: BannerDatabase,
 	id: string,
 ): Promise<SiteBannerRecord | null> {
 	if (!isSiteBannerId(id)) return null
@@ -83,7 +86,7 @@ export async function getSiteBanner(
 }
 
 export async function saveSiteBanner(
-	db: D1Database,
+	db: BannerDatabase,
 	input: {
 		banner: SiteBannerInput
 		actorUserId: number
@@ -163,7 +166,7 @@ export async function saveSiteBanner(
 }
 
 export async function deleteSiteBanner(
-	db: D1Database,
+	db: BannerDatabase,
 	id: string,
 ): Promise<boolean> {
 	if (!isSiteBannerId(id)) return false
@@ -175,7 +178,7 @@ export async function deleteSiteBanner(
 }
 
 export async function listDismissedBannerIds(
-	db: D1Database,
+	db: BannerDatabase,
 	userId: number,
 ): Promise<Array<string>> {
 	const result = await db
@@ -186,14 +189,14 @@ export async function listDismissedBannerIds(
 }
 
 export async function dismissSiteBannerForUser(
-	db: D1Database,
+	db: BannerDatabase,
 	input: { bannerId: string; userId: number },
 ): Promise<void> {
 	if (!isSiteBannerId(input.bannerId)) return
 	await db
 		.prepare(
-			`INSERT OR IGNORE INTO site_banner_dismissals (banner_id, user_id)
-			 VALUES (?, ?)`,
+			`INSERT INTO site_banner_dismissals (banner_id, user_id)
+			 VALUES (?, ?) ON CONFLICT (banner_id, user_id) DO NOTHING`,
 		)
 		.bind(input.bannerId, input.userId)
 		.run()

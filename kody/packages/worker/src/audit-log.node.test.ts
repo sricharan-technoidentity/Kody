@@ -1,25 +1,15 @@
-import { readFileSync } from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { logAuditEvent } from './audit-log.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { logAuditEvent, queryAuditLog } from './audit-log.ts'
+import { createTestAuditDb } from '#worker/test-support/aws/test-audit-db.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 
 vi.unmock('#worker/audit-log.ts')
 
-function createAuditDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(
-		readFileSync(
-			new URL('../audit-migrations/0001-audit-events.sql', import.meta.url),
-			'utf8',
-		),
-	)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
 test('persisted audit events write only the dedicated sink while optional persistence stays optional', async () => {
-	const audit = createAuditDb()
+	await using audit = await createTestAuditDb()
+	await using app = await createTestDb()
 
 	await logAuditEvent({
 		db: audit.db,
@@ -40,7 +30,7 @@ test('persisted audit events write only the dedicated sink while optional persis
 
 	const query = `SELECT category, action, result, email_hash, ip_hash, path, reason
 		FROM audit_events`
-	const auditRows = audit.sqlite.prepare(query).all()
+	const auditRows = (await audit.reader.prepare(query).all()).results
 	expect(auditRows).toEqual([
 		{
 			category: 'auth',
@@ -54,6 +44,49 @@ test('persisted audit events write only the dedicated sink while optional persis
 			reason: 'invalid_password',
 		},
 	])
+	const queried = await queryAuditLog(audit.reader, {
+		user: ' PERSON@example.com ',
+		category: 'auth',
+		limit: 1,
+	})
+	expect(queried).toMatchObject({
+		total: 1,
+		limit: 1,
+		page: 1,
+		events: [{ action: 'authenticate' }],
+	})
+	expect((await queryAuditLog(audit.reader, { action: 'other' })).total).toBe(0)
+	expect(
+		(await queryAuditLog(audit.reader, { page: 2, limit: 1 })).events,
+	).toEqual([])
+	await expect(
+		audit.db.prepare('SELECT * FROM audit_events').all(),
+	).rejects.toThrow('permission denied')
+	for (const sql of [
+		"UPDATE audit_events SET reason = 'erased'",
+		'DELETE FROM audit_events',
+		'TRUNCATE audit_events',
+	]) {
+		await expect(
+			audit.pg.transaction(async (tx) => {
+				await tx.query('SET LOCAL ROLE kody_audit_writer')
+				await tx.query(sql)
+			}),
+		).rejects.toThrow('permission denied')
+	}
+	await expect(
+		audit.reader
+			.prepare(
+				"INSERT INTO audit_events (category, action, result, timestamp) VALUES ('auth', 'bad', 'success', 'now')",
+			)
+			.run(),
+	).rejects.toThrow('read-only transaction')
+	await expect(
+		app.db.prepare('SELECT * FROM audit_events').all(),
+	).rejects.toThrow('does not exist')
+	await expect(
+		audit.reader.prepare('SELECT * FROM users').all(),
+	).rejects.toThrow('does not exist')
 })
 
 function createAuditDbWithRun(run: () => Promise<unknown>) {
@@ -65,14 +98,14 @@ function createAuditDbWithRun(run: () => Promise<unknown>) {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as PgDatabase
 }
 
-test('audit writes retry transient errors and report dedicated sink failures', async () => {
+test('audit writes report sink failures without retrying an ambiguous append', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const transientRun = vi
 		.fn()
-		.mockRejectedValueOnce(new Error('D1_ERROR: Network connection lost'))
+		.mockRejectedValueOnce(new Error('Connection terminated unexpectedly'))
 		.mockResolvedValueOnce({ meta: { changes: 1 } })
 	const retryResult = await logAuditEvent({
 		db: createAuditDbWithRun(transientRun),
@@ -80,8 +113,8 @@ test('audit writes retry transient errors and report dedicated sink failures', a
 		action: 'transient_retry',
 		result: 'success',
 	})
-	expect(retryResult).toEqual({ persisted: true, failedSinks: [] })
-	expect(transientRun).toHaveBeenCalledTimes(2)
+	expect(retryResult).toEqual({ persisted: false, failedSinks: ['AUDIT_DB'] })
+	expect(transientRun).toHaveBeenCalledTimes(1)
 
 	const failedAuditResult = await logAuditEvent({
 		db: createAuditDbWithRun(() =>
@@ -106,7 +139,7 @@ test('audit writes retry transient errors and report dedicated sink failures', a
 		persisted: false,
 		failedSinks: ['AUDIT_DB'],
 	})
-	expect(consoleWarn).toHaveBeenCalledTimes(2)
+	expect(consoleWarn).toHaveBeenCalledTimes(3)
 	expect(consoleWarn).toHaveBeenCalledWith('audit-event-write-failed', {
 		failedSinks: ['AUDIT_DB'],
 		errors: [expect.any(Error)],

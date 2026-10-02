@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
 import { consoleError } from '#worker/test-support/console-spies.ts'
 import {
-	handleWebhookDispatchQueue,
+	handleWebhookDispatchMessage,
 	processWebhookDispatch,
 } from './dispatch-queue.ts'
 import {
@@ -86,26 +86,6 @@ function queuedDispatchMessage(
 	return hydrateParsedDispatchMessage(parsed)
 }
 
-function createQueueMessage(id: string, body: unknown) {
-	return {
-		id,
-		timestamp: new Date('2026-08-08T12:00:00.000Z'),
-		body,
-		attempts: 1,
-		ack: vi.fn<() => void>(),
-		retry: vi.fn<(options?: { delaySeconds?: number }) => void>(),
-	}
-}
-
-function createBatch(messages: Array<ReturnType<typeof createQueueMessage>>) {
-	return {
-		queue: 'kody-webhook-dispatch',
-		messages,
-		ackAll: vi.fn<() => void>(),
-		retryAll: vi.fn<() => void>(),
-	} as unknown as MessageBatch<unknown>
-}
-
 test('ack webhook work outlives the old waitUntil window and persists a terminal result', async () => {
 	vi.useFakeTimers()
 	mocks.dispatchWebhookInvocation.mockReset()
@@ -141,7 +121,7 @@ test('ack webhook work outlives the old waitUntil window and persists a terminal
 	vi.useRealTimers()
 })
 
-test('queue retries incomplete terminal persistence and acks terminal outcomes', async () => {
+test('delivery retries incomplete terminal persistence and acks terminal outcomes', async () => {
 	consoleError.mockImplementation(() => {})
 	mocks.dispatchWebhookInvocation.mockReset()
 	mocks.recordWebhookDelivery.mockReset()
@@ -165,26 +145,15 @@ test('queue retries incomplete terminal persistence and acks terminal outcomes',
 	mocks.recordWebhookDelivery
 		.mockResolvedValueOnce(undefined)
 		.mockRejectedValueOnce(new Error('RunLog unavailable'))
-	const retry = createQueueMessage('retry', createMessage())
-	const terminal = createQueueMessage('terminal', createMessage())
-	const persistenceFailure = createQueueMessage(
-		'persistence-failure',
-		createMessage(),
-	)
-	const invalid = createQueueMessage('invalid', { endpoint: null })
+	const outcomes = []
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		outcomes.push(
+			await handleWebhookDispatchMessage(createMessage(), {} as Env),
+		)
+	}
 
-	await handleWebhookDispatchQueue(
-		createBatch([retry, terminal, persistenceFailure, invalid]),
-		{} as Env,
-	)
-
-	expect(retry.retry).toHaveBeenCalledWith({ delaySeconds: 30 })
-	expect(retry.ack).not.toHaveBeenCalled()
-	expect(terminal.ack).toHaveBeenCalledTimes(1)
-	expect(terminal.retry).not.toHaveBeenCalled()
-	expect(persistenceFailure.ack).not.toHaveBeenCalled()
-	expect(persistenceFailure.retry).toHaveBeenCalledWith({ delaySeconds: 30 })
-	expect(invalid.ack).toHaveBeenCalledTimes(1)
+	// Retryable invocation code, terminal success, failed persistence.
+	expect(outcomes).toEqual(['retry', 'ack', 'retry'])
 	expect(mocks.recordWebhookDelivery).toHaveBeenCalledTimes(2)
 })
 
@@ -385,7 +354,7 @@ test('queue dispatch forwards delivery-id params-hash ignore', async () => {
 	)
 })
 
-test('queue hydrates spilled payloads, deletes them after terminal work, and acks a missing spill', async () => {
+test('delivery hydrates spilled payloads, deletes them after terminal work, and acks a missing spill', async () => {
 	consoleError.mockImplementation(() => {})
 	mocks.dispatchWebhookInvocation.mockReset()
 	mocks.recordWebhookDelivery.mockReset()
@@ -414,14 +383,13 @@ test('queue hydrates spilled payloads, deletes them after terminal work, and ack
 	spilled.params.request.body = ''
 	spilled.params.request.json = null
 	spilled.payloadKvKey = payloadKvKey
-	const queued = createQueueMessage('spilled', spilled)
-	const missing = createQueueMessage('missing', {
+	const missing = {
 		...spilled,
 		deliveryId: 'delivery-missing',
 		idempotencyKey: 'webhook:endpoint-1:delivery-missing',
 		payloadKvKey: webhookDispatchPayloadKvKey('user-1', 'delivery-missing'),
-	})
-	const missingRecordFailure = createQueueMessage('missing-record-failure', {
+	}
+	const missingRecordFailure = {
 		...spilled,
 		deliveryId: 'delivery-missing-record',
 		idempotencyKey: 'webhook:endpoint-1:delivery-missing-record',
@@ -429,19 +397,14 @@ test('queue hydrates spilled payloads, deletes them after terminal work, and ack
 			'user-1',
 			'delivery-missing-record',
 		),
-	})
+	}
+	const env = { BUNDLE_ARTIFACTS_KV: kv } as unknown as Env
+	const outcomes = []
+	for (const message of [spilled, missing, missingRecordFailure]) {
+		outcomes.push(await handleWebhookDispatchMessage(message, env))
+	}
 
-	await handleWebhookDispatchQueue(
-		createBatch([queued, missing, missingRecordFailure]),
-		{
-			BUNDLE_ARTIFACTS_KV: kv,
-		} as unknown as Env,
-	)
-
-	expect(queued.ack).toHaveBeenCalledTimes(1)
-	expect(missing.ack).toHaveBeenCalledTimes(1)
-	expect(missingRecordFailure.ack).not.toHaveBeenCalled()
-	expect(missingRecordFailure.retry).toHaveBeenCalledWith({ delaySeconds: 30 })
+	expect(outcomes).toEqual(['ack', 'ack', 'retry'])
 	expect(values.has(payloadKvKey)).toBe(false)
 	expect(mocks.dispatchWebhookInvocation).toHaveBeenCalledTimes(1)
 	expect(mocks.dispatchWebhookInvocation).toHaveBeenCalledWith(

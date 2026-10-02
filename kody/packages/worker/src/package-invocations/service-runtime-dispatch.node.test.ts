@@ -1,4 +1,5 @@
 import { expect, test, vi } from 'vitest'
+import { createRecordingTemporal } from '#worker/test-support/aws/recording-temporal.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { consoleError } from '#worker/test-support/console-spies.ts'
 import {
@@ -116,11 +117,9 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 	const db = createDatabase()
 	const { manifests, sourceFiles } = seedRuntimeDispatchPackages()
 	repoMockModule.runBundledModuleWithRegistry.mockClear()
-	const send = vi.fn<(message: unknown) => Promise<undefined>>(
-		async () => undefined,
-	)
+	const temporal = createRecordingTemporal()
 	const tools = createRuntimeEventTools(db, {
-		envOverrides: { PACKAGE_EVENTS_DISPATCH_QUEUE: { send } },
+		envOverrides: { TEMPORAL: temporal.TEMPORAL },
 	})
 
 	const result = await tools.dispatch({
@@ -132,8 +131,23 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 		},
 	})
 
-	expect(send).toHaveBeenCalledTimes(1)
-	expect(send).toHaveBeenCalledWith({
+	expect(temporal.starts).toHaveLength(1)
+	const fanoutEvent = temporal.starts[0]?.args[0] as { eventId: string }
+	expect(temporal.starts[0]).toEqual({
+		workflowType: 'EventFanout',
+		workflowId: `@kentcdodds/discord.message.created:${fanoutEvent.eventId}`,
+		taskQueue: 'platform',
+		args: [
+			{
+				userId: 'user-123',
+				topic: '@kentcdodds/discord.message.created',
+				eventId: expect.any(String),
+				payload: { messageId: '123', channelId: '456' },
+				detail: expect.anything(),
+			},
+		],
+	})
+	expect((temporal.starts[0]?.args[0] as { detail: unknown }).detail).toEqual({
 		userId: 'user-123',
 		topic: '@kentcdodds/discord.message.created',
 		idempotencyKey: 'discord:message-create:123',
@@ -171,7 +185,7 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 	).rejects.toThrow(
 		/does not declare emitted event "@kentcdodds\/discord.reaction.created"/,
 	)
-	expect(send).toHaveBeenCalledTimes(1)
+	expect(temporal.starts).toHaveLength(1)
 
 	await expect(
 		tools.dispatch({
@@ -180,7 +194,7 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 			payload: { blob: 'x'.repeat(65 * 1024) },
 		}),
 	).rejects.toThrow(/payload is \d+ bytes; the maximum is 65536 bytes/)
-	expect(send).toHaveBeenCalledTimes(1)
+	expect(temporal.starts).toHaveLength(1)
 	await expect(
 		tools.dispatch({
 			topic: '@kentcdodds/discord.message.created',
@@ -190,10 +204,10 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 	).rejects.toThrow(
 		'events.dispatch payload must be a JSON object when provided.',
 	)
-	expect(send).toHaveBeenCalledTimes(1)
+	expect(temporal.starts).toHaveLength(1)
 
 	const depthCappedTools = createRuntimeEventTools(db, {
-		envOverrides: { PACKAGE_EVENTS_DISPATCH_QUEUE: { send } },
+		envOverrides: { TEMPORAL: temporal.TEMPORAL },
 		packageInvokeDepth: 8,
 	})
 	await expect(
@@ -203,7 +217,7 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 			payload: {},
 		}),
 	).rejects.toThrow(/exceeded the maximum nested invocation depth/)
-	expect(send).toHaveBeenCalledTimes(1)
+	expect(temporal.starts).toHaveLength(1)
 
 	const gatewayManifest = manifests.get('source-gateway') as {
 		kody: {
@@ -231,9 +245,9 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 	if (gatewayFiles) {
 		gatewayFiles['package.json'] = JSON.stringify(gatewayManifest)
 	}
-	send.mockClear()
+	temporal.starts.length = 0
 	const schemaTools = createRuntimeEventTools(db, {
-		envOverrides: { PACKAGE_EVENTS_DISPATCH_QUEUE: { send } },
+		envOverrides: { TEMPORAL: temporal.TEMPORAL },
 	})
 	await expect(
 		schemaTools.dispatch({
@@ -244,7 +258,7 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 	).rejects.toThrow(
 		/payload does not match the declared payloadSchema[\s\S]*missing required property "messageId"[\s\S]*unexpected property "extra"/,
 	)
-	expect(send).not.toHaveBeenCalled()
+	expect(temporal.starts).toEqual([])
 	await expect(
 		schemaTools.dispatch({
 			topic: '@kentcdodds/discord.message.created',
@@ -252,7 +266,7 @@ test('package runtime dispatch enqueues declared events and validates payloadSch
 			payload: { messageId: '123', channelId: '456' },
 		}),
 	).resolves.toMatchObject({ status: 'enqueued' })
-	expect(send).toHaveBeenCalledTimes(1)
+	expect(temporal.starts).toHaveLength(1)
 })
 
 test('package events deliver with filters, idempotent replay, and retryable failures', async () => {

@@ -1,9 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { parseSiteBannerInput } from '#universal/site-banners.ts'
 import {
 	deleteSiteBanner,
@@ -13,26 +10,6 @@ import {
 	listSiteBannersForAdmin,
 	saveSiteBanner,
 } from './service.ts'
-
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	const adminEmail = 'admin@example.com'
-	const adminStableId = testStableUserIdFromEmail(adminEmail)
-	sqlite.exec(`
-		INSERT INTO users (username, email, stable_user_id, password_hash)
-		VALUES (
-			'admin-user',
-			${quoteSqlString(adminEmail)},
-			${quoteSqlString(adminStableId)},
-			'oauth_created_no_usable_password'
-		);
-	`)
-	const userId = sqlite
-		.prepare(`SELECT id FROM users WHERE email = ?`)
-		.get(adminEmail) as { id: number }
-	return { sqlite, db: createD1FromSqlite(sqlite), userId: userId.id }
-}
 
 function launchInput(overrides: Record<string, unknown> = {}) {
 	const parsed = parseSiteBannerInput({
@@ -57,9 +34,19 @@ function launchInput(overrides: Record<string, unknown> = {}) {
 }
 
 test('site banner service: save, list enabled vs admin, dismiss, delete', async () => {
-	const { db, userId } = createMigratedDb()
+	await using database = await createTestDb({ userId: 'alice' })
+	await database.pg
+		.query(`INSERT INTO users (id, username, email, stable_user_id, password_hash)
+		VALUES (1, 'alice', 'alice@example.com', 'alice', 'x'), (2, 'bob', 'bob@example.com', 'bob', 'x')`)
+	const admin = createPgDatabase({
+		connection: database.pg,
+		role: 'kody_admin',
+		userId: 'alice',
+	})
+	const { db, reader } = database
+	const userId = 1
 
-	const saved = await saveSiteBanner(db, {
+	const saved = await saveSiteBanner(admin, {
 		banner: launchInput(),
 		actorUserId: userId,
 	})
@@ -69,7 +56,7 @@ test('site banner service: save, list enabled vs admin, dismiss, delete', async 
 	expect(saved.look).toBe('promo')
 	expect(saved.enabled).toBe(true)
 
-	await saveSiteBanner(db, {
+	await saveSiteBanner(admin, {
 		banner: launchInput({
 			enabled: false,
 			priority: 50,
@@ -79,19 +66,34 @@ test('site banner service: save, list enabled vs admin, dismiss, delete', async 
 		actorUserId: userId,
 	})
 
-	const enabled = await listEnabledSiteBanners(db)
+	const enabled = await listEnabledSiteBanners(reader)
 	expect(enabled.map((banner) => banner.title)).toEqual(['Kody is live'])
 
-	const adminList = await listSiteBannersForAdmin(db)
+	const adminList = await listSiteBannersForAdmin(admin)
 	expect(adminList.map((banner) => banner.title)).toEqual([
 		'Disabled winner',
 		'Kody is live',
 	])
 
+	await expect(
+		saveSiteBanner(db, { banner: launchInput(), actorUserId: userId }),
+	).rejects.toThrow('permission denied')
+	await dismissSiteBannerForUser(database.forUser('bob').db, {
+		bannerId: saved.id,
+		userId: 2,
+	})
+	await expect(
+		dismissSiteBannerForUser(db, { bannerId: saved.id, userId: 2 }),
+	).rejects.toThrow('row-level security')
+	expect(await listDismissedBannerIds(reader, 2)).toEqual([])
+	await dismissSiteBannerForUser(db, { bannerId: saved.id, userId })
 	await dismissSiteBannerForUser(db, { bannerId: saved.id, userId })
 	expect(await listDismissedBannerIds(db, userId)).toEqual([saved.id])
 
-	expect(await deleteSiteBanner(db, saved.id)).toBe(true)
+	expect(await deleteSiteBanner(admin, saved.id)).toBe(true)
 	expect(await listDismissedBannerIds(db, userId)).toEqual([])
-	expect(await deleteSiteBanner(db, saved.id)).toBe(false)
+	expect(
+		await listDismissedBannerIds(database.forUser('bob').reader, 2),
+	).toEqual([])
+	expect(await deleteSiteBanner(admin, saved.id)).toBe(false)
 })

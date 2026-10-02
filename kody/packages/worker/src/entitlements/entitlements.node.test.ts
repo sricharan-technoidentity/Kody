@@ -1290,9 +1290,7 @@ test('storage bytes enforce for planned users and enforce finite max storage cap
 
 	// Max plan: already at limit, reserve of 1 should be denied.
 	const { env: maxEnv } = createInMemoryUserMeterEnv()
-	await maxEnv.USER_METER.get(
-		maxEnv.USER_METER.idFromName(userId),
-	).initializeStorageBytes({
+	await maxEnv.USER_METERS.forUser(userId).initializeStorageBytes({
 		bytes: maxLimit,
 		updatedAt: new Date().toISOString(),
 	})
@@ -1322,9 +1320,7 @@ test('storage bytes enforce for planned users and enforce finite max storage cap
 
 	// Pro plan: at limit.
 	const { env: proEnv } = createInMemoryUserMeterEnv()
-	await proEnv.USER_METER.get(
-		proEnv.USER_METER.idFromName(userId),
-	).initializeStorageBytes({
+	await proEnv.USER_METERS.forUser(userId).initializeStorageBytes({
 		bytes: proLimit,
 		updatedAt: new Date().toISOString(),
 	})
@@ -1354,9 +1350,7 @@ test('storage bytes enforce for planned users and enforce finite max storage cap
 
 	// Under limit: reserve succeeds without any D1 write.
 	const { env: underEnv } = createInMemoryUserMeterEnv()
-	await underEnv.USER_METER.get(
-		underEnv.USER_METER.idFromName(userId),
-	).initializeStorageBytes({
+	await underEnv.USER_METERS.forUser(userId).initializeStorageBytes({
 		bytes: proLimit - 1,
 		updatedAt: new Date().toISOString(),
 	})
@@ -1485,7 +1479,7 @@ test('storage byte reserve without env throws immediately on DO-reserve path', a
 			// env intentionally omitted
 		}),
 	).rejects.toThrow(
-		'assertWithinStorageBytesEntitlement requires env.USER_METER',
+		'assertWithinStorageBytesEntitlement requires env.USER_METERS',
 	)
 })
 
@@ -1539,7 +1533,7 @@ test('readCurrentEntitlementResourceUsage for storage_bytes reads from UserMeter
 	expect(coldBytes).toBe(0)
 
 	// Warm: DO already has 750.
-	await env.USER_METER.get(env.USER_METER.idFromName(userId)).setStorageBytes({
+	await env.USER_METERS.forUser(userId).setStorageBytes({
 		bytes: 750,
 		updatedAt: now.toISOString(),
 	})

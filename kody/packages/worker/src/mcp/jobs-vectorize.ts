@@ -2,14 +2,14 @@ import {
 	embedTextForVectorize,
 	getCapabilityVectorIndex,
 	isCapabilitySearchOffline,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import {
 	recordVectorEmbedFingerprint,
 	shouldSkipVectorEmbed,
 	tryDeleteVectorEmbedFingerprint,
-} from '#worker/vectorize/embed-fingerprints.ts'
-import { userVectorNamespace } from '#worker/vectorize/vector-namespaces.ts'
-import { buildLengthSafeVectorId } from '#worker/vectorize/vector-ids.ts'
+} from '#worker/search-index/embed-fingerprints.ts'
+import { userVectorNamespace } from '#worker/search-index/vector-namespaces.ts'
+import { buildLengthSafeVectorId } from '#worker/search-index/vector-ids.ts'
 
 export function jobVectorId(jobId: string): string {
 	return buildLengthSafeVectorId({ prefix: 'job', rawId: jobId })

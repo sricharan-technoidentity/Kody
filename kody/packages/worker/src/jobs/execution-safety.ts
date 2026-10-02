@@ -106,7 +106,7 @@ export async function executeOrReplayScheduledJobRun(input: {
 }) {
 	if (!input.claim) {
 		throw new TransientJobExecutionError(
-			'Unable to claim scheduled job idempotency key; RUN_LOG is unavailable.',
+			'Unable to claim scheduled job idempotency key; RUN_RECORDS is unavailable.',
 		)
 	}
 	if (!input.claim.claimed) {

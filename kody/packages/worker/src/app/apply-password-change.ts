@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	type AppDatabase,
 	passwordResetsTable,
@@ -51,7 +52,7 @@ type ApplyPasswordChangeCredential =
 export async function applyPasswordChange(
 	input: {
 		db: AppDatabase
-		d1: D1Database
+		d1: SqlDatabase
 		helpers: OAuthGrantHelpers | undefined
 		userId: number
 		stableUserId: string

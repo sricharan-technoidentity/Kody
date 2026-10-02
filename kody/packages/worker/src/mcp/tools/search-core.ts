@@ -4,7 +4,7 @@ import {
 	embedTextForVectorize,
 	isCapabilitySearchOffline,
 	type EmbedTextFn,
-} from '#worker/vectorize/embedding.ts'
+} from '#worker/search-index/embedding.ts'
 import { type getCapabilityRegistryForContext } from '#mcp/capabilities/registry.ts'
 import { type PackageRetrieverSurfaceResult } from '#worker/package-retrievers/types.ts'
 

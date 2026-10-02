@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { fnv1a32 } from '@kody-internal/shared/fnv1a.ts'
 import {
 	defaultFeatureFlagAudience,
@@ -203,7 +204,7 @@ function normalizeFeatureFlagAudience(
 }
 
 async function readExperimentsOptInForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number | null,
 ): Promise<boolean> {
 	if (userId === null) return false
@@ -215,7 +216,7 @@ async function readExperimentsOptInForUser(
 }
 
 export async function evaluateFeatureFlag(
-	db: D1Database,
+	db: SqlDatabase,
 	key: FeatureFlagKey,
 	userId: number | null,
 ): Promise<FeatureFlagEvaluation> {
@@ -274,7 +275,7 @@ export async function evaluateFeatureFlag(
 }
 
 export async function isFeatureEnabled(
-	db: D1Database,
+	db: SqlDatabase,
 	key: FeatureFlagKey,
 	userId: number | null,
 ): Promise<boolean> {
@@ -286,7 +287,7 @@ export async function isFeatureEnabled(
  * users and per-user overrides are decided by {@link isFeatureEnabled}.
  */
 export async function isFeatureGloballyEnabled(
-	db: D1Database,
+	db: SqlDatabase,
 	key: FeatureFlagKey,
 ): Promise<boolean> {
 	const global = await db
@@ -308,12 +309,8 @@ type GlobalEvaluationRow = {
 	audience: string | null
 }
 
-function d1ResultRows<T>(result: D1Result<T> | undefined): Array<T> {
-	return result?.results ?? []
-}
-
 export async function getFeatureFlagEvaluationsForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number | null,
 ): Promise<Record<FeatureFlagKey, FeatureFlagEvaluation>> {
 	const globalStatement = db.prepare(
@@ -340,15 +337,11 @@ export async function getFeatureFlagEvaluationsForUser(
 				.prepare(`SELECT experiments_opt_in FROM users WHERE id = ?`)
 				.bind(userId),
 		])
-		globalRows = d1ResultRows<GlobalEvaluationRow>(
-			globalResult as D1Result<GlobalEvaluationRow>,
-		)
-		overrideRows = d1ResultRows<OverrideEnabledRow>(
-			overrideResult as D1Result<OverrideEnabledRow>,
-		)
-		const optInRows = d1ResultRows<{ experiments_opt_in: number }>(
-			optInResult as D1Result<{ experiments_opt_in: number }>,
-		)
+		globalRows = (globalResult?.results ?? []) as Array<GlobalEvaluationRow>
+		overrideRows = (overrideResult?.results ?? []) as Array<OverrideEnabledRow>
+		const optInRows = (optInResult?.results ?? []) as Array<{
+			experiments_opt_in: number
+		}>
 		experimentsOptIn = optInRows[0]?.experiments_opt_in === 1
 	}
 	const globalByKey = new Map(globalRows.map((row) => [row.key, row]))
@@ -384,7 +377,7 @@ export async function getFeatureFlagEvaluationsForUser(
 }
 
 export async function getFeatureFlagsForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number | null,
 ): Promise<Record<FeatureFlagKey, boolean>> {
 	const evaluations = await getFeatureFlagEvaluationsForUser(db, userId)
@@ -396,7 +389,7 @@ export async function getFeatureFlagsForUser(
 }
 
 export async function setFeatureFlagGlobalState(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		key: FeatureFlagKey
 		enabled: boolean
@@ -415,14 +408,14 @@ export async function setFeatureFlagGlobalState(
 	await db
 		.prepare(
 			`INSERT INTO feature_flags (key, enabled, rollout_percent, note, audience, updated_by, updated_at)
-			 VALUES (?, ?, ?, COALESCE(?, ''), ?, ?, CURRENT_TIMESTAMP)
+			 VALUES (?, ?, ?, COALESCE(?, ''), ?, ?, ?)
 			 ON CONFLICT(key) DO UPDATE SET
 				enabled = excluded.enabled,
 				rollout_percent = excluded.rollout_percent,
 				note = COALESCE(?, feature_flags.note),
 				audience = COALESCE(?, feature_flags.audience),
 				updated_by = excluded.updated_by,
-				updated_at = CURRENT_TIMESTAMP`,
+				updated_at = excluded.updated_at`,
 		)
 		.bind(
 			input.key,
@@ -431,6 +424,7 @@ export async function setFeatureFlagGlobalState(
 			note,
 			insertAudience,
 			input.updatedBy,
+			new Date().toISOString(),
 			note,
 			audience,
 		)
@@ -438,7 +432,7 @@ export async function setFeatureFlagGlobalState(
 }
 
 export async function setFeatureFlagUserOverride(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		key: FeatureFlagKey
 		userId: number
@@ -449,18 +443,24 @@ export async function setFeatureFlagUserOverride(
 	await db
 		.prepare(
 			`INSERT INTO feature_flag_user_overrides (flag_key, user_id, enabled, updated_by, updated_at)
-			 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 VALUES (?, ?, ?, ?, ?)
 			 ON CONFLICT(flag_key, user_id) DO UPDATE SET
 				enabled = excluded.enabled,
 				updated_by = excluded.updated_by,
-				updated_at = CURRENT_TIMESTAMP`,
+				updated_at = excluded.updated_at`,
 		)
-		.bind(input.key, input.userId, input.enabled ? 1 : 0, input.updatedBy)
+		.bind(
+			input.key,
+			input.userId,
+			input.enabled ? 1 : 0,
+			input.updatedBy,
+			new Date().toISOString(),
+		)
 		.run()
 }
 
 export async function clearFeatureFlagUserOverride(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { key: FeatureFlagKey; userId: number },
 ): Promise<boolean> {
 	const result = await db
@@ -474,7 +474,7 @@ export async function clearFeatureFlagUserOverride(
 }
 
 export async function listFeatureFlagsForAdmin(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<Array<AdminFeatureFlag>> {
 	const globalResult = await db
 		.prepare(
@@ -575,7 +575,7 @@ export async function listFeatureFlagsForAdmin(
 }
 
 export async function deleteStaleFeatureFlag(
-	db: D1Database,
+	db: SqlDatabase,
 	key: string,
 ): Promise<boolean> {
 	if (isFeatureFlagKey(key)) {

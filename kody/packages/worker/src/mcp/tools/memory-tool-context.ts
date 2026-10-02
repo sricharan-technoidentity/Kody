@@ -6,7 +6,7 @@ import {
 } from '#mcp/memory/service.ts'
 import { type MemoryRecord } from '#mcp/memory/types.ts'
 import { type PackageRetrieverSurfaceResult } from '#worker/package-retrievers/types.ts'
-import { type EmbedTextFn } from '#worker/vectorize/embedding.ts'
+import { type EmbedTextFn } from '#worker/search-index/embedding.ts'
 import {
 	escapeMarkdownText,
 	formatMarkdownInlineCode,

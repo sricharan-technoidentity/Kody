@@ -7,6 +7,7 @@ import {
 	type UserMeterRpc,
 } from '#worker/entitlements/user-meter-client.ts'
 import { runWithTransientDurableObjectResetRetry } from '#worker/durable-object-reset-retry.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 
 export class AccountDeletionInProgressError extends Error {
 	constructor() {
@@ -49,7 +50,7 @@ type ListedAccountWriteLease = {
 
 function requireUserMeterEnv(env: UserMeterEnv) {
 	if (!userMeterNamespace(env)) {
-		throw new Error('USER_METER Durable Object binding is not configured.')
+		throw new Error('USER_METERS binding is not configured.')
 	}
 	return env
 }
@@ -71,7 +72,7 @@ async function runUserMeterRpc<T>(input: {
 }
 
 async function insertOrVerifyDoRepairAudit(input: {
-	db: D1Database
+	db: SqlDatabase
 	repairId: string
 	stableUserId: string
 	token: string
@@ -83,11 +84,12 @@ async function insertOrVerifyDoRepairAudit(input: {
 }) {
 	const inserted = await input.db
 		.prepare(
-			`INSERT OR IGNORE INTO account_write_lease_repairs (
+			`INSERT INTO account_write_lease_repairs (
 				id, target_user_id, lease_token, lease_holder,
 				lease_acquired_at, repaired_by_user_id, reason, created_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO NOTHING`,
 		)
 		.bind(
 			input.repairId,
@@ -131,7 +133,7 @@ async function insertOrVerifyDoRepairAudit(input: {
 }
 
 async function findMatchingRepairAudit(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	token: string
 	expectedAcquiredAt: string
@@ -168,7 +170,7 @@ export type MarkAccountDeletingResult = {
 }
 
 export async function markAccountDeleting(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId: number
 	now?: Date
 	env: UserMeterEnv
@@ -235,7 +237,7 @@ export async function markAccountDeleting(input: {
  * alone. A later write may still fail closed if the DO clear is delayed.
  */
 export async function abortAccountDeleting(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId: number
 	now?: Date
 	env: UserMeterEnv
@@ -319,7 +321,7 @@ export async function clearUserMeterDeletionTombstone(input: {
  * `stable_user_id` so admin tools never take the numeric D1 join key.
  */
 export async function abortAccountDeletingByStableUserId(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	now?: Date
 	env: UserMeterEnv
@@ -344,7 +346,7 @@ export async function abortAccountDeletingByStableUserId(input: {
 }
 
 export async function assertAccountWritableDb(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ) {
 	const row = await db
@@ -362,7 +364,7 @@ export async function assertAccountWritableDb(
  * its DO fence cleared; restore that tombstone before failing closed.
  */
 async function assertAccountWritableAfterLeftoverTombstoneClear(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: UserMeterEnv
 	stableUserId: string
 }) {
@@ -407,7 +409,7 @@ const heldAccountWriteLeaseStorage = new AsyncLocalStorage<
 >()
 
 export async function withAccountWriteLease<T>(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	holder?: string
 	env: UserMeterEnv
@@ -436,7 +438,7 @@ export async function withAccountWriteLease<T>(input: {
 }
 
 async function acquireDoAccountWriteLeaseAndWrite<T>(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	holder?: string
 	env: UserMeterEnv
@@ -535,7 +537,7 @@ export async function listActiveAccountWriteLeases(
 }
 
 export async function repairAccountWriteLease(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	token: string
 	expectedAcquiredAt: string

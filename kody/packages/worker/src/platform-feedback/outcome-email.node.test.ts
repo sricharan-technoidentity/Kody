@@ -1,4 +1,5 @@
 import { expect, test, vi } from 'vitest'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { type PlatformFeedbackRecord } from './types.ts'
 
@@ -86,10 +87,10 @@ function createUserDb(
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
-function createEnv(input?: { kv?: KVNamespace; db?: D1Database }) {
+function createEnv(input?: { kv?: KVNamespace; db?: SqlDatabase }) {
 	return {
 		APP_BASE_URL: 'https://kody.codes/',
 		CLOUDFLARE_ACCOUNT_ID: 'acct',

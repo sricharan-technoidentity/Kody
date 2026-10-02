@@ -1,4 +1,5 @@
 import { type JobsStore } from '@kody-internal/shared/jobs/store.ts'
+import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { type UserMeterEnv } from './user-meter-client.ts'
 import {
 	advanceD1StorageReconciliationCursor,
@@ -49,8 +50,11 @@ export async function reconcileD1StorageBytes(input: {
 	let deferred = 0
 	for (const row of rows) {
 		try {
+			// Listed as the operator; each account's bytes are read on its own
+			// reader-writer (`APP_DB_FOR_USER`).
 			const result = await reconcileUserD1StorageBytes({
-				db: input.db,
+				db: getAccountEnv({ ...input.env, APP_DB: input.db }, row.userId)
+					.APP_DB,
 				env: input.env,
 				jobs: input.jobs,
 				userId: row.userId,

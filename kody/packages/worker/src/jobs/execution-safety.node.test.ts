@@ -93,7 +93,7 @@ test('terminal scheduled run replay returns retained result without executing', 
 			execute,
 		}),
 	).rejects.toThrow(
-		'Unable to claim scheduled job idempotency key; RUN_LOG is unavailable.',
+		'Unable to claim scheduled job idempotency key; RUN_RECORDS is unavailable.',
 	)
 	expect(execute).not.toHaveBeenCalled()
 })

@@ -1,6 +1,8 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { invalidateCommunityPublicCache } from '#app/data-cache.ts'
 import { resolveUserStableId } from '#worker/user-id.ts'
-import { jobsData } from '#worker/jobs/jobs-data.ts'
+import { jobsData, type JobsDataEnv } from '#worker/jobs/jobs-data.ts'
+import { getCommunityDb } from './community-db.ts'
 import { CommunityActionError } from './errors.ts'
 import {
 	countActiveListingsForOwner,
@@ -61,8 +63,8 @@ async function loadCommunityProfileFromRow(input: {
 	}
 	const stableUserId = resolveStableUserIdFromRow(input.row)
 	const [publicPackageCount, listingCount] = await Promise.all([
-		countPublicSavedPackagesForUser(input.env.APP_DB, stableUserId),
-		countActiveListingsForOwner(input.env.APP_DB, stableUserId),
+		countPublicSavedPackagesForUser(getCommunityDb(input.env), stableUserId),
+		countActiveListingsForOwner(getCommunityDb(input.env), stableUserId),
 	])
 	return toCommunityProfileRecord({
 		row: input.row,
@@ -77,7 +79,10 @@ export async function getCommunityProfileByUsername(input: {
 	username: string
 	includePrivate?: boolean
 }): Promise<CommunityProfileRecord | null> {
-	const row = await getUserSocialRowByUsername(input.env.APP_DB, input.username)
+	const row = await getUserSocialRowByUsername(
+		getCommunityDb(input.env),
+		input.username,
+	)
 	if (!row) return null
 	return await loadCommunityProfileFromRow({
 		env: input.env,
@@ -92,7 +97,7 @@ export async function getCommunityProfileByStableId(input: {
 	includePrivate?: boolean
 }): Promise<CommunityProfileRecord | null> {
 	const row = await getUserSocialRowByStableId(
-		input.env.APP_DB,
+		getCommunityDb(input.env),
 		input.stableUserId,
 	)
 	if (!row) return null
@@ -164,7 +169,8 @@ export async function getProfileActivity(input: {
 	limit: number
 	isSelf: boolean
 }): Promise<Array<CommunityActivityItem>> {
-	return await listCommunityActivityForActors(input.env.APP_DB, {
+	// Self activity names other users' listings (forks), so it reads public rows too.
+	return await listCommunityActivityForActors(getCommunityDb(input.env), {
 		actorUserIds: [input.actorUserId],
 		limit: input.limit,
 		requirePublicActorProfile: !input.isSelf,
@@ -178,21 +184,23 @@ export async function listPublicProfilePackages(input: {
 	limit?: number
 	includePrivate?: boolean
 }): Promise<Array<PublicProfilePackage>> {
-	const packages = await listPublicProfilePackagesFromDb(input.env.APP_DB, {
+	// Own inventory includes private packages, which only the owner's db sees.
+	const db = input.includePrivate ? input.env.APP_DB : getCommunityDb(input.env)
+	const packages = await listPublicProfilePackagesFromDb(db, {
 		ownerStableUserId: input.ownerStableUserId,
 		query: input.query,
 		limit: input.limit,
 		includePrivate: input.includePrivate,
 	})
 	return await attachProfilePackageSignifierCounts({
-		env: input.env,
+		env: { JOBS: input.env.JOBS, APP_DB: db },
 		ownerStableUserId: input.ownerStableUserId,
 		packages,
 	})
 }
 
 async function attachProfilePackageSignifierCounts(input: {
-	env: Env
+	env: { JOBS: Env['JOBS']; APP_DB: SqlDatabase }
 	ownerStableUserId: string
 	packages: Array<PublicProfilePackageListRow>
 }): Promise<Array<PublicProfilePackage>> {
@@ -202,7 +210,8 @@ async function attachProfilePackageSignifierCounts(input: {
 			ownerStableUserId: input.ownerStableUserId,
 			packageIds: input.packages.map((pkg) => pkg.packageId),
 		}).catch(() => new Map<string, number>()),
-		jobsData(input.env)
+		// ponytail: the jobs store is still typed D1; the PG facade serves the same calls. Drop the cast when jobs move to Temporal (P5).
+		jobsData(input.env as JobsDataEnv)
 			.countJobsBySourceId({ userId: input.ownerStableUserId })
 			.catch(() => []),
 	])

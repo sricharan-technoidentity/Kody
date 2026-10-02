@@ -29,6 +29,7 @@ import {
 	markAdminUserEmailVerified,
 	mintAdminEmailVerificationUrl,
 } from '#worker/identity/email-verification-admin.ts'
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 import {
 	parsePlanName,
 	planNames,
@@ -558,6 +559,7 @@ async function handleMarkEmailVerifiedAction(input: {
 	try {
 		await markAdminUserEmailVerified(input.env.APP_DB, {
 			stableUserId: targetStableUserId,
+			forUser: getAccountWriterFactory(input.env),
 		})
 	} catch (error) {
 		if (
@@ -603,6 +605,7 @@ async function handleMintVerifyUrlAction(input: {
 	try {
 		minted = await mintAdminEmailVerificationUrl({
 			db: input.env.APP_DB,
+			forUser: getAccountWriterFactory(input.env),
 			appBaseUrl: new URL(input.request.url).origin,
 			target: { stableUserId: targetStableUserId },
 		})
@@ -652,6 +655,7 @@ async function handleCreateUserAction(input: {
 	try {
 		const createdUser = await adminCreateUserWithPasswordSetup({
 			db: input.env.APP_DB,
+			forUser: getAccountWriterFactory(input.env),
 			env: input.env,
 			email,
 			username,

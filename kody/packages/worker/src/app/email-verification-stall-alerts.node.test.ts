@@ -1,7 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { userEmailVerificationStalledTopic } from '#worker/identity/email-verification-stalled-subscription-event.ts'
 
 const mocks = vi.hoisted(() => ({
@@ -21,8 +20,15 @@ const {
 	shouldRunEmailVerificationStallAlertCron,
 } = await import('./email-verification-stall-alerts.ts')
 
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
+
+/** The fleet-wide sweep reads every account, so it runs as `kody_admin`. */
+function adminDb(store: TestDb) {
+	return createPgDatabase({ connection: store.pg, role: 'kody_admin' })
+}
+
 async function seedUser(input: {
-	db: D1Database
+	store: TestDb
 	username: string
 	email: string
 	stableUserId: string
@@ -32,15 +38,13 @@ async function seedUser(input: {
 	deliveryStatus?: string | null
 	deliveryAt?: string | null
 }) {
-	await input.db
-		.prepare(
-			`INSERT INTO users (
-				username, email, password_hash, stable_user_id, email_verified_at,
-				account_type, deleting_at, email_verification_delivery_status,
-				email_verification_delivery_at
-			) VALUES (?, ?, 'hash', ?, ?, ?, ?, ?, ?)`,
-		)
-		.bind(
+	await input.store.pg.query(
+		`INSERT INTO users (
+			username, email, password_hash, stable_user_id, email_verified_at,
+			account_type, deleting_at, email_verification_delivery_status,
+			email_verification_delivery_at
+		) VALUES ($1, $2, 'hash', $3, $4, $5, $6, $7, $8)`,
+		[
 			input.username,
 			input.email,
 			input.stableUserId,
@@ -49,8 +53,8 @@ async function seedUser(input: {
 			input.deletingAt ?? null,
 			input.deliveryStatus ?? null,
 			input.deliveryAt ?? null,
-		)
-		.run()
+		],
+	)
 }
 
 test('hourly stall scan fans accepted sends older than the threshold and skips fresh or resolved rows', async () => {
@@ -65,14 +69,9 @@ test('hourly stall scan fans accepted sends older than the threshold and skips f
 		),
 	).toBe(false)
 
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureUsersTestSchema({
-		db,
-		columns: ['email_verified_at', 'account_type'],
-	})
+	await using store = await createTestDb()
 	await seedUser({
-		db,
+		store,
 		username: 'raul',
 		email: 'a.kodycodes@raulg.dev',
 		stableUserId: 'r'.repeat(64),
@@ -80,7 +79,7 @@ test('hourly stall scan fans accepted sends older than the threshold and skips f
 		deliveryAt: '2026-09-01T08:45:16.921Z',
 	})
 	await seedUser({
-		db,
+		store,
 		username: 'fresh',
 		email: 'fresh@example.com',
 		stableUserId: 'f'.repeat(64),
@@ -88,7 +87,7 @@ test('hourly stall scan fans accepted sends older than the threshold and skips f
 		deliveryAt: '2026-09-01T09:30:00.000Z',
 	})
 	await seedUser({
-		db,
+		store,
 		username: 'verified',
 		email: 'verified@example.com',
 		stableUserId: 'v'.repeat(64),
@@ -97,7 +96,7 @@ test('hourly stall scan fans accepted sends older than the threshold and skips f
 		deliveryAt: '2026-09-01T08:00:00.000Z',
 	})
 	await seedUser({
-		db,
+		store,
 		username: 'bounced',
 		email: 'bounced@example.com',
 		stableUserId: 'b'.repeat(64),
@@ -105,7 +104,7 @@ test('hourly stall scan fans accepted sends older than the threshold and skips f
 		deliveryAt: '2026-09-01T08:00:00.000Z',
 	})
 	await seedUser({
-		db,
+		store,
 		username: 'platform',
 		email: 'ops@kody.codes',
 		stableUserId: 'p'.repeat(64),
@@ -114,7 +113,7 @@ test('hourly stall scan fans accepted sends older than the threshold and skips f
 		deliveryAt: '2026-09-01T08:00:00.000Z',
 	})
 	await seedUser({
-		db,
+		store,
 		username: 'leaving',
 		email: 'leaving@example.com',
 		stableUserId: 'l'.repeat(64),
@@ -123,11 +122,15 @@ test('hourly stall scan fans accepted sends older than the threshold and skips f
 		deliveryAt: '2026-09-01T08:00:00.000Z',
 	})
 
-	const env = {
-		APP_DB: db,
-		APP_BASE_URL: 'https://kody.codes',
-	}
 	const now = new Date('2026-09-01T10:00:00.000Z')
+	// An ordinary writer's RLS scope holds no other account to alert on.
+	await expect(
+		checkEmailVerificationStallsAndNotify({
+			env: { APP_DB: store.db, APP_BASE_URL: 'https://kody.codes' },
+			now,
+		}),
+	).resolves.toEqual({ scanned: 0, notified: 0, failed: 0 })
+	const env = { APP_DB: adminDb(store), APP_BASE_URL: 'https://kody.codes' }
 	const result = await checkEmailVerificationStallsAndNotify({ env, now })
 
 	expect(result).toEqual({ scanned: 1, notified: 1, failed: 0 })
@@ -167,14 +170,9 @@ function createMemoryKv() {
 }
 
 test('hourly stall scan advances a watermark so later accepted sends are not starved', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureUsersTestSchema({
-		db,
-		columns: ['email_verified_at', 'account_type'],
-	})
+	await using store = await createTestDb()
 	await seedUser({
-		db,
+		store,
 		username: 'older',
 		email: 'older@example.com',
 		stableUserId: 'a'.repeat(64),
@@ -182,7 +180,7 @@ test('hourly stall scan advances a watermark so later accepted sends are not sta
 		deliveryAt: '2026-09-01T07:00:00.000Z',
 	})
 	await seedUser({
-		db,
+		store,
 		username: 'newer',
 		email: 'newer@example.com',
 		stableUserId: 'n'.repeat(64),
@@ -190,7 +188,7 @@ test('hourly stall scan advances a watermark so later accepted sends are not sta
 		deliveryAt: '2026-09-01T08:00:00.000Z',
 	})
 	const env = {
-		APP_DB: db,
+		APP_DB: adminDb(store),
 		APP_BASE_URL: 'https://kody.codes',
 		BUNDLE_ARTIFACTS_KV: createMemoryKv(),
 	}

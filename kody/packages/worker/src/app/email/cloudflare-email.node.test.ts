@@ -2,58 +2,55 @@ import { expect, test } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { consoleInfo, consoleWarn } from '#worker/test-support/console-spies.ts'
 import { createMswNodeServer } from '#worker/test-support/msw-node-server.ts'
-import { startCloudflareMock } from '#worker/test-support/cloudflare-mock-server.ts'
 import { sendCloudflareEmail } from './cloudflare-email.ts'
 
 const mockAccountId = 'cf_account_mock_123'
 
 test('sendCloudflareEmail delivers through the mock API and handles configuration and transport failures', async () => {
-	const token = 'cloudflare-email-mock-token'
-	await using mock = await startCloudflareMock(token)
-	const clearResponse = await fetch(
-		`${mock.origin}/__mocks/clear?token=${token}`,
-		{
-			method: 'POST',
-		},
-	)
-	expect(clearResponse.status).toBe(200)
+	const sentMessages: Array<Record<string, unknown>> = []
+	{
+		using _sendServer = createMswNodeServer(
+			[
+				http.post(
+					'https://api.cloudflare.test/client/v4/accounts/:accountId/email/sending/send',
+					async ({ request }) => {
+						sentMessages.push((await request.json()) as Record<string, unknown>)
+						return HttpResponse.json({
+							success: true,
+							result: { message_id: 'email_test' },
+						})
+					},
+				),
+			],
+			{ onUnhandledRequest: 'bypass' },
+		)
 
-	const sendResult = await sendCloudflareEmail(
-		{
-			accountId: mockAccountId,
-			apiBaseUrl: mock.origin,
-			apiToken: mock.token,
-		},
-		{
-			to: 'recipient@example.com',
+		const sendResult = await sendCloudflareEmail(
+			{
+				accountId: mockAccountId,
+				apiBaseUrl: 'https://api.cloudflare.test',
+				apiToken: 'test-token',
+			},
+			{
+				to: 'recipient@example.com',
+				from: 'reset@kody.dev',
+				subject: 'Reset your kody password',
+				html: '<p>Reset link</p>',
+				text: 'Reset link',
+			},
+		)
+
+		expect(sendResult).toMatchObject({
+			ok: true,
+		})
+		expect(sendResult.messageId).toBe('email_test')
+		expect(sentMessages).toHaveLength(1)
+		expect(sentMessages[0]).toMatchObject({
 			from: 'reset@kody.dev',
 			subject: 'Reset your kody password',
-			html: '<p>Reset link</p>',
 			text: 'Reset link',
-		},
-	)
-
-	expect(sendResult).toMatchObject({
-		ok: true,
-	})
-	expect(sendResult.messageId).toMatch(/^email_/)
-
-	const response = await fetch(`${mock.origin}/__mocks/messages?token=${token}`)
-	expect(response.status).toBe(200)
-	const payload = (await response.json()) as {
-		count: number
-		messages: Array<{
-			from_email: string
-			subject: string
-			text: string | null
-		}>
+		})
 	}
-	expect(payload.count).toBe(1)
-	expect(payload.messages[0]).toMatchObject({
-		from_email: 'reset@kody.dev',
-		subject: 'Reset your kody password',
-		text: 'Reset link',
-	})
 
 	const defaultBaseUrlRequests: Array<Request> = []
 	using _defaultBaseUrlServer = createMswNodeServer(

@@ -1,4 +1,6 @@
 import { expect, test, vi } from 'vitest'
+import { createPgDatabase, type SqlDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { silenceExpectedConsoleWarns } from '#worker/test-support/console-spies.ts'
 import { type FeatureFlagSuccessMetric } from '#universal/feature-flags/registry.ts'
 import {
@@ -17,131 +19,81 @@ const successMetric: FeatureFlagSuccessMetric = {
 
 const now = new Date('2026-07-15T12:00:00.000Z')
 
-type ExposureRow = {
-	user_id: string
-	enabled: number
-	source: string
-	last_day: string
-	last_updated: string | null
-}
-type UsageRow = {
-	user_id: string
-	event_count: number
-	error_count: number
-	total_duration_ms: number
-}
+type ExposureRow = [
+	flagKey: string,
+	userId: string,
+	day: string,
+	enabled: 0 | 1,
+	source: string,
+]
+type UsageRow = [
+	userId: string,
+	metric: string,
+	month: string,
+	eventCount: number,
+	errorCount: number,
+	totalDurationMs: number,
+]
 
-function createReadoutTestDb(input: {
-	exposures: Array<ExposureRow>
-	usage: Array<UsageRow>
-}) {
-	const queries: Array<{ query: string; params: Array<unknown> }> = []
-	const db = {
-		prepare(query: string) {
-			return {
-				bind(...params: Array<unknown>) {
-					return {
-						async all() {
-							queries.push({ query, params })
-							if (query.includes('feature_flag_exposure_rollups')) {
-								return { results: input.exposures }
-							}
-							if (query.includes('usage_rollups')) {
-								return { results: input.usage }
-							}
-							throw new Error(`Unsupported query: ${query}`)
-						},
-					}
-				},
-			}
-		},
+async function createReadoutTestDb(
+	input: { exposures?: Array<ExposureRow>; usage?: Array<UsageRow> } = {},
+) {
+	const database = await createTestDb()
+	for (const [flagKey, userId, day, enabled, source] of input.exposures ?? [])
+		await database.pg.query(
+			`INSERT INTO feature_flag_exposure_rollups
+				(flag_key, user_id, day, enabled, source, exposure_count, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, 1, $3 || 'T00:00:00.000Z')`,
+			[flagKey, userId, day, enabled, source],
+		)
+	for (const row of input.usage ?? [])
+		await database.pg.query(
+			`INSERT INTO usage_rollups
+				(user_id, metric, month, event_count, error_count, total_duration_ms)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			row,
+		)
+	return {
+		...database,
+		// The admin surface selects this role after its permission check.
+		analytics: createPgDatabase({
+			connection: database.pg,
+			role: 'kody_analytics',
+		}),
 	}
-	return { db: db as unknown as D1Database, queries }
 }
 
-test('D1 readout excludes mixed users from on/off and surfaces override usage', async () => {
-	const { db, queries } = createReadoutTestDb({
+test('relational readout excludes mixed users from on/off and surfaces override usage', async () => {
+	const flag = 'metric-test-flag'
+	await using database = await createReadoutTestDb({
 		exposures: [
-			{
-				user_id: 'user-on',
-				enabled: 1,
-				source: 'rollout',
-				last_day: '2026-07-10',
-				last_updated: '2026-07-10T00:00:00.000Z',
-			},
-			{
-				user_id: 'user-on-quiet',
-				enabled: 1,
-				source: 'rollout',
-				last_day: '2026-07-10',
-				last_updated: '2026-07-10T00:00:00.000Z',
-			},
-			{
-				user_id: 'user-off',
-				enabled: 0,
-				source: 'rollout',
-				last_day: '2026-07-10',
-				last_updated: '2026-07-10T00:00:00.000Z',
-			},
-			{
-				user_id: 'user-override',
-				enabled: 1,
-				source: 'override',
-				last_day: '2026-07-12',
-				last_updated: '2026-07-12T00:00:00.000Z',
-			},
-			{
-				user_id: 'user-mixed',
-				enabled: 0,
-				source: 'rollout',
-				last_day: '2026-07-05',
-				last_updated: '2026-07-05T00:00:00.000Z',
-			},
-			{
-				user_id: 'user-mixed',
-				enabled: 1,
-				source: 'rollout',
-				last_day: '2026-07-12',
-				last_updated: '2026-07-12T00:00:00.000Z',
-			},
+			[flag, 'user-on', '2026-07-08', 1, 'rollout'],
+			[flag, 'user-on', '2026-07-10', 1, 'rollout'],
+			[flag, 'user-on-quiet', '2026-07-10', 1, 'rollout'],
+			[flag, 'user-off', '2026-07-10', 0, 'rollout'],
+			[flag, 'user-override', '2026-07-12', 1, 'override'],
+			[flag, 'user-mixed', '2026-07-05', 0, 'rollout'],
+			[flag, 'user-mixed', '2026-07-12', 1, 'rollout'],
+			// Outside the month-to-date window or for another flag: each would
+			// turn its user into a mixed exposure if the filters leaked.
+			[flag, 'user-off', '2026-06-30', 1, 'rollout'],
+			[flag, 'user-on', '2026-07-16', 0, 'rollout'],
+			['other-flag', 'user-on-quiet', '2026-07-10', 0, 'rollout'],
 		],
 		usage: [
-			{
-				user_id: 'user-on',
-				event_count: 10,
-				error_count: 2,
-				total_duration_ms: 1000,
-			},
-			{
-				user_id: 'user-off',
-				event_count: 8,
-				error_count: 4,
-				total_duration_ms: 400,
-			},
-			{
-				user_id: 'user-override',
-				event_count: 100,
-				error_count: 0,
-				total_duration_ms: 0,
-			},
-			{
-				user_id: 'user-mixed',
-				event_count: 20,
-				error_count: 1,
-				total_duration_ms: 200,
-			},
-			{
-				user_id: 'user-unexposed',
-				event_count: 50,
-				error_count: 50,
-				total_duration_ms: 0,
-			},
+			['user-on', 'execute', '2026-07', 10, 2, 1000],
+			['user-off', 'execute', '2026-07', 8, 4, 400],
+			['user-override', 'execute', '2026-07', 100, 0, 0],
+			['user-mixed', 'execute', '2026-07', 20, 1, 200],
+			['user-unexposed', 'execute', '2026-07', 50, 50, 0],
+			['user-on', 'execute', '2026-06', 999, 999, 999],
+			['user-on', 'search', '2026-07', 777, 777, 777],
 		],
 	})
 
 	const readout = await loadFeatureFlagSuccessMetricReadout(
-		{ APP_DB: db },
-		{ flagKey: 'metric-test-flag', successMetric },
+		{ APP_DB: database.analytics },
+		{ flagKey: flag, successMetric },
 		now,
 	)
 
@@ -173,12 +125,26 @@ test('D1 readout excludes mixed users from on/off and surfaces override usage', 
 		overrideUsers: 1,
 		mixedUsers: 1,
 	})
-	expect(queries[0]?.params).toEqual([
-		'metric-test-flag',
-		'2026-07-01',
-		'2026-07-15',
-	])
-	expect(queries[1]?.params).toEqual(['execute', '2026-07'])
+
+	// Analytics sees counters only, read-only; ordinary roles see one user.
+	await expect(
+		database.analytics.prepare('SELECT email FROM users').all(),
+	).rejects.toThrow('permission denied')
+	await expect(
+		database.analytics.prepare('DELETE FROM usage_rollups').run(),
+	).rejects.toThrow('read-only transaction')
+	expect(
+		await loadFeatureFlagSuccessMetricReadout(
+			{ APP_DB: database.forUser('user-on').reader },
+			{ flagKey: flag, successMetric },
+			now,
+		),
+	).toMatchObject({
+		on: { users: 1, eventCount: 10 },
+		off: { users: 0 },
+		override: { users: 0 },
+		mixedUsers: 0,
+	})
 })
 
 test('Analytics Engine readout joins exposures and usage; mixed stay excluded', async () => {
@@ -257,7 +223,7 @@ test('Analytics Engine readout joins exposures and usage; mixed stay excluded', 
 	try {
 		const readout = await loadFeatureFlagSuccessMetricReadout(
 			{
-				APP_DB: {} as D1Database,
+				APP_DB: {} as SqlDatabase,
 				FLAG_EXPOSURES: {} as AnalyticsEngineDataset,
 				CLOUDFLARE_ACCOUNT_ID: 'account',
 				CLOUDFLARE_API_TOKEN: 'token',
@@ -286,12 +252,15 @@ test('Analytics Engine readout joins exposures and usage; mixed stay excluded', 
 	}
 })
 
-test('selects D1 locally, stays unavailable without credentials, and degrades on failure', async () => {
-	const local = createReadoutTestDb({ exposures: [], usage: [] })
+test('selects the relational store locally, stays unavailable without credentials, and degrades on failure', async () => {
+	await using local = await createReadoutTestDb({
+		exposures: [['metric-test-flag', 'user-on', '2026-07-10', 1, 'rollout']],
+		usage: [['user-on', 'execute', '2026-07', 3, 0, 30]],
+	})
 	await expect(
 		loadFeatureFlagSuccessMetricReadout(
 			{
-				APP_DB: local.db,
+				APP_DB: local.analytics,
 				FLAG_EXPOSURES: {} as AnalyticsEngineDataset,
 				CLOUDFLARE_ACCOUNT_ID: 'account',
 				CLOUDFLARE_API_TOKEN: 'token',
@@ -300,16 +269,21 @@ test('selects D1 locally, stays unavailable without credentials, and degrades on
 			{ flagKey: 'metric-test-flag', successMetric },
 			now,
 		),
-	).resolves.toMatchObject({ status: 'ok' })
-	expect(local.queries).toHaveLength(2)
+	).resolves.toMatchObject({ status: 'ok', on: { users: 1, eventCount: 3 } })
 
-	// Falling back to empty D1 tables would present confident zero cohorts
-	// even though exposures were written to Analytics Engine.
-	const missingCredentials = createReadoutTestDb({ exposures: [], usage: [] })
+	silenceExpectedConsoleWarns(['flag-metric-readout-failed'])
+	const failingDb = {
+		prepare() {
+			throw new Error('database down')
+		},
+	} as unknown as SqlDatabase
+
+	// Falling back to empty relational tables would present confident zero
+	// cohorts even though exposures were written to Analytics Engine.
 	await expect(
 		loadFeatureFlagSuccessMetricReadout(
 			{
-				APP_DB: missingCredentials.db,
+				APP_DB: failingDb,
 				FLAG_EXPOSURES: {} as AnalyticsEngineDataset,
 			},
 			{ flagKey: 'metric-test-flag', successMetric },
@@ -319,14 +293,6 @@ test('selects D1 locally, stays unavailable without credentials, and degrades on
 		status: 'unavailable',
 		reason: expect.stringContaining('credentials'),
 	})
-	expect(missingCredentials.queries).toHaveLength(0)
-
-	silenceExpectedConsoleWarns(['flag-metric-readout-failed'])
-	const failingDb = {
-		prepare() {
-			throw new Error('d1 down')
-		},
-	} as unknown as D1Database
 	await expect(
 		loadFeatureFlagSuccessMetricReadout(
 			{ APP_DB: failingDb },
@@ -348,7 +314,7 @@ test('selects D1 locally, stays unavailable without credentials, and degrades on
 		await expect(
 			loadFeatureFlagSuccessMetricReadout(
 				{
-					APP_DB: {} as D1Database,
+					APP_DB: {} as SqlDatabase,
 					FLAG_EXPOSURES: {} as AnalyticsEngineDataset,
 					CLOUDFLARE_ACCOUNT_ID: 'account',
 					CLOUDFLARE_API_TOKEN: 'token',
@@ -373,7 +339,7 @@ test('resolveFlagExposuresDataset picks preview vs production table names', () =
 })
 
 test('attachFeatureFlagMetricReadouts only fills measured non-stale flags', async () => {
-	const { db } = createReadoutTestDb({ exposures: [], usage: [] })
+	await using database = await createReadoutTestDb()
 	const flags: Array<AdminFeatureFlag> = [
 		{
 			key: 'demo-indicator',
@@ -406,7 +372,11 @@ test('attachFeatureFlagMetricReadouts only fills measured non-stale flags', asyn
 			overrides: [],
 		},
 	]
-	await attachFeatureFlagMetricReadouts({ APP_DB: db }, flags, now)
+	await attachFeatureFlagMetricReadouts(
+		{ APP_DB: database.analytics },
+		flags,
+		now,
+	)
 	expect(flags[0]?.metricReadout).toMatchObject({ status: 'ok' })
 	expect(flags[1]?.metricReadout).toBeUndefined()
 	expect(flags[2]?.metricReadout).toBeUndefined()

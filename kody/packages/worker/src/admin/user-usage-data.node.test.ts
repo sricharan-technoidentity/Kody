@@ -6,6 +6,7 @@ import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { type RepoSessionRow } from '#worker/repo/types.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { type AdminUsageRollup } from '#universal/loader-data.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { loadAdminUserUsageData } from './user-usage-data.ts'
 
 const resourceCountsByDb = new WeakMap<
@@ -120,97 +121,88 @@ function normalizeQuery(query: string) {
 	return query.replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
-function createAdminUserUsageTestDb(input: {
+/**
+ * One subject account on PGlite. The drill-down reads through that account's
+ * scoped reader, as the operator surface does after its permission check.
+ */
+async function createAdminUserUsageTestDb(input: {
 	users: Array<UserRow>
 	usageRollups?: Array<UsageRollupRow>
 	resourceCounts?: Record<string, ResourceCount>
 }) {
-	const users = input.users.map((user) => ({ ...user }))
-	const usageRollups = input.usageRollups?.map((row) => ({ ...row })) ?? []
+	const database = await createTestDb()
+	const query = (sql: string, values: Array<unknown>) =>
+		database.pg.query(sql, values)
+	for (const user of input.users)
+		await query(
+			`INSERT INTO users (id, username, email, password_hash, plan, stripe_plan,
+				stripe_price_id, entitlement_ladder, stripe_credits_eligible,
+				second_agent_standard_gift_expires_at, referral_standard_credit_expires_at,
+				stable_user_id)
+			 VALUES ($1, $2, $3, 'x', $4, $5, $6, $7, $8, $9, $10, $11)`,
+			[
+				user.id,
+				user.username,
+				user.email,
+				user.plan,
+				user.stripe_plan ?? null,
+				user.stripe_price_id ?? null,
+				user.entitlement_ladder ?? 'public',
+				user.stripe_credits_eligible ?? 0,
+				user.second_agent_standard_gift_expires_at ?? null,
+				user.referral_standard_credit_expires_at ?? null,
+				user.stable_user_id,
+			],
+		)
+	for (const row of input.usageRollups ?? [])
+		await query(
+			`INSERT INTO usage_rollups (user_id, metric, month, event_count, error_count,
+				total_duration_ms, total_cpu_ms, total_bytes)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			[
+				row.user_id,
+				row.metric,
+				row.month,
+				row.event_count,
+				row.error_count,
+				row.total_duration_ms,
+				row.total_cpu_ms,
+				row.total_bytes,
+			],
+		)
 	const resourceCounts = input.resourceCounts ?? {}
-
-	function countForQuery(normalizedQuery: string, userId: string) {
-		const counts = resourceCounts[userId] ?? {}
-		if (normalizedQuery.includes('from saved_packages')) {
-			return counts.saved_packages ?? 0
-		}
-		if (normalizedQuery.includes('from jobs')) {
-			return counts.scheduled_jobs ?? 0
-		}
-		if (normalizedQuery.includes('from secret_entries')) {
-			return counts.secrets ?? 0
-		}
-		return null
+	for (const [userId, counts] of Object.entries(resourceCounts)) {
+		await query(
+			`INSERT INTO saved_packages (id, user_id, name, kody_id, description, source_id)
+			 SELECT $1 || '-pkg-' || n, $1, 'pkg-' || n, 'kody-' || n, '', 'source-' || n
+			 FROM generate_series(1, $2::int) AS n`,
+			[userId, counts.saved_packages ?? 0],
+		)
+		await query(
+			`INSERT INTO jobs (id, user_id, name, source_id, storage_id, schedule_json,
+				timezone, caller_context_json, created_at, updated_at, next_run_at)
+			 SELECT $1 || '-job-' || n, $1, 'job-' || n, 'source', 'storage', '{}', 'UTC',
+				'{}', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z',
+				'2026-08-01T00:00:00.000Z'
+			 FROM generate_series(1, $2::int) AS n`,
+			[userId, counts.scheduled_jobs ?? 0],
+		)
+		await query(
+			`INSERT INTO secret_buckets (id, user_id, scope, binding_key)
+			 VALUES ($1 || '-bucket', $1, 'user', 'default')`,
+			[userId],
+		)
+		await query(
+			`INSERT INTO secret_entries (bucket_id, name, encrypted_value)
+			 SELECT $1 || '-bucket', 'secret-' || n, 'ciphertext'
+			 FROM generate_series(1, $2::int) AS n`,
+			[userId, counts.secrets ?? 0],
+		)
 	}
-
-	const db = {
-		prepare(query: string) {
-			const normalizedQuery = normalizeQuery(query)
-			const createStatement = (params: Array<unknown>) => ({
-				async first<T>() {
-					if (
-						normalizedQuery.includes('from users where stable_user_id = ?') &&
-						normalizedQuery.includes('stripe_price_id') &&
-						normalizedQuery.includes('stripe_credits_eligible')
-					) {
-						return (users.find((user) => user.stable_user_id === params[0]) ??
-							null) as T | null
-					}
-					if (
-						normalizedQuery.includes('from credit_wallets where user_id = ?')
-					) {
-						return null as T | null
-					}
-					if (
-						normalizedQuery.includes("r.name = 'admin'") &&
-						normalizedQuery.includes('stable_user_id')
-					) {
-						return null
-					}
-					if (
-						normalizedQuery.includes(
-							'select 1 as present from users where stable_user_id = ?',
-						)
-					) {
-						const exists = users.some(
-							(user) => user.stable_user_id === params[0],
-						)
-						return (exists ? { present: 1 } : null) as T | null
-					}
-					const count = countForQuery(normalizedQuery, String(params[0]))
-					if (count !== null) return { count } as T
-					throw new Error(`Unsupported first query: ${query}`)
-				},
-				async all<T>() {
-					if (
-						normalizedQuery.includes('from usage_rollups') &&
-						normalizedQuery.includes('where user_id = ?')
-					) {
-						return {
-							results: usageRollups
-								.filter((row) => row.user_id === params[0])
-								.sort(
-									(left, right) =>
-										right.month.localeCompare(left.month) ||
-										left.metric.localeCompare(right.metric),
-								) as Array<T>,
-						}
-					}
-					return { results: [] as Array<T> }
-				},
-				async run() {
-					throw new Error(`Unsupported run query: ${query}`)
-				},
-			})
-			return {
-				...createStatement([]),
-				bind(...params: Array<unknown>) {
-					return createStatement(params)
-				},
-			}
-		},
-	} as unknown as D1Database
-
+	const subject = input.users[0]?.stable_user_id ?? 'missing-stable-user'
+	const db = Object.assign(database.forUser(subject).reader, {
+		[Symbol.asyncDispose]: database[Symbol.asyncDispose],
+	}) as unknown as D1Database & AsyncDisposable
 	resourceCountsByDb.set(db, resourceCounts)
 	return db
 }
@@ -230,7 +222,7 @@ function usageRow(
 }
 
 test('loadAdminUserUsageData returns null for unknown users and zeroed usage for empty rollups', async () => {
-	const emptyDb = createAdminUserUsageTestDb({ users: [] })
+	await using emptyDb = await createAdminUserUsageTestDb({ users: [] })
 	expect(
 		await loadAdminUserUsageData(
 			withUserMeter({ APP_DB: emptyDb }) as Env,
@@ -241,7 +233,7 @@ test('loadAdminUserUsageData returns null for unknown users and zeroed usage for
 
 	const email = 'empty-usage@example.com'
 	const usageUserId = await createStableUserIdFromEmail(email)
-	const db = createAdminUserUsageTestDb({
+	await using db = await createAdminUserUsageTestDb({
 		users: [
 			{
 				id: 1,
@@ -312,7 +304,7 @@ test('loadAdminUserUsageData returns null for unknown users and zeroed usage for
 test('loadAdminUserUsageData estimates Dynamic Worker cost from unique worker-days', async () => {
 	const email = 'dw-cost@example.com'
 	const usageUserId = await createStableUserIdFromEmail(email)
-	const db = createAdminUserUsageTestDb({
+	await using db = await createAdminUserUsageTestDb({
 		users: [
 			{
 				id: 3,
@@ -355,7 +347,7 @@ test('loadAdminUserUsageData estimates Dynamic Worker cost from unique worker-da
 test('loadAdminUserUsageData compares catalog list MRR to estimated cost', async () => {
 	const email = 'dw-paid@example.com'
 	const usageUserId = await createStableUserIdFromEmail(email)
-	const db = createAdminUserUsageTestDb({
+	await using db = await createAdminUserUsageTestDb({
 		users: [
 			{
 				id: 31,
@@ -398,7 +390,7 @@ test('loadAdminUserUsageData compares catalog list MRR to estimated cost', async
 test('loadAdminUserUsageData converts Durable Object RPC duration to observe-only GB-s', async () => {
 	const email = 'do-duration@example.com'
 	const usageUserId = await createStableUserIdFromEmail(email)
-	const db = createAdminUserUsageTestDb({
+	await using db = await createAdminUserUsageTestDb({
 		users: [
 			{
 				id: 4,
@@ -447,7 +439,7 @@ test('loadAdminUserUsageData converts Durable Object RPC duration to observe-onl
 test('loadAdminUserUsageData warns above eighty percent of plan limits', async () => {
 	const email = 'member-usage@example.com'
 	const usageUserId = await createStableUserIdFromEmail(email)
-	const db = createAdminUserUsageTestDb({
+	await using db = await createAdminUserUsageTestDb({
 		users: [
 			{
 				id: 2,
@@ -506,31 +498,15 @@ test('loadAdminUserUsageData warns above eighty percent of plan limits', async (
 	])
 })
 
-test('loadAdminUserUsageData rejects an invalid stored plan', async () => {
-	const email = 'unknown-plan-email@example.com'
-	const usageUserId = await createStableUserIdFromEmail(email)
-	const db = createAdminUserUsageTestDb({
-		users: [
-			{
-				id: 1,
-				username: 'unknownplan',
-				email,
-				plan: 'enterprise-2099',
-				stable_user_id: usageUserId,
-			},
-		],
-		resourceCounts: {
-			[usageUserId]: { stored_email_messages: 12 },
-		},
-	})
-
+test('an unregistered stored plan cannot reach the usage drill-down', async () => {
+	// PostgreSQL enforces the plan CHECK the loader's parse guard used to backstop.
+	await using database = await createTestDb()
 	await expect(
-		loadAdminUserUsageData(
-			withUserMeter({ APP_DB: db }) as Env,
-			usageUserId,
-			new Date('2026-07-05T12:00:00.000Z'),
+		database.pg.query(
+			`INSERT INTO users (username, email, password_hash, plan, stable_user_id)
+			 VALUES ('unknownplan', 'unknown-plan-email@example.com', 'x', 'enterprise-2099', 'stable-unknown')`,
 		),
-	).rejects.toThrow('Stored plan is not a registered plan name.')
+	).rejects.toThrow('violates check constraint')
 })
 
 function createFakeKv() {
@@ -554,7 +530,7 @@ test('loadAdminUserUsageData caches rollup reads in KV and serves repeat loads f
 	const email = 'cached-usage@example.com'
 	const usageUserId = await createStableUserIdFromEmail(email)
 	let rollupQueryCount = 0
-	const db = createAdminUserUsageTestDb({
+	await using db = await createAdminUserUsageTestDb({
 		users: [
 			{
 				id: 1,
@@ -613,7 +589,7 @@ test('loadAdminUserUsageData caches rollup reads in KV and serves repeat loads f
 test('loadAdminUserUsageData keeps current-month and month-over-month rollups on UTC month boundaries', async () => {
 	const email = 'month-boundary@example.com'
 	const usageUserId = await createStableUserIdFromEmail(email)
-	const db = createAdminUserUsageTestDb({
+	await using db = await createAdminUserUsageTestDb({
 		users: [
 			{
 				id: 1,
@@ -663,22 +639,21 @@ test('loadAdminUserUsageData reads daily counts from UserMeter (seeded then warm
 
 	const bootstrapEmail = 'bootstrap-drilldown@example.com'
 	const bootstrapUserId = await createStableUserIdFromEmail(bootstrapEmail)
-	const bootstrapEnv = withUserMeter({
-		APP_DB: createAdminUserUsageTestDb({
-			users: [
-				{
-					id: 3,
-					username: 'bootstrap',
-					email: bootstrapEmail,
-					plan: 'pro',
-					stable_user_id: bootstrapUserId,
-				},
-			],
-			resourceCounts: {
-				[bootstrapUserId]: { secrets: 3 },
+	await using bootstrapDb = await createAdminUserUsageTestDb({
+		users: [
+			{
+				id: 3,
+				username: 'bootstrap',
+				email: bootstrapEmail,
+				plan: 'pro',
+				stable_user_id: bootstrapUserId,
 			},
-		}),
+		],
+		resourceCounts: {
+			[bootstrapUserId]: { secrets: 3 },
+		},
 	})
+	const bootstrapEnv = withUserMeter({ APP_DB: bootstrapDb })
 	await bootstrapEnv.meter.seed({
 		userId: bootstrapUserId,
 		resource: 'email_receives_per_day',
@@ -714,25 +689,24 @@ test('loadAdminUserUsageData reads daily counts from UserMeter (seeded then warm
 
 	const meterEmail = 'meter-drilldown@example.com'
 	const meterUserId = await createStableUserIdFromEmail(meterEmail)
-	const warmEnv = withUserMeter({
-		APP_DB: createAdminUserUsageTestDb({
-			users: [
-				{
-					id: 4,
-					username: 'meter',
-					email: meterEmail,
-					plan: 'pro',
-					stable_user_id: meterUserId,
-				},
-			],
-			resourceCounts: {
-				[meterUserId]: {
-					saved_packages: 6,
-					stored_email_messages: 9,
-				},
+	await using warmDb = await createAdminUserUsageTestDb({
+		users: [
+			{
+				id: 4,
+				username: 'meter',
+				email: meterEmail,
+				plan: 'pro',
+				stable_user_id: meterUserId,
 			},
-		}),
+		],
+		resourceCounts: {
+			[meterUserId]: {
+				saved_packages: 6,
+				stored_email_messages: 9,
+			},
+		},
 	})
+	const warmEnv = withUserMeter({ APP_DB: warmDb })
 	warmEnv.runLog.setActiveWorkflowCount(meterUserId, 2)
 	await warmEnv.meter.seed({
 		userId: meterUserId,

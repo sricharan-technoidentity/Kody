@@ -1,9 +1,0 @@
-{
-  "name": "@kody/mock-cloudflare",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "@kody-internal/shared": "file:../../shared",
-    "remix": "3.0.0-rc.2"
-  }
-}

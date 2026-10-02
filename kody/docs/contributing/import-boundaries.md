@@ -60,7 +60,7 @@ These are not covered by the rule yet:
 
 - `#worker/jobs/*` and `#mcp/jobs-vectorize.ts` / `#mcp/jobs-embed.ts` import
   each other's building blocks. The job vector id and embed-text helpers should
-  move to a neutral module the way `#worker/vectorize/*` did.
+  move to a neutral module the way `#worker/search-index/*` did.
 - Several non-MCP subsystems (`#worker/community/*`, `#worker/email/*`,
   `#worker/webhooks/*`, `#worker/scheduled/*`, and
   `#worker/account/unverified-account-purge.ts`, which wraps

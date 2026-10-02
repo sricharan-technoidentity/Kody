@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { firstPartySecurityHeaders } from './security-headers.ts'
 import { getEnv } from './env.ts'
@@ -8,7 +9,7 @@ import { testOidcSigningEnv } from '#worker/test-support/oidc-signing-env.ts'
 function createEnv(overrides: Record<string, unknown> = {}) {
 	return {
 		COOKIE_SECRET: 'LOCAL_TEST_COOKIE_SECRET_32_CHARS_MINIMUM',
-		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		SECRET_KMS: testSecretKms,
 		...testOidcSigningEnv,
 		APP_DB: {},
 		BUNDLE_ARTIFACTS_KV: {},

@@ -1,3 +1,6 @@
+vi.mock('#worker/temporal/package-workflow.ts', () => ({
+	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
+}))
 import { beforeEach, expect, test, vi } from 'vitest'
 import {
 	type WorkflowProjectionRecord,
@@ -414,7 +417,7 @@ test('cancelWorkflowRunForUser cancels a queued run and is idempotent', async ()
 	const binding = createCancelTestBinding()
 	const env = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 
@@ -481,7 +484,7 @@ test('cancelWorkflowRunForUser enforces user isolation', async () => {
 	const binding = createCancelTestBinding()
 	const env = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 
@@ -519,7 +522,7 @@ test('a cancelled run keeps single-flighting its idempotency key', async () => {
 	const binding = createCancelTestBinding()
 	const env = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 
@@ -573,7 +576,7 @@ test('cancel races with a run that finishes first', async () => {
 	const completeRaceBinding = createCancelTestBinding()
 	const completeEnv = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: completeRaceBinding.workflow,
+		TEMPORAL: completeRaceBinding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 	const completeCreated = await createDynamicCallableWorkflow({
@@ -619,7 +622,7 @@ test('cancel races with a run that finishes first', async () => {
 	const runningRaceBinding = createCancelTestBinding()
 	const runningEnv = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: runningRaceBinding.workflow,
+		TEMPORAL: runningRaceBinding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 	const runningCreated = await createDynamicCallableWorkflow({
@@ -661,7 +664,7 @@ test('cancel projection loses to a concurrent complete write', async () => {
 	const binding = createCancelTestBinding()
 	const env = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -724,7 +727,7 @@ test('cancelling a run whose engine instance is missing still projects cancelled
 	const runId = 'dynwf-missing-instance'
 	const env = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 	await runRecordMocks.upsertWorkflowProjection({
@@ -770,7 +773,7 @@ test('cancel of a creating projection without an engine instance is retryable', 
 	const runId = 'dynwf-creating-race'
 	const env = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 	await runRecordMocks.upsertWorkflowProjection({
@@ -811,7 +814,7 @@ test('terminal projection stickiness blocks later queued regression after cancel
 	const binding = createCancelTestBinding()
 	const env = {
 		APP_DB: createAppDbStub(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 	const created = await createDynamicCallableWorkflow({

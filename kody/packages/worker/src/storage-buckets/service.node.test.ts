@@ -1,10 +1,9 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { replaceRepoSessionDueOwner } from '#worker/repo/repo-session-due-owners.ts'
 import { type RepoSessionRow } from '#worker/repo/types.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
 import { readRepoSessionStorageBucketCursor } from './repo-session-storage-bucket-cursor.ts'
 import {
@@ -13,80 +12,38 @@ import {
 	listPlatformStorageBuckets,
 	listUserStorageBucketEstimates,
 	listUserStorageBucketIds,
+	maybeRefreshStorageBucketEstimate,
+	recordStorageBucketEstimate,
 	registerMissingRepoSessionStorageBuckets,
 	registerStorageBucket,
 	repoSessionStorageBucketId,
 	storageBucketKindFromStorageId,
 } from './service.ts'
 
-function createCountingDb(input?: { failRun?: boolean }) {
-	let insertCount = 0
-	const rows = new Map<string, { userId: string; storageId: string }>()
-
-	function listRows<T>(userFilter: string | null) {
-		const results = [...rows.values()]
-			.filter((row) => (userFilter ? row.userId === userFilter : true))
-			.sort((left, right) =>
-				`${left.userId}\0${left.storageId}`.localeCompare(
-					`${right.userId}\0${right.storageId}`,
-				),
-			)
-			.map((row) =>
-				userFilter
-					? ({ storageId: row.storageId } as T)
-					: ({
-							userId: row.userId,
-							storageId: row.storageId,
-						} as T),
-			)
-		return { results, meta: { changes: 0 } }
-	}
-
-	const db = {
-		prepare(sql: string) {
-			return {
-				bind(...params: Array<unknown>) {
-					return {
-						async run() {
-							if (sql.includes('INSERT INTO user_storage_buckets')) {
-								insertCount += 1
-								if (input?.failRun) {
-									throw new Error('simulated upsert failure')
-								}
-								const userId = String(params[0])
-								const storageId = String(params[1])
-								rows.set(`${userId}\u0000${storageId}`, { userId, storageId })
-							}
-							return { meta: { changes: 1 } }
-						},
-						async all<T>() {
-							if (!sql.includes('FROM user_storage_buckets')) {
-								return { results: [] as Array<T>, meta: { changes: 0 } }
-							}
-							const userFilter =
-								sql.includes('WHERE user_id = ?') && params[0] != null
-									? String(params[0])
-									: null
-							return listRows<T>(userFilter)
-						},
-					}
-				},
-				async all<T>() {
-					if (!sql.includes('FROM user_storage_buckets')) {
-						return { results: [] as Array<T>, meta: { changes: 0 } }
-					}
-					return listRows<T>(null)
-				},
-			}
-		},
-	} as unknown as D1Database
+/** Owner writers per user plus the operator (`kody_admin`) the sweeps list with. */
+async function createStorageBucketsDb() {
+	const database = await createTestDb()
+	const admin = createPgDatabase({
+		connection: database.pg,
+		role: 'kody_admin',
+	})
+	const envFor = (userId: string) =>
+		({ APP_DB: database.forUser(userId).db }) as unknown as Env
 	return {
-		db,
-		env: { APP_DB: db } as Env,
-		get insertCount() {
-			return insertCount
+		database,
+		admin: admin as unknown as D1Database,
+		envFor,
+		operatorEnv: {
+			APP_DB: admin,
+			APP_DB_FOR_USER: (userId: string) => database.forUser(userId).db,
+		} as unknown as Env,
+		[Symbol.asyncDispose]: () => database[Symbol.asyncDispose](),
+		async count() {
+			const { rows } = await database.pg.query<{ count: number }>(
+				'SELECT COUNT(*)::int AS count FROM user_storage_buckets',
+			)
+			return rows[0]!.count
 		},
-		rows,
 	}
 }
 
@@ -105,10 +62,13 @@ test('storage bucket registration soft-fails, dedupes, and lists by user', async
 			storageId: 'bucket-a',
 		}),
 	).not.toThrow()
-	const failing = createCountingDb({ failRun: true })
+	await using buckets = await createStorageBucketsDb()
 	expect(() =>
 		registerStorageBucket({
-			env: failing.env,
+			// A read-only connection rejects the upsert.
+			env: {
+				APP_DB: buckets.database.forUser('user-a').reader,
+			} as unknown as Env,
 			userId: 'user-a',
 			storageId: 'bucket-a',
 			kind: 'execute',
@@ -121,14 +81,13 @@ test('storage bucket registration soft-fails, dedupes, and lists by user', async
 	)
 
 	clearStorageBucketRegistrationDedupeForTests()
-	const counting = createCountingDb()
 	const pending: Array<Promise<unknown>> = []
 	const waitUntil = (promise: Promise<unknown>) => {
 		pending.push(promise)
 	}
 	for (let index = 0; index < 5; index += 1) {
 		registerStorageBucket({
-			env: counting.env,
+			env: buckets.envFor('user-a'),
 			userId: 'user-a',
 			storageId: 'exec:same',
 			kind: 'execute',
@@ -136,28 +95,41 @@ test('storage bucket registration soft-fails, dedupes, and lists by user', async
 		})
 	}
 	registerStorageBucket({
-		env: counting.env,
+		env: buckets.envFor('user-a'),
 		userId: 'user-a',
 		storageId: 'bucket-a',
 		waitUntil,
 	})
 	registerStorageBucket({
-		env: counting.env,
+		env: buckets.envFor('user-b'),
 		userId: 'user-b',
 		storageId: 'bucket-b',
 		waitUntil,
 	})
 	await Promise.all(pending)
 
-	expect(counting.insertCount).toBe(3)
+	expect(await buckets.count()).toBe(3)
 	await expect(
-		listUserStorageBucketIds({ env: counting.env, userId: 'user-a' }),
+		listUserStorageBucketIds({
+			env: buckets.envFor('user-a'),
+			userId: 'user-a',
+		}),
 	).resolves.toEqual(['bucket-a', 'exec:same'])
+	// RLS: another user's writer sees nothing even when asking for user-a.
 	await expect(
-		listUserStorageBucketIds({ env: counting.env, userId: 'user-b' }),
+		listUserStorageBucketIds({
+			env: buckets.envFor('user-b'),
+			userId: 'user-a',
+		}),
+	).resolves.toEqual([])
+	await expect(
+		listUserStorageBucketIds({
+			env: buckets.envFor('user-b'),
+			userId: 'user-b',
+		}),
 	).resolves.toEqual(['bucket-b'])
 	await expect(
-		listPlatformStorageBuckets({ db: counting.db }),
+		listPlatformStorageBuckets({ db: buckets.admin }),
 	).resolves.toEqual([
 		{ userId: 'user-a', storageId: 'bucket-a' },
 		{ userId: 'user-a', storageId: 'exec:same' },
@@ -189,15 +161,17 @@ function catalogSessionRow(
 }
 
 test('index-backed storage-bucket reconcile pages owners with a persisted cursor', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	const db = createD1FromSqlite(sqlite)
-	const indexEnv = createInMemoryRepoSessionIndexEnv(db)
+	await using buckets = await createStorageBucketsDb()
+	const db = buckets.admin
+	const indexEnv = {
+		...buckets.operatorEnv,
+		...createInMemoryRepoSessionIndexEnv(db),
+	}
 	const now = new Date('2026-06-24T20:00:00.000Z')
 	const users = ['user-a', 'user-b', 'user-c'] as const
 	for (const userId of users) {
 		await replaceRepoSessionDueOwner({
-			db,
+			db: buckets.envFor(userId).APP_DB,
 			userId,
 			dueAt: '2099-01-01T00:00:00.000Z',
 			now,
@@ -236,7 +210,7 @@ test('index-backed storage-bucket reconcile pages owners with a persisted cursor
 	expect(await readRepoSessionStorageBucketCursor(db)).toBe('user-a')
 	await expect(
 		listUserStorageBucketEstimates({
-			env: { APP_DB: db } as Env,
+			env: buckets.envFor('user-a'),
 			userId: 'user-a',
 		}),
 	).resolves.toEqual([
@@ -248,7 +222,7 @@ test('index-backed storage-bucket reconcile pages owners with a persisted cursor
 	])
 	await expect(
 		listUserStorageBucketEstimates({
-			env: { APP_DB: db } as Env,
+			env: buckets.envFor('user-b'),
 			userId: 'user-b',
 		}),
 	).resolves.toEqual([
@@ -260,7 +234,7 @@ test('index-backed storage-bucket reconcile pages owners with a persisted cursor
 	])
 	await expect(
 		listUserStorageBucketEstimates({
-			env: { APP_DB: db } as Env,
+			env: buckets.envFor('user-c'),
 			userId: 'user-c',
 		}),
 	).resolves.toEqual([])
@@ -275,7 +249,7 @@ test('index-backed storage-bucket reconcile pages owners with a persisted cursor
 	expect(await readRepoSessionStorageBucketCursor(db)).toBe('user-c')
 	await expect(
 		listUserStorageBucketEstimates({
-			env: { APP_DB: db } as Env,
+			env: buckets.envFor('user-c'),
 			userId: 'user-c',
 		}),
 	).resolves.toEqual([
@@ -303,4 +277,103 @@ test('index-backed storage-bucket reconcile pages owners with a persisted cursor
 	})
 	expect(steady).toBe(0)
 	expect(await readRepoSessionStorageBucketCursor(db)).toBe('user-b')
+})
+
+test('inventory CHECK, repo-session exclusion, UPDATE-only estimates and the refresh throttle', async () => {
+	consoleWarn.mockImplementation(() => {})
+	clearStorageBucketRegistrationDedupeForTests()
+	await using buckets = await createStorageBucketsDb()
+	const userId = 'usb-estimate'
+	const env = buckets.envFor(userId)
+	await expect(
+		env.APP_DB.prepare(
+			`INSERT INTO user_storage_buckets (
+				user_id, storage_id, kind, created_at, last_seen_at
+			) VALUES (?, 'service:retired', 'service', 'now', 'now')`,
+		)
+			.bind(userId)
+			.run(),
+	).rejects.toThrow(/check constraint/i)
+
+	const pending: Array<Promise<unknown>> = []
+	const waitUntil = (promise: Promise<unknown>) => {
+		pending.push(promise)
+	}
+	registerStorageBucket({
+		env,
+		userId,
+		storageId: 'exec:registered',
+		kind: 'execute',
+		waitUntil,
+	})
+	registerStorageBucket({
+		env,
+		userId,
+		storageId: repoSessionStorageBucketId('session-1'),
+		kind: 'repo_session',
+		waitUntil,
+	})
+	await Promise.all(pending)
+	await expect(listUserStorageBucketIds({ env, userId })).resolves.toEqual([
+		'exec:registered',
+	])
+	expect(await listPlatformStorageBuckets({ db: buckets.admin })).toEqual([
+		{ userId, storageId: 'exec:registered' },
+	])
+
+	recordStorageBucketEstimate({
+		env,
+		userId,
+		storageId: 'exec:registered',
+		estimatedBytes: 4096,
+		waitUntil,
+	})
+	// UPDATE-only: an estimate never creates an ownership row.
+	recordStorageBucketEstimate({
+		env,
+		userId,
+		storageId: 'exec:unregistered',
+		estimatedBytes: 123,
+		waitUntil,
+	})
+	await Promise.all(pending)
+	await expect(
+		listUserStorageBucketEstimates({ env, userId }),
+	).resolves.toEqual([
+		{ storageId: 'exec:registered', kind: 'execute', estimatedBytes: 4096 },
+		{
+			storageId: repoSessionStorageBucketId('session-1'),
+			kind: 'repo_session',
+			estimatedBytes: null,
+		},
+	])
+
+	let reads = 0
+	const readEstimatedBytes = async () => {
+		reads += 1
+		if (reads === 1) throw new Error('simulated estimate read failure')
+		return 8192
+	}
+	const refresh = () =>
+		maybeRefreshStorageBucketEstimate({
+			env,
+			userId,
+			storageId: 'exec:registered',
+			readEstimatedBytes,
+			waitUntil,
+		})
+	refresh()
+	await Promise.all(pending)
+	expect(consoleWarn).toHaveBeenCalledWith(
+		'storage-bucket-estimate-refresh-failed',
+		expect.any(Error),
+	)
+	// A failed attempt does not consume the window; a success does.
+	refresh()
+	refresh()
+	await Promise.all(pending)
+	expect(reads).toBe(2)
+	expect(
+		(await listUserStorageBucketEstimates({ env, userId }))[0]?.estimatedBytes,
+	).toBe(8192)
 })

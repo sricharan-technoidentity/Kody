@@ -22,10 +22,11 @@
 			"inputs": [
 				"default",
 				"^default",
-				{ "env": "CI" },
+				{
+					"env": "CI"
+				},
 				"{workspaceRoot}/vitest*.ts",
 				"{workspaceRoot}/tools/**/*",
-				"{workspaceRoot}/packages/mock-servers/cloudflare/**/*",
 				"{workspaceRoot}/skills-lock.json",
 				"{workspaceRoot}/.agents/skills/ship-pr/**/*"
 			]
@@ -35,23 +36,13 @@
 			"inputs": [
 				"default",
 				"^default",
-				{ "env": "CI" },
+				{
+					"env": "CI"
+				},
 				"{workspaceRoot}/vitest*.ts",
 				"{workspaceRoot}/tools/**/*",
-				"{workspaceRoot}/packages/mock-servers/cloudflare/**/*",
 				"{workspaceRoot}/skills-lock.json",
 				"{workspaceRoot}/.agents/skills/ship-pr/**/*"
-			]
-		},
-		"test-workers": {
-			"cache": true,
-			"inputs": [
-				"default",
-				"^default",
-				{ "env": "CI" },
-				"{workspaceRoot}/vitest*.ts",
-				"{workspaceRoot}/tools/**/*",
-				"{workspaceRoot}/packages/mock-servers/cloudflare/**/*"
 			]
 		},
 		"test-mcp": {
@@ -59,7 +50,9 @@
 			"inputs": [
 				"default",
 				"^default",
-				{ "env": "CI" },
+				{
+					"env": "CI"
+				},
 				"{workspaceRoot}/vitest*.ts",
 				"{workspaceRoot}/tools/**/*",
 				"{workspaceRoot}/wrangler-env.ts"
@@ -74,7 +67,9 @@
 		"test-e2e": {
 			"cache": true,
 			"inputs": [
-				{ "env": "CI" },
+				{
+					"env": "CI"
+				},
 				"{workspaceRoot}/e2e/**/*",
 				"{workspaceRoot}/playwright.config.ts",
 				"default"

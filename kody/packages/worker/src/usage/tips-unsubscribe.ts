@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	base64UrlToBytes,
 	bytesToBase64Url,
@@ -104,7 +105,7 @@ export async function mintTipsUnsubscribeUrl(input: {
 }
 
 export async function isTipsEmailsOptedOut(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }) {
 	const row = await input.db
@@ -119,7 +120,7 @@ export async function isTipsEmailsOptedOut(input: {
 }
 
 export async function optOutTipsEmails(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	now?: Date
 }): Promise<{ optedOut: boolean; alreadyOptedOut: boolean }> {
@@ -146,8 +147,9 @@ export async function optOutTipsEmails(input: {
 	}
 	const updated = await input.db
 		.prepare(
-			`INSERT OR IGNORE INTO user_tips_email_opt_outs (user_id, opted_out_at)
-			 VALUES (?, ?)`,
+			`INSERT INTO user_tips_email_opt_outs (user_id, opted_out_at)
+			 VALUES (?, ?)
+			 ON CONFLICT DO NOTHING`,
 		)
 		.bind(input.userId, nowIso)
 		.run()

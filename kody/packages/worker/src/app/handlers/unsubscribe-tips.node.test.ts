@@ -1,8 +1,6 @@
 import { expect, test, vi } from 'vitest'
-import { DatabaseSync } from 'node:sqlite'
 import { createRouter } from 'remix/router'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testCookieSecret } from '#worker/test-support/auth-provider-harness.ts'
 import { createUnsubscribeTipsHandler } from '#app/handlers/unsubscribe-tips.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
@@ -19,33 +17,31 @@ vi.mock('#app/ssr-render.tsx', () => ({
 	),
 }))
 
-function createDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../../migrations/', import.meta.url))
-	return createD1FromSqlite(sqlite)
+type TestDb = Awaited<ReturnType<typeof createTestDb>>
+
+async function insertUser(store: TestDb, userId: string) {
+	await store.pg.query(
+		`INSERT INTO users (username, email, password_hash, stable_user_id, plan, account_type)
+		 VALUES ($1, $2, 'x', $1, 'free', 'person')`,
+		[userId, `${userId}@example.com`],
+	)
 }
 
-async function insertUser(db: D1Database, userId = 'user-tips') {
-	await db
-		.prepare(
-			`INSERT INTO users (username, email, password_hash, stable_user_id, plan, account_type)
-			 VALUES ('tips', 'tips@example.com', 'x', ?, 'free', 'person')`,
-		)
-		.bind(userId)
-		.run()
-}
-
-function createEnv(db: D1Database) {
+/** Unsubscribe links are opened signed out: the pre-auth writer plus per-account writers. */
+function createEnv(store: TestDb) {
 	return {
-		APP_DB: db,
+		APP_DB: store.forUser().db,
+		APP_DB_FOR_USER: (userId: string) => store.forUser(userId).db,
 		COOKIE_SECRET: testCookieSecret,
 	} as unknown as Env
 }
 
 test('unsubscribe-tips GET applies opt-out and POST accepts RFC one-click', async () => {
-	const db = createDb()
-	await insertUser(db)
-	const env = createEnv(db)
+	await using store = await createTestDb()
+	await insertUser(store, 'user-tips')
+	await insertUser(store, 'user-one-click')
+	const reader = (userId: string) => store.forUser(userId).reader
+	const env = createEnv(store)
 	const handler = createUnsubscribeTipsHandler(env)
 	const token = await createTipsUnsubscribeToken({
 		env,
@@ -85,7 +81,18 @@ test('unsubscribe-tips GET applies opt-out and POST accepts RFC one-click', asyn
 			},
 		},
 	})
-	expect(await isTipsEmailsOptedOut({ db, userId: 'user-tips' })).toBe(true)
+	expect(
+		await isTipsEmailsOptedOut({
+			db: reader('user-tips'),
+			userId: 'user-tips',
+		}),
+	).toBe(true)
+	expect(
+		await isTipsEmailsOptedOut({
+			db: reader('user-one-click'),
+			userId: 'user-one-click',
+		}),
+	).toBe(false)
 
 	vi.mocked(renderAppPage).mockClear()
 	const again = await handler.handler({
@@ -99,12 +106,9 @@ test('unsubscribe-tips GET applies opt-out and POST accepts RFC one-click', asyn
 		},
 	})
 
-	const otherDb = createDb()
-	await insertUser(otherDb, 'user-one-click')
-	const otherEnv = createEnv(otherDb)
-	const otherHandler = createUnsubscribeTipsHandler(otherEnv)
+	const otherHandler = createUnsubscribeTipsHandler(env)
 	const postToken = await createTipsUnsubscribeToken({
-		env: otherEnv,
+		env,
 		userId: 'user-one-click',
 	})
 	const postUrl = `https://example.com/unsubscribe/tips?token=${encodeURIComponent(postToken)}`
@@ -120,7 +124,10 @@ test('unsubscribe-tips GET applies opt-out and POST accepts RFC one-click', asyn
 	expect(posted.status).toBe(200)
 	expect(await posted.text()).toContain('unsubscribed from Kody tips')
 	expect(
-		await isTipsEmailsOptedOut({ db: otherDb, userId: 'user-one-click' }),
+		await isTipsEmailsOptedOut({
+			db: reader('user-one-click'),
+			userId: 'user-one-click',
+		}),
 	).toBe(true)
 })
 

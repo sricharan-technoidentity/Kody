@@ -136,7 +136,7 @@ export async function listAllArchivedJobArtifactStorageOwnerRows(
 ): Promise<Array<{ userId: string; storageId: string }>> {
 	const { results } = await db
 		.prepare(
-			`SELECT user_id AS userId, storage_id AS storageId
+			`SELECT user_id AS "userId", storage_id AS "storageId"
 			FROM archived_job_artifacts WHERE storage_id IS NOT NULL`,
 		)
 		.all<{ userId: string; storageId: string }>()

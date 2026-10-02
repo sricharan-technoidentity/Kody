@@ -1,22 +1,29 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createTestDb as createPgTestDb } from '#worker/test-support/aws/test-db.ts'
+import {
+	pgQuery,
+	seedSavedPackage,
+} from '#worker/test-support/aws/user-test-env.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import {
 	listPopularAgentPackagesForUser,
 	recordAgentPackageConversationUse,
 	recordAgentPackageConversationUses,
 } from './agent-package-conversation-uses.ts'
 
-function createTestDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+/** user-a's RLS writer; `q` reads raw rows as superuser. */
+async function createTestDb() {
+	const database = await createPgTestDb({ userId: 'user-a' })
+	return {
+		db: database.db as unknown as D1Database,
+		pg: database.pg,
+		q: pgQuery(database.pg),
+		[Symbol.asyncDispose]: () => database[Symbol.asyncDispose](),
+	}
 }
 
-function seedPackage(
-	sqlite: DatabaseSync,
+async function seedPackage(
+	pg: Awaited<ReturnType<typeof createTestDb>>['pg'],
 	input: {
 		id: string
 		userId: string
@@ -25,25 +32,17 @@ function seedPackage(
 		name?: string
 	},
 ) {
-	sqlite
-		.prepare(
-			`INSERT INTO saved_packages (
-				id, user_id, name, kody_id, description, source_id
-			) VALUES (?, ?, ?, ?, ?, ?)`,
-		)
-		.run(
-			input.id,
-			input.userId,
-			input.name ?? input.kodyId,
-			input.kodyId,
-			input.description,
-			`source-${input.id}`,
-		)
+	await seedSavedPackage(pg, input)
+	await pg.query('UPDATE saved_packages SET description = $1 WHERE id = $2', [
+		input.description,
+		input.id,
+	])
 }
 
 test('recordAgentPackageConversationUse upserts idempotently per conversation', async () => {
-	const { sqlite, db } = createTestDb()
-	seedPackage(sqlite, {
+	await using harness = await createTestDb()
+	const { db, q } = harness
+	await seedPackage(harness.pg, {
 		id: 'pkg-1',
 		userId: 'user-a',
 		kodyId: 'mail',
@@ -69,12 +68,10 @@ test('recordAgentPackageConversationUse upserts idempotently per conversation', 
 		},
 	)
 
-	const rows = sqlite
-		.prepare(
-			`SELECT user_id, package_id, conversation_id, first_used_at, last_used_at
+	const rows = (await q.all(
+		`SELECT user_id, package_id, conversation_id, first_used_at, last_used_at
 			FROM agent_package_conversation_uses`,
-		)
-		.all() as Array<{
+	)) as Array<{
 		user_id: string
 		package_id: string
 		conversation_id: string
@@ -95,7 +92,10 @@ test('recordAgentPackageConversationUse upserts idempotently per conversation', 
 
 test('agent package popularity ranking fails open and ranks within last N conversations', async () => {
 	consoleWarn.mockImplementation(() => {})
-	const missingTableDb = createD1FromSqlite(new DatabaseSync(':memory:'))
+	// A failing database (here: a read on a closed PGlite) fails open.
+	const closed = await createTestDb()
+	await closed[Symbol.asyncDispose]()
+	const missingTableDb = closed.db
 	await expect(
 		listPopularAgentPackagesForUser(missingTableDb, { userId: 'user-a' }),
 	).resolves.toEqual([])
@@ -114,20 +114,21 @@ test('agent package popularity ranking fails open and ranks within last N conver
 		),
 	).resolves.toBeUndefined()
 
-	const { sqlite, db } = createTestDb()
-	seedPackage(sqlite, {
+	await using harness = await createTestDb()
+	const { db, q } = harness
+	await seedPackage(harness.pg, {
 		id: 'pkg-a',
 		userId: 'user-a',
 		kodyId: 'alpha',
 		description: 'Alpha pack',
 	})
-	seedPackage(sqlite, {
+	await seedPackage(harness.pg, {
 		id: 'pkg-b',
 		userId: 'user-a',
 		kodyId: 'bravo',
 		description: 'Bravo pack',
 	})
-	seedPackage(sqlite, {
+	await seedPackage(harness.pg, {
 		id: 'pkg-c',
 		userId: 'user-a',
 		kodyId: 'charlie',
@@ -204,14 +205,15 @@ test('agent package popularity ranking fails open and ranks within last N conver
 })
 
 test('listPopularAgentPackagesForUser ignores max-age conversations and stale package rows inside recent ones', async () => {
-	const { sqlite, db } = createTestDb()
-	seedPackage(sqlite, {
+	await using harness = await createTestDb()
+	const { db, q } = harness
+	await seedPackage(harness.pg, {
 		id: 'pkg-a',
 		userId: 'user-a',
 		kodyId: 'alpha',
 		description: 'Alpha pack',
 	})
-	seedPackage(sqlite, {
+	await seedPackage(harness.pg, {
 		id: 'pkg-old',
 		userId: 'user-a',
 		kodyId: 'stale',

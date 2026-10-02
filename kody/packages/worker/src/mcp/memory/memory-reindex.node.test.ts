@@ -13,7 +13,7 @@ const mockModule = vi.hoisted(() => ({
 	listMemoriesPage: vi.fn(),
 }))
 
-vi.mock('#worker/vectorize/embedding.ts', () => ({
+vi.mock('#worker/search-index/embedding.ts', () => ({
 	embedTextForVectorize: (...args: Array<unknown>) =>
 		mockModule.embedTextForVectorize(...args),
 	embedTextsForVectorize: (...args: Array<unknown>) =>

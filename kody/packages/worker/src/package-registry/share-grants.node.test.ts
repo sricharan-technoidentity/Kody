@@ -1,11 +1,14 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { insertSavedPackage } from '#worker/package-registry/repo.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import {
+	getSavedPackageById,
+	insertSavedPackage,
+} from '#worker/package-registry/repo.ts'
 import { insertEntitySource } from '#worker/repo/entity-sources.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	acceptPackageShare,
+	findSharePeer,
 	acknowledgePackageShareUpdate,
 	assertPackageShareUseAllowed,
 	attachPendingPackageShareInvitesForEmail,
@@ -31,14 +34,33 @@ import {
 	enablePackageShareGrantsForTests,
 } from './share-flag.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
 const ownerUserId = 'aa'.repeat(32)
 const guestUserId = 'bb'.repeat(32)
 const freeUserId = 'cc'.repeat(32)
 
+/**
+ * One PGlite schema. Each party acts through its own scoped writer (`as`);
+ * `sql` seeds fixtures as the schema owner and `admin` toggles the flag.
+ */
+async function createShareDb() {
+	const database = await createTestDb()
+	return {
+		...database,
+		as: (userId: string) => database.forUser(userId).db,
+		admin: createPgDatabase({ connection: database.pg, role: 'kody_admin' }),
+		async sql(text: string, ...values: Array<unknown>) {
+			let index = 0
+			await database.pg.query(
+				text.replace(/\?/g, () => `$${++index}`),
+				values,
+			)
+		},
+	}
+}
+type ShareDb = Awaited<ReturnType<typeof createShareDb>>
+
 async function insertUser(
-	db: D1Database,
+	db: ShareDb,
 	input: {
 		username: string
 		email: string
@@ -47,23 +69,19 @@ async function insertUser(
 		emailVerified?: boolean
 	},
 ) {
-	await db
-		.prepare(
-			`INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id, plan)
-			VALUES (?, ?, 'x', ?, ?, ?)`,
-		)
-		.bind(
-			input.username,
-			input.email,
-			input.emailVerified === false ? null : new Date().toISOString(),
-			input.userId,
-			input.plan,
-		)
-		.run()
+	await db.sql(
+		`INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id, plan)
+		VALUES (?, ?, 'x', ?, ?, ?)`,
+		input.username,
+		input.email,
+		input.emailVerified === false ? null : new Date().toISOString(),
+		input.userId,
+		input.plan,
+	)
 }
 
 async function seedPublishedPackage(
-	db: D1Database,
+	db: ShareDb,
 	input: {
 		userId: string
 		name: string
@@ -74,7 +92,7 @@ async function seedPublishedPackage(
 	const id = crypto.randomUUID()
 	const sourceId = `source-${id}`
 	const now = new Date().toISOString()
-	await insertSavedPackage(db, {
+	await insertSavedPackage(db.as(input.userId), {
 		id,
 		user_id: input.userId,
 		name: input.name,
@@ -87,7 +105,7 @@ async function seedPublishedPackage(
 		hidden: 0,
 		is_private: 1,
 	})
-	await insertEntitySource(db, {
+	await insertEntitySource(db.as(input.userId), {
 		id: sourceId,
 		user_id: input.userId,
 		entity_kind: 'package',
@@ -106,10 +124,8 @@ async function seedPublishedPackage(
 }
 
 async function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
-	await enablePackageShareGrantsForTests(db)
+	const db = await createShareDb()
+	await enablePackageShareGrantsForTests(db.admin)
 	await insertUser(db, {
 		username: 'alice',
 		email: 'alice@example.com',
@@ -133,10 +149,10 @@ async function createHarness() {
 		name: '@alice/shared-notes',
 		kodyId: 'shared-notes',
 	})
-	return { db, ...seeded }
+	return Object.assign(db, seeded)
 }
 
-function countingDb(db: D1Database) {
+function countingDb(db: D1Database | ReturnType<ShareDb['as']>) {
 	const statements: Array<string> = []
 	const reads = { inFlight: 0, maxInFlight: 0 }
 	const counted = new Proxy(db, {
@@ -171,13 +187,14 @@ function countingDb(db: D1Database) {
 }
 
 test('execute storage grant checks skip empty sets and verify ownership concurrently', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const second = await seedPublishedPackage(db, {
 		userId: ownerUserId,
 		name: '@alice/second',
 		kodyId: 'second',
 	})
-	const counting = countingDb(db)
+	const counting = countingDb(db.as(ownerUserId))
 
 	await expect(
 		collectShareStorageOwners({
@@ -199,9 +216,7 @@ test('execute storage grant checks skip empty sets and verify ownership concurre
 })
 
 test('invite fails closed when package-share-grants is off', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
+	await using db = await createShareDb()
 	await insertUser(db, {
 		username: 'alice',
 		email: 'alice@example.com',
@@ -215,7 +230,7 @@ test('invite fails closed when package-share-grants is off', async () => {
 	})
 	await expect(
 		invitePackageShare({
-			db,
+			db: db.as(ownerUserId),
 			owner: {
 				userId: ownerUserId,
 				email: 'alice@example.com',
@@ -229,7 +244,8 @@ test('invite fails closed when package-share-grants is off', async () => {
 })
 
 test('turning package-share-grants off cuts accepted runtime access', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const owner = {
 		userId: ownerUserId,
 		email: 'alice@example.com',
@@ -243,17 +259,21 @@ test('turning package-share-grants off cuts accepted runtime access', async () =
 		username: 'jesse',
 	}
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner,
 		packageId,
 		invitee: { username: 'jesse' },
 	})
-	await acceptPackageShare({ db, guest, grantId: invited.id })
-	await disablePackageShareGrantsForTests(db)
+	await acceptPackageShare({
+		db: db.as(guestUserId),
+		guest,
+		grantId: invited.id,
+	})
+	await disablePackageShareGrantsForTests(db.admin)
 
 	await expect(
 		resolveShareGrantedPackageImport({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			granteeEmail: guest.email,
 			packageName: '@alice/shared-notes',
@@ -261,7 +281,7 @@ test('turning package-share-grants off cuts accepted runtime access', async () =
 	).resolves.toBeNull()
 	await expect(
 		authorizeSharedPackagePermission({
-			db,
+			db: db.as(guestUserId),
 			packageId,
 			granteeUserId: guestUserId,
 			granteeEmail: guest.email,
@@ -270,30 +290,30 @@ test('turning package-share-grants off cuts accepted runtime access', async () =
 	).resolves.toBeNull()
 	await expect(
 		listAcceptedInboundSharedPackages({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 		}),
 	).resolves.toEqual([])
 	await expect(
 		collectShareStorageOwners({
-			db,
+			db: db.as(guestUserId),
 			callerUserId: guestUserId,
 			packageIds: [packageId],
 		}),
 	).resolves.toEqual(new Map())
 	await expect(
-		listInboundPackageShareGrants(db, {
+		listInboundPackageShareGrants(db.as(guestUserId), {
 			userId: guestUserId,
 			email: guest.email,
 			emailVerified: true,
 		}),
 	).resolves.toEqual([])
 	await expect(
-		listOutboundPackageShareGrants(db, ownerUserId),
+		listOutboundPackageShareGrants(db.as(ownerUserId), ownerUserId),
 	).resolves.toEqual([])
 	await expect(
 		invitePackageShare({
-			db,
+			db: db.as(ownerUserId),
 			owner,
 			packageId,
 			invitee: { username: 'freeuser' },
@@ -302,7 +322,8 @@ test('turning package-share-grants off cuts accepted runtime access', async () =
 })
 
 test('invite, accept, revoke, and leave follow paid and accept-required rules', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const owner = {
 		userId: ownerUserId,
 		email: 'alice@example.com',
@@ -318,7 +339,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 
 	await expect(
 		invitePackageShare({
-			db,
+			db: db.as(freeUserId),
 			owner: { ...owner, userId: freeUserId, email: 'free@example.com' },
 			packageId,
 			invitee: { username: 'jesse' },
@@ -326,7 +347,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 	).rejects.toBeInstanceOf(PackageSharePaidRequiredError)
 
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner,
 		packageId,
 		invitee: { username: 'jesse' },
@@ -338,7 +359,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 
 	await expect(
 		invitePackageShare({
-			db,
+			db: db.as(ownerUserId),
 			owner,
 			packageId,
 			invitee: { email: 'jesse@example.com' },
@@ -347,7 +368,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 
 	await expect(
 		resolveShareGrantedPackageImport({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			granteeEmail: guest.email,
 			packageName: '@alice/shared-notes',
@@ -355,7 +376,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 	).resolves.toBeNull()
 
 	const accepted = await acceptPackageShare({
-		db,
+		db: db.as(guestUserId),
 		guest,
 		grantId: invited.id,
 	})
@@ -364,7 +385,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 	expect(accepted.acceptedPublishedCommit).toBe('commit-1')
 
 	const resolved = await resolveShareGrantedPackageImport({
-		db,
+		db: db.as(guestUserId),
 		granteeUserId: guestUserId,
 		granteeEmail: guest.email,
 		packageName: '@alice/shared-notes',
@@ -374,27 +395,27 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 
 	expect(
 		await isShareGrantedForeignPackage({
-			db,
+			db: db.as(guestUserId),
 			callerUserId: guestUserId,
 			packageId,
 		}),
 	).toBe(true)
 	expect(
 		await resolvePackageStorageOwnerUserId({
-			db,
+			db: db.as(guestUserId),
 			callerUserId: guestUserId,
 			packageId,
 		}),
 	).toBe(ownerUserId)
 	const shareOwners = await collectShareStorageOwners({
-		db,
+		db: db.as(guestUserId),
 		callerUserId: guestUserId,
 		packageIds: [packageId],
 	})
 	expect(shareOwners.get(packageId)).toBe(ownerUserId)
 	expect(
 		await retainAuthorizedPackageStorageGrantIds({
-			db,
+			db: db.as(guestUserId),
 			callerUserId: guestUserId,
 			packageIds: [packageId],
 			storageOwnerByPackageId: shareOwners,
@@ -402,7 +423,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 	).toEqual(new Set([packageId]))
 	expect(
 		await retainAuthorizedPackageStorageGrantIds({
-			db,
+			db: db.as(guestUserId),
 			callerUserId: guestUserId,
 			packageIds: [packageId],
 			storageOwnerByPackageId: new Map(),
@@ -410,7 +431,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 	).toEqual(new Set())
 
 	const sourceRead = await authorizeSharedPackagePermission({
-		db,
+		db: db.as(guestUserId),
 		packageId,
 		granteeUserId: guestUserId,
 		granteeEmail: guest.email,
@@ -419,7 +440,7 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 	expect(sourceRead?.savedPackage.id).toBe(packageId)
 	await expect(
 		authorizeSharedPackagePermission({
-			db,
+			db: db.as(guestUserId),
 			packageId,
 			granteeUserId: guestUserId,
 			granteeEmail: guest.email,
@@ -428,14 +449,14 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 	).resolves.toBeNull()
 
 	const revoked = await revokePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		ownerUserId,
 		grantId: invited.id,
 	})
 	expect(revoked.status).toBe('revoked')
 	await expect(
 		resolveShareGrantedPackageImport({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			granteeEmail: guest.email,
 			packageName: '@alice/shared-notes',
@@ -443,14 +464,18 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 	).resolves.toBeNull()
 
 	const reinvited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner,
 		packageId,
 		invitee: { username: 'jesse' },
 	})
-	await acceptPackageShare({ db, guest, grantId: reinvited.id })
+	await acceptPackageShare({
+		db: db.as(guestUserId),
+		guest,
+		grantId: reinvited.id,
+	})
 	const left = await leavePackageShare({
-		db,
+		db: db.as(guestUserId),
 		granteeUserId: guestUserId,
 		grantId: reinvited.id,
 	})
@@ -458,7 +483,8 @@ test('invite, accept, revoke, and leave follow paid and accept-required rules', 
 })
 
 test('pin fails closed when the owner publishes ahead; follow does not', async () => {
-	const { db, packageId, sourceId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId, sourceId } = db
 	const owner = {
 		userId: ownerUserId,
 		email: 'alice@example.com',
@@ -472,25 +498,26 @@ test('pin fails closed when the owner publishes ahead; follow does not', async (
 		username: 'jesse',
 	}
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner,
 		packageId,
 		invitee: { username: 'jesse' },
 	})
 	await acceptPackageShare({
-		db,
+		db: db.as(guestUserId),
 		guest,
 		grantId: invited.id,
 		trustLevel: 'pin',
 	})
-	await db
-		.prepare(`UPDATE entity_sources SET published_commit = ? WHERE id = ?`)
-		.bind('commit-2', sourceId)
-		.run()
+	await db.sql(
+		`UPDATE entity_sources SET published_commit = ? WHERE id = ?`,
+		'commit-2',
+		sourceId,
+	)
 
 	await expect(
 		resolveShareGrantedPackageImport({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			granteeEmail: guest.email,
 			packageName: '@alice/shared-notes',
@@ -499,7 +526,7 @@ test('pin fails closed when the owner publishes ahead; follow does not', async (
 
 	await expect(
 		acknowledgePackageShareUpdate({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			grantId: invited.id,
 		}),
@@ -508,7 +535,7 @@ test('pin fails closed when the owner publishes ahead; follow does not', async (
 	})
 	await expect(
 		acknowledgePackageShareUpdate({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			grantId: invited.id,
 			expectedPublishedCommit: 'commit-stale',
@@ -519,7 +546,7 @@ test('pin fails closed when the owner publishes ahead; follow does not', async (
 	})
 
 	const acknowledged = await acknowledgePackageShareUpdate({
-		db,
+		db: db.as(guestUserId),
 		granteeUserId: guestUserId,
 		grantId: invited.id,
 		expectedPublishedCommit: 'commit-2',
@@ -527,7 +554,7 @@ test('pin fails closed when the owner publishes ahead; follow does not', async (
 	expect(acknowledged.acceptedPublishedCommit).toBe('commit-2')
 	await expect(
 		resolveShareGrantedPackageImport({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			granteeEmail: guest.email,
 			packageName: '@alice/shared-notes',
@@ -535,18 +562,19 @@ test('pin fails closed when the owner publishes ahead; follow does not', async (
 	).resolves.toMatchObject({ sourceOwnerUserId: ownerUserId })
 
 	await acknowledgePackageShareUpdate({
-		db,
+		db: db.as(guestUserId),
 		granteeUserId: guestUserId,
 		grantId: invited.id,
 		switchToFollow: true,
 	})
-	await db
-		.prepare(`UPDATE entity_sources SET published_commit = ? WHERE id = ?`)
-		.bind('commit-3', sourceId)
-		.run()
+	await db.sql(
+		`UPDATE entity_sources SET published_commit = ? WHERE id = ?`,
+		'commit-3',
+		sourceId,
+	)
 	await expect(
 		resolveShareGrantedPackageImport({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			granteeEmail: guest.email,
 			packageName: '@alice/shared-notes',
@@ -555,9 +583,10 @@ test('pin fails closed when the owner publishes ahead; follow does not', async (
 })
 
 test('invite-before-signup attaches on account create without auto-accept', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -570,18 +599,19 @@ test('invite-before-signup attaches on account create without auto-accept', asyn
 	expect(invited.status).toBe('pending')
 	expect(invited.granteeUserId).toBeNull()
 
-	await db
-		.prepare(`UPDATE users SET email = ? WHERE stable_user_id = ?`)
-		.bind('newguest@example.com', guestUserId)
-		.run()
+	await db.sql(
+		`UPDATE users SET email = ? WHERE stable_user_id = ?`,
+		'newguest@example.com',
+		guestUserId,
+	)
 	const attached = await attachPendingPackageShareInvitesForEmail({
-		db,
+		db: db.as(guestUserId),
 		userId: guestUserId,
 		email: 'newguest@example.com',
 		username: 'jesse',
 	})
 	expect(attached.attached).toBe(1)
-	const inbound = await listInboundPackageShareGrants(db, {
+	const inbound = await listInboundPackageShareGrants(db.as(guestUserId), {
 		userId: guestUserId,
 		email: 'newguest@example.com',
 	})
@@ -589,7 +619,7 @@ test('invite-before-signup attaches on account create without auto-accept', asyn
 	expect(inbound[0]?.granteeUserId).toBe(guestUserId)
 	await expect(
 		resolveShareGrantedPackageImport({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 			packageName: '@alice/shared-notes',
 		}),
@@ -597,9 +627,10 @@ test('invite-before-signup attaches on account create without auto-accept', asyn
 })
 
 test('both sides must stay paid to use a shared package', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -610,7 +641,7 @@ test('both sides must stay paid to use a shared package', async () => {
 		invitee: { username: 'jesse' },
 	})
 	const accepted = await acceptPackageShare({
-		db,
+		db: db.as(guestUserId),
 		guest: {
 			userId: guestUserId,
 			email: 'jesse@example.com',
@@ -619,13 +650,13 @@ test('both sides must stay paid to use a shared package', async () => {
 		},
 		grantId: invited.id,
 	})
-	await db
-		.prepare(`UPDATE users SET plan = 'free' WHERE stable_user_id = ?`)
-		.bind(guestUserId)
-		.run()
+	await db.sql(
+		`UPDATE users SET plan = 'free' WHERE stable_user_id = ?`,
+		guestUserId,
+	)
 	await expect(
 		assertPackageShareUseAllowed({
-			db,
+			db: db.as(guestUserId),
 			grant: accepted,
 			savedPackage: {
 				id: packageId,
@@ -649,9 +680,10 @@ test('both sides must stay paid to use a shared package', async () => {
 })
 
 test('outbound and inbound lists separate owner and guest views', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -661,10 +693,13 @@ test('outbound and inbound lists separate owner and guest views', async () => {
 		packageId,
 		invitee: { username: 'jesse' },
 	})
-	const outbound = await listOutboundPackageShareGrants(db, ownerUserId)
+	const outbound = await listOutboundPackageShareGrants(
+		db.as(ownerUserId),
+		ownerUserId,
+	)
 	expect(outbound).toHaveLength(1)
 	expect(outbound[0]?.ownerUserId).toBe(ownerUserId)
-	const inbound = await listInboundPackageShareGrants(db, {
+	const inbound = await listInboundPackageShareGrants(db.as(guestUserId), {
 		userId: guestUserId,
 		email: 'jesse@example.com',
 	})
@@ -674,9 +709,10 @@ test('outbound and inbound lists separate owner and guest views', async () => {
 })
 
 test('username invites do not expose the invitee email to the owner', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -687,15 +723,18 @@ test('username invites do not expose the invitee email to the owner', async () =
 		invitee: { username: 'jesse' },
 	})
 	expect(invited.inviteeEmail).toBeNull()
-	const views = await hydratePackageShareGrantViews(db, [invited])
+	const views = await hydratePackageShareGrantViews(db.as(ownerUserId), [
+		invited,
+	])
 	expect(views[0]?.inviteeEmail).toBeNull()
 	expect(views[0]?.inviteeUsername).toBe('jesse')
 })
 
 test('a later owner of an invite email cannot steal a bound grant', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -706,20 +745,22 @@ test('a later owner of an invite email cannot steal a bound grant', async () => 
 		invitee: { email: 'steal@example.com' },
 	})
 	expect(invited.granteeUserId).toBeNull()
-	await db
-		.prepare(`UPDATE users SET email = ? WHERE stable_user_id = ?`)
-		.bind('steal@example.com', guestUserId)
-		.run()
+	await db.sql(
+		`UPDATE users SET email = ? WHERE stable_user_id = ?`,
+		'steal@example.com',
+		guestUserId,
+	)
 	await attachPendingPackageShareInvitesForEmail({
-		db,
+		db: db.as(guestUserId),
 		userId: guestUserId,
 		email: 'steal@example.com',
 		username: 'jesse',
 	})
-	await db
-		.prepare(`UPDATE users SET email = ? WHERE stable_user_id = ?`)
-		.bind('jesse-released@example.com', guestUserId)
-		.run()
+	await db.sql(
+		`UPDATE users SET email = ? WHERE stable_user_id = ?`,
+		'jesse-released@example.com',
+		guestUserId,
+	)
 	const attackerUserId = 'dd'.repeat(32)
 	await insertUser(db, {
 		username: 'attacker',
@@ -727,7 +768,7 @@ test('a later owner of an invite email cannot steal a bound grant', async () => 
 		userId: attackerUserId,
 		plan: 'standard',
 	})
-	const inbound = await listInboundPackageShareGrants(db, {
+	const inbound = await listInboundPackageShareGrants(db.as(attackerUserId), {
 		userId: attackerUserId,
 		email: 'steal@example.com',
 		emailVerified: true,
@@ -735,7 +776,7 @@ test('a later owner of an invite email cannot steal a bound grant', async () => 
 	expect(inbound.some((grant) => grant.id === invited.id)).toBe(false)
 	await expect(
 		acceptPackageShare({
-			db,
+			db: db.as(attackerUserId),
 			guest: {
 				userId: attackerUserId,
 				email: 'steal@example.com',
@@ -744,13 +785,15 @@ test('a later owner of an invite email cannot steal a bound grant', async () => 
 			},
 			grantId: invited.id,
 		}),
-	).rejects.toThrow('not addressed')
+		// RLS hides grants not addressed to the caller, so there is nothing to accept.
+	).rejects.toThrow('No pending package share invitation was found for you.')
 })
 
 test('unverified email does not reveal unbound email invites', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -760,7 +803,7 @@ test('unverified email does not reveal unbound email invites', async () => {
 		packageId,
 		invitee: { email: 'unverified@example.com' },
 	})
-	const inbound = await listInboundPackageShareGrants(db, {
+	const inbound = await listInboundPackageShareGrants(db.as(guestUserId), {
 		userId: guestUserId,
 		email: 'unverified@example.com',
 		emailVerified: false,
@@ -769,9 +812,10 @@ test('unverified email does not reveal unbound email invites', async () => {
 })
 
 test('hydrate skips grants whose saved package is gone', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -781,17 +825,20 @@ test('hydrate skips grants whose saved package is gone', async () => {
 		packageId,
 		invitee: { username: 'jesse' },
 	})
-	await db
-		.prepare(`DELETE FROM saved_packages WHERE id = ?`)
-		.bind(packageId)
-		.run()
-	const outbound = await listOutboundPackageShareGrants(db, ownerUserId)
+	await db.sql(`DELETE FROM saved_packages WHERE id = ?`, packageId)
+	const outbound = await listOutboundPackageShareGrants(
+		db.as(ownerUserId),
+		ownerUserId,
+	)
 	expect(outbound).toHaveLength(1)
-	expect(await hydratePackageShareGrantViews(db, outbound)).toEqual([])
+	expect(
+		await hydratePackageShareGrantViews(db.as(ownerUserId), outbound),
+	).toEqual([])
 })
 
 test('re-inviting an accepted email grant fails with a conflict, not a unique-index 500', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const owner = {
 		userId: ownerUserId,
 		email: 'alice@example.com',
@@ -799,13 +846,13 @@ test('re-inviting an accepted email grant fails with a conflict, not a unique-in
 		username: 'alice',
 	}
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner,
 		packageId,
 		invitee: { email: 'jesse@example.com' },
 	})
 	await acceptPackageShare({
-		db,
+		db: db.as(guestUserId),
 		guest: {
 			userId: guestUserId,
 			email: 'jesse@example.com',
@@ -816,7 +863,7 @@ test('re-inviting an accepted email grant fails with a conflict, not a unique-in
 	})
 	await expect(
 		invitePackageShare({
-			db,
+			db: db.as(ownerUserId),
 			owner,
 			packageId,
 			invitee: { email: 'jesse@example.com' },
@@ -825,7 +872,8 @@ test('re-inviting an accepted email grant fails with a conflict, not a unique-in
 })
 
 test('email invite of an unverified existing account stays unbound', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const unverifiedExistingId = 'ff'.repeat(32)
 	await insertUser(db, {
 		username: 'unverified-existing',
@@ -835,7 +883,7 @@ test('email invite of an unverified existing account stays unbound', async () =>
 		emailVerified: false,
 	})
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -846,15 +894,18 @@ test('email invite of an unverified existing account stays unbound', async () =>
 		invitee: { email: 'unverified-existing@example.com' },
 	})
 	expect(invited.granteeUserId).toBeNull()
-	const inbound = await listInboundPackageShareGrants(db, {
-		userId: unverifiedExistingId,
-		email: 'unverified-existing@example.com',
-		emailVerified: false,
-	})
+	const inbound = await listInboundPackageShareGrants(
+		db.as(unverifiedExistingId),
+		{
+			userId: unverifiedExistingId,
+			email: 'unverified-existing@example.com',
+			emailVerified: false,
+		},
+	)
 	expect(inbound).toHaveLength(0)
 	await expect(
 		acceptPackageShare({
-			db,
+			db: db.as(unverifiedExistingId),
 			guest: {
 				userId: unverifiedExistingId,
 				email: 'unverified-existing@example.com',
@@ -863,11 +914,13 @@ test('email invite of an unverified existing account stays unbound', async () =>
 			},
 			grantId: invited.id,
 		}),
-	).rejects.toThrow('not addressed')
+		// RLS hides grants not addressed to the caller, so there is nothing to accept.
+	).rejects.toThrow('No pending package share invitation was found for you.')
 })
 
 test('email invite of an unverified account conflicts with their username invite', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const unverifiedExistingId = '22'.repeat(32)
 	const owner = {
 		userId: ownerUserId,
@@ -883,7 +936,7 @@ test('email invite of an unverified account conflicts with their username invite
 		emailVerified: false,
 	})
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner,
 		packageId,
 		invitee: { username: 'unverified-named' },
@@ -891,7 +944,7 @@ test('email invite of an unverified account conflicts with their username invite
 	expect(invited.granteeUserId).toBe(unverifiedExistingId)
 	await expect(
 		invitePackageShare({
-			db,
+			db: db.as(ownerUserId),
 			owner,
 			packageId,
 			invitee: { email: 'unverified-named@example.com' },
@@ -900,7 +953,8 @@ test('email invite of an unverified account conflicts with their username invite
 })
 
 test('username invite conflicts with an unbound pending email invite for that person', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const owner = {
 		userId: ownerUserId,
 		email: 'alice@example.com',
@@ -908,7 +962,7 @@ test('username invite conflicts with an unbound pending email invite for that pe
 		username: 'alice',
 	}
 	await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner,
 		packageId,
 		invitee: { email: 'later-jesse@example.com' },
@@ -922,7 +976,7 @@ test('username invite conflicts with an unbound pending email invite for that pe
 	})
 	await expect(
 		invitePackageShare({
-			db,
+			db: db.as(ownerUserId),
 			owner,
 			packageId,
 			invitee: { username: 'later-jesse' },
@@ -931,7 +985,8 @@ test('username invite conflicts with an unbound pending email invite for that pe
 })
 
 test('unverified email cannot attach or accept an unbound invite', async () => {
-	const { db, packageId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId } = db
 	const owner = {
 		userId: ownerUserId,
 		email: 'alice@example.com',
@@ -939,7 +994,7 @@ test('unverified email cannot attach or accept an unbound invite', async () => {
 		username: 'alice',
 	}
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner,
 		packageId,
 		invitee: { email: 'unverified-claim@example.com' },
@@ -953,7 +1008,7 @@ test('unverified email cannot attach or accept an unbound invite', async () => {
 		emailVerified: false,
 	})
 	const attached = await attachPendingPackageShareInvitesForEmail({
-		db,
+		db: db.as(attackerUserId),
 		userId: attackerUserId,
 		email: 'unverified-claim@example.com',
 		username: 'unverified',
@@ -970,7 +1025,7 @@ test('unverified email cannot attach or accept an unbound invite', async () => {
 	).toBe(false)
 	await expect(
 		acceptPackageShare({
-			db,
+			db: db.as(attackerUserId),
 			guest: {
 				userId: attackerUserId,
 				email: 'unverified-claim@example.com',
@@ -979,13 +1034,15 @@ test('unverified email cannot attach or accept an unbound invite', async () => {
 			},
 			grantId: invited.id,
 		}),
-	).rejects.toThrow('not addressed')
+		// RLS hides grants not addressed to the caller, so there is nothing to accept.
+	).rejects.toThrow('No pending package share invitation was found for you.')
 })
 
 test('search skips pin-ahead shared packages until the guest approves', async () => {
-	const { db, packageId, sourceId } = await createHarness()
+	await using db = await createHarness()
+	const { packageId, sourceId } = db
 	const invited = await invitePackageShare({
-		db,
+		db: db.as(ownerUserId),
 		owner: {
 			userId: ownerUserId,
 			email: 'alice@example.com',
@@ -996,7 +1053,7 @@ test('search skips pin-ahead shared packages until the guest approves', async ()
 		invitee: { username: 'jesse' },
 	})
 	await acceptPackageShare({
-		db,
+		db: db.as(guestUserId),
 		guest: {
 			userId: guestUserId,
 			email: 'jesse@example.com',
@@ -1008,18 +1065,98 @@ test('search skips pin-ahead shared packages until the guest approves', async ()
 	})
 	expect(
 		await listAcceptedInboundSharedPackages({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 		}),
 	).toHaveLength(1)
-	await db
-		.prepare(`UPDATE entity_sources SET published_commit = ? WHERE id = ?`)
-		.bind('commit-ahead', sourceId)
-		.run()
+	await db.sql(
+		`UPDATE entity_sources SET published_commit = ? WHERE id = ?`,
+		'commit-ahead',
+		sourceId,
+	)
 	expect(
 		await listAcceptedInboundSharedPackages({
-			db,
+			db: db.as(guestUserId),
 			granteeUserId: guestUserId,
 		}),
 	).toHaveLength(0)
+})
+
+test('only the grant parties see a shared package, and guests never read owner credentials', async () => {
+	await using db = await createHarness()
+	const { packageId } = db
+	const owner = {
+		userId: ownerUserId,
+		email: 'alice@example.com',
+		displayName: 'Alice',
+		username: 'alice',
+	}
+	const ownerPackage = (userId: string) =>
+		getSavedPackageById(db.as(userId), { userId: ownerUserId, packageId })
+
+	await expect(ownerPackage(guestUserId)).resolves.toBeNull()
+	await expect(
+		findSharePeer(db.as(guestUserId), ownerUserId),
+	).resolves.toBeNull()
+	const invited = await invitePackageShare({
+		db: db.as(ownerUserId),
+		owner,
+		packageId,
+		invitee: { username: 'jesse' },
+	})
+	// A pending invite lets the guest preview the package; outsiders see nothing.
+	await expect(ownerPackage(guestUserId)).resolves.toMatchObject({
+		id: packageId,
+	})
+	await expect(ownerPackage(freeUserId)).resolves.toBeNull()
+	await expect(
+		findSharePeer(db.as(freeUserId), ownerUserId),
+	).resolves.toBeNull()
+	// Owners reach their grantee's delivery email; guests get the owner's
+	// username only, and no account columns through their own role.
+	await expect(
+		findSharePeer(db.as(ownerUserId), guestUserId),
+	).resolves.toMatchObject({
+		username: 'jesse',
+		email: 'jesse@example.com',
+	})
+	await expect(
+		findSharePeer(db.as(guestUserId), ownerUserId),
+	).resolves.toMatchObject({
+		username: 'alice',
+		email: null,
+	})
+	const credentials = await db
+		.as(guestUserId)
+		.prepare('SELECT password_hash, email FROM users WHERE stable_user_id = ?')
+		.bind(ownerUserId)
+		.all()
+	expect(credentials.results).toEqual([])
+
+	await revokePackageShare({
+		db: db.as(ownerUserId),
+		ownerUserId,
+		grantId: invited.id,
+	})
+	await expect(ownerPackage(guestUserId)).resolves.toBeNull()
+	// A guest cannot re-point a grant at themselves after revocation.
+	await db
+		.as(guestUserId)
+		.prepare(`UPDATE package_share_grants SET status = 'accepted' WHERE id = ?`)
+		.bind(invited.id)
+		.run()
+	await expect(ownerPackage(guestUserId)).resolves.toBeNull()
+	// Nor forge a grant to someone else's package.
+	await expect(
+		db
+			.as(guestUserId)
+			.prepare(
+				`INSERT INTO package_share_grants (
+					id, package_id, owner_user_id, grantee_user_id, status, role, invited_at
+				) VALUES ('forged', ?, ?, ?, 'accepted', 'use', 'now')`,
+			)
+			.bind(packageId, ownerUserId, guestUserId)
+			.run(),
+	).rejects.toThrow(/row-level security/)
+	await expect(ownerPackage(guestUserId)).resolves.toBeNull()
 })

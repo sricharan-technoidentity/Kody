@@ -18,7 +18,7 @@ const mockModule = vi.hoisted(() => ({
 	getSavedPackageSearchIndexDebtGeneration: vi.fn(),
 }))
 
-vi.mock('#worker/vectorize/embedding.ts', () => ({
+vi.mock('#worker/search-index/embedding.ts', () => ({
 	embedTextsForVectorize: (...args: Array<unknown>) =>
 		mockModule.embedTextsForVectorize(...args),
 	getCapabilityVectorIndex: (...args: Array<unknown>) =>

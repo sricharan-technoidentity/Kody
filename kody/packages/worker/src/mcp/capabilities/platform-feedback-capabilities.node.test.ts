@@ -20,11 +20,19 @@ import { adminPlatformFeedbackListCapability } from './admin/admin-platform-feed
 import { adminPlatformFeedbackUpdateCapability } from './admin/admin-platform-feedback-update.ts'
 import { platformFeedbackContentWarning } from './admin/platform-feedback-shared.ts'
 import { metaPlatformFeedbackSubmitCapability } from './meta/meta-platform-feedback-submit.ts'
+import { createRecordingTemporal } from '#worker/test-support/aws/recording-temporal.ts'
+
+const temporal = createRecordingTemporal()
+const feedbackDispatchStart = (feedbackId: string) => ({
+	workflowType: 'QueueMessage',
+	workflowId: `queue:platform-feedback-dispatch:${feedbackId}`,
+	taskQueue: 'platform',
+	args: [{ queue: 'platform-feedback-dispatch', body: { feedbackId } }],
+})
 
 const mockModule = vi.hoisted(() => ({
 	getPlatformFeedbackForAdmin: vi.fn(),
 	listPlatformFeedbackForAdmin: vi.fn(),
-	queueSend: vi.fn(),
 	sendPlatformFeedbackOutcomeEmail: vi.fn(),
 	submitPlatformFeedback: vi.fn(),
 	updatePlatformFeedbackForAdmin: vi.fn(),
@@ -95,9 +103,7 @@ function createCapabilityContext(input?: {
 	return {
 		env: {
 			APP_DB: {} as D1Database,
-			PLATFORM_FEEDBACK_DISPATCH_QUEUE: {
-				send: mockModule.queueSend,
-			},
+			TEMPORAL: temporal.TEMPORAL,
 		} as Env,
 		callerContext: createMcpCallerContext({
 			baseUrl: 'https://heykody.dev',
@@ -180,7 +186,7 @@ test('meta platform feedback submission gates consent and isolates post-persiste
 		'only available from an interactive MCP agent flow after explicit user approval',
 	)
 	expect(mockModule.submitPlatformFeedback).not.toHaveBeenCalled()
-	expect(mockModule.queueSend).not.toHaveBeenCalled()
+	expect(temporal.starts).toEqual([])
 	expect(synchronousFanOutModule.loaded).toBe(false)
 	expect(
 		synchronousFanOutModule.dispatchPlatformFeedbackSubmittedSubscriptionEvent,
@@ -198,7 +204,7 @@ test('meta platform feedback submission gates consent and isolates post-persiste
 			}),
 		),
 	).rejects.toThrow('active queue limit')
-	expect(mockModule.queueSend).not.toHaveBeenCalled()
+	expect(temporal.starts).toEqual([])
 
 	const result = await metaPlatformFeedbackSubmitCapability.handler(
 		input,
@@ -216,9 +222,7 @@ test('meta platform feedback submission gates consent and isolates post-persiste
 		summary: 'Setup is confusing',
 		details: 'The setup flow does not explain the next action.',
 	})
-	expect(mockModule.queueSend).toHaveBeenCalledWith({
-		feedbackId: openFeedback.id,
-	})
+	expect(temporal.starts).toEqual([feedbackDispatchStart(openFeedback.id)])
 	expect(result).toEqual({
 		feedback_id: 'feedback-1',
 		status: 'open',
@@ -226,8 +230,8 @@ test('meta platform feedback submission gates consent and isolates post-persiste
 	})
 
 	consoleError.mockImplementation(() => {})
-	mockModule.queueSend.mockClear()
-	mockModule.queueSend.mockRejectedValueOnce(new Error('Queue unavailable'))
+	temporal.starts.length = 0
+	temporal.failNext(new Error('Temporal unavailable'))
 	const resultAfterEnqueueFailure =
 		await metaPlatformFeedbackSubmitCapability.handler(
 			input,
@@ -237,9 +241,7 @@ test('meta platform feedback submission gates consent and isolates post-persiste
 			}),
 		)
 	expect(resultAfterEnqueueFailure).toEqual(result)
-	expect(mockModule.queueSend).toHaveBeenCalledWith({
-		feedbackId: openFeedback.id,
-	})
+	expect(temporal.starts).toEqual([])
 	expect(consoleError).toHaveBeenCalledWith(
 		'platform-feedback-dispatch-enqueue-failed',
 		expect.any(Error),

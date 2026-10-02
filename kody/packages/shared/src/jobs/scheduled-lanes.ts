@@ -1,8 +1,6 @@
 /**
- * Scheduled-lane names, queue message shape, and cron cadence shared between
- * the jobs worker (which owns the `*​/5 * * * *` cron trigger and the
- * scheduled dispatch queue, ADR 0016) and the main worker (which executes the
- * platform lanes via the `JobsHost` service binding).
+ * Scheduled-lane names, message shape, and cadence for Temporal ops Schedules.
+ * Retired lane names remain parseable for existing stored messages.
  */
 
 export const scheduledLaneNames = [
@@ -17,6 +15,7 @@ export const scheduledLaneNames = [
 	'oauth_purge_expired',
 	'retention',
 	'job_retention',
+	'run_records_reconciliation',
 	'unverified_account_purge',
 	'usage_aggregation',
 	'durable_object_duration_attribution',

@@ -9,13 +9,9 @@ import {
 	collectLocalOriginDevVars,
 	writeLocalOriginDevConfig,
 } from './tools/local-origin-dev-config.ts'
-import { writeLocalPlatformDevConfig } from './tools/local-platform-dev-config.ts'
-import { writeLocalRuntimeDevConfig } from './tools/local-runtime-dev-config.ts'
-import { resolveLocalD1PersistPath } from './tools/local-d1-persist.ts'
 import { ensureGuideCatalogModules } from './tools/build-guide-catalog-modules.ts'
 import { ensureWorkerBundlerModules } from './tools/build-worker-bundler-modules.ts'
 import { markdownAsText } from './tools/vite-markdown-as-text.ts'
-import { workerWholeGraphReload } from './tools/vite-worker-whole-graph-reload.ts'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 // `@cloudflare/vite-plugin` reads `CLOUDFLARE_ENV` itself (not this
@@ -27,7 +23,6 @@ const envName = process.env.CLOUDFLARE_ENV?.trim() || 'production'
 if (!process.env.CLOUDFLARE_ENV?.trim()) {
 	process.env.CLOUDFLARE_ENV = envName
 }
-const persistPath = resolveLocalD1PersistPath()
 const wranglerConfigPath =
 	process.env.KODY_WRANGLER_CONFIG ?? 'packages/worker/wrangler.jsonc'
 const isOriginDeployBuild = Boolean(process.env.KODY_WRANGLER_CONFIG)
@@ -52,10 +47,6 @@ export default defineConfig(async ({ command }) => {
 	await ensureWorkerBundlerModules()
 	await ensureGuideCatalogModules()
 
-	const auxiliaryWorkers: Array<{
-		configPath: string
-		devOnly: true
-	}> = []
 	let serveWranglerConfigPath = wranglerConfigPath
 
 	if (command === 'serve' && !isOriginDeployBuild) {
@@ -67,36 +58,6 @@ export default defineConfig(async ({ command }) => {
 			envName,
 			vars: collectLocalOriginDevVars(process.env, process.env.PORT),
 		})
-		// Jobs + highlight stay attached in the test env (Playwright e2e).
-		// Platform/runtime have no test env and stay skipped there.
-		auxiliaryWorkers.push(
-			{
-				configPath: 'packages/jobs-worker/wrangler.jsonc',
-				devOnly: true,
-			},
-			{
-				configPath: 'packages/highlight-worker/wrangler.jsonc',
-				devOnly: true,
-			},
-		)
-		if (envName !== 'test') {
-			const runtimeDevConfigPath = await writeLocalRuntimeDevConfig({
-				runtimeConfigPath: 'packages/runtime-worker/wrangler.jsonc',
-				envName,
-				mainWorkerDevName: `kody-${envName}`,
-				port: process.env.PORT,
-			})
-			const platformDevConfigPath = await writeLocalPlatformDevConfig({
-				platformConfigPath: 'packages/platform-worker/wrangler.jsonc',
-				envName,
-				mainWorkerDevName: `kody-${envName}`,
-				port: process.env.PORT,
-			})
-			auxiliaryWorkers.push(
-				{ configPath: runtimeDevConfigPath, devOnly: true },
-				{ configPath: platformDevConfigPath, devOnly: true },
-			)
-		}
 	}
 
 	return {
@@ -116,11 +77,8 @@ export default defineConfig(async ({ command }) => {
 			cloudflare({
 				configPath: serveWranglerConfigPath,
 				viteEnvironment: { name: 'ssr' },
-				persistState: { path: persistPath },
 				remoteBindings: false,
-				auxiliaryWorkers,
 			}),
-			workerWholeGraphReload(),
 		],
 		resolve: {
 			alias: [

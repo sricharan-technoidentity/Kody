@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { getUniqueConstraintField } from '#worker/database-errors.ts'
 import { userExistsByUsername } from '#worker/identity/generated-username.ts'
 import { normalizeEmail } from '#worker/identity/normalize-email.ts'
@@ -45,7 +46,9 @@ export type CreatedPlatformAccount = {
  * squat a platform scope.
  */
 export async function createPlatformAccount(input: {
-	db: D1Database
+	db: SqlDatabase
+	/** Scoped writer for the new account; required by PostgreSQL RLS. */
+	forUser?: (stableUserId: string) => SqlDatabase
 	env?: Pick<Env, 'BUNDLE_ARTIFACTS_KV'>
 	email: string
 	username: string
@@ -104,7 +107,7 @@ export async function createPlatformAccount(input: {
 		const result = await input.db
 			.prepare(
 				`INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id, account_type, plan)
-				 VALUES (?, ?, ?, ?, ?, 'platform', 'free')`,
+				 VALUES (?, ?, ?, ?, ?, 'platform', 'free') RETURNING id`,
 			)
 			.bind(
 				username,
@@ -113,16 +116,15 @@ export async function createPlatformAccount(input: {
 				nowIso,
 				stableUserId,
 			)
-			.run()
-		const lastRowId = result.meta.last_row_id
-		if (!Number.isSafeInteger(lastRowId) || lastRowId < 1) {
+			.first<{ id: number }>()
+		if (!result || !Number.isSafeInteger(result.id) || result.id < 1) {
 			throw new PlatformAccountCreateError(
 				'create_failed',
 				'Unable to create platform account.',
 			)
 		}
-		userId = lastRowId
-		await claimAccountEmail(input.db, {
+		userId = result.id
+		await claimAccountEmail(input.forUser?.(stableUserId) ?? input.db, {
 			userId,
 			email,
 			now,
@@ -160,7 +162,7 @@ export async function createPlatformAccount(input: {
 	}
 }
 
-async function deleteUserBestEffort(db: D1Database, userId: number) {
+async function deleteUserBestEffort(db: SqlDatabase, userId: number) {
 	try {
 		await db.prepare(`DELETE FROM users WHERE id = ?`).bind(userId).run()
 	} catch (error) {

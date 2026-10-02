@@ -8,7 +8,7 @@
 Every user-owned vector (memories, jobs, saved packages) lives in one Vectorize
 index, `CAPABILITY_VECTOR_INDEX`, inside a namespace named by the account's
 64-character `stable_user_id`
-(`packages/worker/src/vectorize/vector-namespaces.ts`). Builtin capability
+(`packages/worker/src/search-index/vector-namespaces.ts`). Builtin capability
 vectors use the reserved `__kody_builtin__` namespace. Namespace filtering is
 the primary isolation boundary and the `userId` metadata filter is defense in
 depth (see

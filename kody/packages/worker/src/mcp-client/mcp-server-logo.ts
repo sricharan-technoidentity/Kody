@@ -112,7 +112,7 @@ export async function setMcpServerLogo(input: {
 				? `UPDATE mcp_server_settings
 			SET logo_key = ?, logo_content_type = ?, logo_source = ?,
 				favicon_source_host = ?, updated_at = ?
-			WHERE user_id = ? AND id = ? AND logo_key IS ?`
+			WHERE user_id = ? AND id = ? AND logo_key IS NOT DISTINCT FROM ?`
 				: `UPDATE mcp_server_settings
 			SET logo_key = ?, logo_content_type = ?, logo_source = ?,
 				favicon_source_host = ?, updated_at = ?

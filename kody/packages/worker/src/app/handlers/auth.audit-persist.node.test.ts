@@ -1,68 +1,26 @@
-import { readFileSync } from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
+import { createTestAuditDb } from '#worker/test-support/aws/test-audit-db.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { expect, test, vi } from 'vitest'
 import { RequestContext } from 'remix/router'
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
 import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
 import { setAuthSessionSecret } from '#app/auth-session.ts'
 import { createAuthHandler } from '#app/handlers/auth.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 
 vi.unmock('#worker/audit-log.ts')
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createAuditDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(
-		readFileSync(
-			new URL(
-				'../../../audit-migrations/0001-audit-events.sql',
-				import.meta.url,
-			),
-			'utf8',
-		),
-	)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
-function createAppDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
-async function seedUser(
-	sqlite: DatabaseSync,
-	input: { id: number; email: string; username: string; password: string },
+/** Signed-out requests: a writer with no account context plus each owner's writer. */
+function createHandler(
+	app: Awaited<ReturnType<typeof createTestDb>>,
+	auditDb: Pick<SqlDatabase, 'prepare'>,
 ) {
-	const passwordHash = await createPasswordHash(input.password)
-	const stableUserId = await createStableUserIdFromEmail(input.email)
-	sqlite.exec(`
-		INSERT INTO users (
-			id,
-			username,
-			email,
-			stable_user_id,
-			password_hash,
-			email_verified_at
-		) VALUES (
-			${input.id},
-			${quoteSqlString(input.username)},
-			${quoteSqlString(input.email)},
-			${quoteSqlString(stableUserId)},
-			${quoteSqlString(passwordHash)},
-			CURRENT_TIMESTAMP
-		);
-	`)
-}
-
-function createHandler(appDb: D1Database, auditDb: D1Database) {
 	return createAuthHandler({
 		COOKIE_SECRET: testCookieSecret,
-		APP_DB: appDb,
+		APP_DB: app.forUser().db,
+		APP_DB_FOR_USER: (stableUserId: string) => app.forUser(stableUserId).db,
 		AUDIT_DB: auditDb,
 		SENTRY_ENVIRONMENT: 'production',
 	} as unknown as Parameters<typeof createAuthHandler>[0])
@@ -80,23 +38,31 @@ async function postAuth(
 	return handler.handler(new RequestContext(request))
 }
 
-function readAuditActions(sqlite: DatabaseSync) {
-	return sqlite
-		.prepare(`SELECT action, result FROM audit_events ORDER BY id`)
-		.all() as Array<{ action: string; result: string }>
+async function readAuditActions(db: Pick<SqlDatabase, 'prepare'>) {
+	return (
+		await db
+			.prepare('SELECT action, result FROM audit_events ORDER BY id')
+			.all()
+	).results
 }
 
 test('auth handler persists signup failure and login success to AUDIT_DB', async () => {
 	setAuthSessionSecret(testCookieSecret)
-	const app = createAppDb()
-	const audit = createAuditDb()
-	const handler = createHandler(app.db, audit.db)
-	await seedUser(app.sqlite, {
-		id: 1,
-		email: 'session-user@example.com',
-		username: 'session-user',
-		password: 'secret123',
-	})
+	const email = 'session-user@example.com'
+	const stableUserId = await createStableUserIdFromEmail(email)
+	await using app = await createTestDb({ userId: stableUserId })
+	await using audit = await createTestAuditDb()
+	const handler = createHandler(app, audit.db)
+	await app.db
+		.prepare(`INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
+		VALUES (1, 'session-user', ?, ?, ?, ?)`)
+		.bind(
+			email,
+			stableUserId,
+			await createPasswordHash('secret123'),
+			new Date().toISOString(),
+		)
+		.run()
 
 	const signupFailure = await postAuth(handler, {
 		email: 'weak@example.com',
@@ -108,8 +74,8 @@ test('auth handler persists signup failure and login success to AUDIT_DB', async
 	expect(await signupFailure.json()).toEqual({
 		error: 'Password must be at least 8 characters.',
 	})
-	await vi.waitFor(() => {
-		expect(readAuditActions(audit.sqlite)).toEqual([
+	await vi.waitFor(async () => {
+		expect(await readAuditActions(audit.reader)).toEqual([
 			{ action: 'signup', result: 'failure' },
 		])
 	})
@@ -121,8 +87,8 @@ test('auth handler persists signup failure and login success to AUDIT_DB', async
 	})
 	expect(loginSuccess.status).toBe(200)
 	expect(await loginSuccess.json()).toEqual({ ok: true, mode: 'login' })
-	await vi.waitFor(() => {
-		expect(readAuditActions(audit.sqlite)).toEqual([
+	await vi.waitFor(async () => {
+		expect(await readAuditActions(audit.reader)).toEqual([
 			{ action: 'signup', result: 'failure' },
 			{ action: 'login', result: 'success' },
 		])

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { toHex } from '@kody-internal/shared/hex.ts'
 
 export const passwordResetTokenBytes = 32
@@ -17,7 +18,7 @@ export async function hashPasswordResetToken(token: string) {
 }
 
 export async function createPasswordResetToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	expiresAt: number
 }) {

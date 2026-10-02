@@ -3,10 +3,7 @@ import {
 	createExecuteExecutor,
 	runWithDynamicWorkerEvaluationBudget,
 } from '#mcp/executor.ts'
-import {
-	CAPABILITY_EMBEDDING_DIMENSIONS,
-	deterministicEmbedding,
-} from '#worker/vectorize/embedding.ts'
+import { deterministicEmbedding } from '#worker/search-index/embedding.ts'
 
 const mockModule = vi.hoisted(() => {
 	function createEmptySearchUnifiedResult() {
@@ -292,17 +289,11 @@ test('executeSearchList embeds each distinct text once and starts the query embe
 
 	const env = {
 		SENTRY_ENVIRONMENT: 'production',
-		AI: {
-			async run(...args: Array<unknown>) {
-				const input = args[1] as { text?: unknown }
-				const batch = Array.isArray(input.text)
-					? input.text.map(String)
-					: [String(input.text ?? '')]
+		BEDROCK_EMBEDDINGS: {
+			async embedTexts(input: readonly string[]) {
+				const batch = [...input]
 				embedTexts.push(...batch)
-				return {
-					data: batch.map((text) => deterministicEmbedding(text)),
-					shape: [batch.length, CAPABILITY_EMBEDDING_DIMENSIONS],
-				}
+				return batch.map((text) => deterministicEmbedding(text))
 			},
 		},
 		CAPABILITY_VECTOR_INDEX: {
@@ -422,7 +413,7 @@ test('executeSearchList does not leak an unhandled rejection when the ranking em
 		const embedStarted = new Promise<void>((resolve) => {
 			resolveEmbedStarted = resolve
 		})
-		const embeddingError = new Error('Workers AI unavailable')
+		const embeddingError = new Error('Bedrock unavailable')
 		mockModule.loadSearchRowsAndRegistry.mockImplementation(async () => {
 			await rowsGate
 			return emptySearchRows()
@@ -450,8 +441,8 @@ test('executeSearchList does not leak an unhandled rejection when the ranking em
 
 		const env = {
 			SENTRY_ENVIRONMENT: 'production',
-			AI: {
-				async run() {
+			BEDROCK_EMBEDDINGS: {
+				async embedTexts() {
 					resolveEmbedStarted()
 					throw embeddingError
 				},
@@ -480,7 +471,7 @@ test('executeSearchList does not leak an unhandled rejection when the ranking em
 		await Promise.resolve()
 		expect(unhandled).toEqual([])
 		releaseRows()
-		await expect(searchPromise).rejects.toThrow('Workers AI unavailable')
+		await expect(searchPromise).rejects.toThrow('Bedrock unavailable')
 		await Promise.resolve()
 		await Promise.resolve()
 		expect(unhandled).toEqual([])
@@ -490,7 +481,7 @@ test('executeSearchList does not leak an unhandled rejection when the ranking em
 })
 
 test('executeSearchList does not prefetch an embedding for domain-overview or index queries', async () => {
-	let aiRunCount = 0
+	let embedCallCount = 0
 	mockModule.loadSearchRowsAndRegistry.mockResolvedValue(emptySearchRows())
 	mockModule.loadRelevantMemoriesForTool.mockResolvedValue({
 		memories: [],
@@ -509,10 +500,10 @@ test('executeSearchList does not prefetch an embedding for domain-overview or in
 
 	const env = {
 		SENTRY_ENVIRONMENT: 'production',
-		AI: {
-			async run() {
-				aiRunCount += 1
-				throw new Error('Workers AI should not run for overview search')
+		BEDROCK_EMBEDDINGS: {
+			async embedTexts() {
+				embedCallCount += 1
+				throw new Error('Bedrock should not run for overview search')
 			},
 		},
 		CAPABILITY_VECTOR_INDEX: {
@@ -532,7 +523,7 @@ test('executeSearchList does not prefetch an embedding for domain-overview or in
 		userId: 'user-1',
 		includeHiddenPackages: false,
 	})
-	expect(aiRunCount).toBe(0)
+	expect(embedCallCount).toBe(0)
 
 	await executeSearchList({
 		env,
@@ -543,7 +534,7 @@ test('executeSearchList does not prefetch an embedding for domain-overview or in
 		userId: 'user-1',
 		includeHiddenPackages: false,
 	})
-	expect(aiRunCount).toBe(0)
+	expect(embedCallCount).toBe(0)
 })
 
 test('executeSearchList reads the Jev plan fresh while the rate limit runs', async () => {
@@ -617,12 +608,9 @@ test('executeSearchList fails closed before ranking when the abuse rate limit re
 	mockModule.searchUnified.mockClear()
 
 	const env = {
-		AI: {
-			async run() {
-				return {
-					data: [deterministicEmbedding('should-not-embed')],
-					shape: [1, CAPABILITY_EMBEDDING_DIMENSIONS],
-				}
+		BEDROCK_EMBEDDINGS: {
+			async embedTexts() {
+				return [deterministicEmbedding('should-not-embed')]
 			},
 		},
 		CAPABILITY_VECTOR_INDEX: {

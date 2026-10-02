@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { beforeEach, expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import {
@@ -324,7 +325,7 @@ test('assertCanSetSecrets fails closed for mutate grants before any provider wor
 		assertCanSetSecrets({
 			env: {
 				APP_DB: {} as D1Database,
-				SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+				SECRET_KMS: testSecretKms,
 			},
 			userId: 'user-1',
 			baseUrl: 'https://example.com',

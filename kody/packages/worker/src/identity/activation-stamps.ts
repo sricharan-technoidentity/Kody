@@ -4,6 +4,7 @@
  * Never throws: activation metering must not break MCP, execute, or package paths.
  */
 
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 import { type OnboardingFunnelStage } from '#universal/onboarding-funnel-point.ts'
 import { type OnboardingFunnelEnv } from './onboarding-funnel-event.ts'
@@ -17,7 +18,7 @@ function nowIso(at?: string) {
  * Also refreshes last_active_at when the calendar day advances.
  */
 export async function stampFirstMcpConnected(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		stableUserId: string
 		clientName?: string | null
@@ -33,30 +34,30 @@ export async function stampFirstMcpConnected(
 		await db
 			.prepare(
 				`UPDATE users
-				SET first_mcp_connected_at = COALESCE(first_mcp_connected_at, ?1),
+				SET first_mcp_connected_at = COALESCE(first_mcp_connected_at, $1),
 					mcp_client_name = CASE
-						WHEN mcp_client_name IS NULL AND ?2 IS NOT NULL THEN ?2
+						WHEN mcp_client_name IS NULL AND $2::text IS NOT NULL THEN $2
 						ELSE mcp_client_name
 					END,
 					last_active_at = CASE
-						WHEN last_active_at IS NULL THEN ?1
-						WHEN date(last_active_at) < date(?1) THEN ?1
+						WHEN last_active_at IS NULL THEN $1
+						WHEN date(last_active_at::timestamptz AT TIME ZONE 'UTC') < date($1::text::timestamptz AT TIME ZONE 'UTC') THEN $1
 						ELSE last_active_at
 					END,
 					updated_at = CASE
 						WHEN first_mcp_connected_at IS NULL
-							OR (mcp_client_name IS NULL AND ?2 IS NOT NULL)
+							OR (mcp_client_name IS NULL AND $2::text IS NOT NULL)
 							OR last_active_at IS NULL
-							OR date(last_active_at) < date(?1)
-						THEN ?3
+							OR date(last_active_at::timestamptz AT TIME ZONE 'UTC') < date($1::text::timestamptz AT TIME ZONE 'UTC')
+						THEN $3
 						ELSE updated_at
 					END
-				WHERE stable_user_id = ?4
+				WHERE stable_user_id = $4
 					AND (
 						first_mcp_connected_at IS NULL
-						OR (mcp_client_name IS NULL AND ?2 IS NOT NULL)
+						OR (mcp_client_name IS NULL AND $2::text IS NOT NULL)
 						OR last_active_at IS NULL
-						OR date(last_active_at) < date(?1)
+						OR date(last_active_at::timestamptz AT TIME ZONE 'UTC') < date($1::text::timestamptz AT TIME ZONE 'UTC')
 					)`,
 			)
 			.bind(at, clientName, utcSqliteTimestamp(), input.stableUserId)
@@ -67,7 +68,7 @@ export async function stampFirstMcpConnected(
 }
 
 export async function userHasFirstExecute(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<boolean> {
 	try {
@@ -87,7 +88,7 @@ export async function userHasFirstExecute(
 }
 
 export async function userHasFirstSearch(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<boolean> {
 	try {
@@ -153,14 +154,14 @@ function activationColumnLiteral(column: ActivationClaimColumn) {
 function activationClaimSql(column: ActivationClaimColumn) {
 	const name = activationColumnLiteral(column)
 	return `UPDATE users
-		SET ${name} = ?1,
+		SET ${name} = $1,
 			last_active_at = CASE
-				WHEN last_active_at IS NULL THEN ?1
-				WHEN date(last_active_at) < date(?1) THEN ?1
+				WHEN last_active_at IS NULL THEN $1
+				WHEN date(last_active_at::timestamptz AT TIME ZONE 'UTC') < date($1::text::timestamptz AT TIME ZONE 'UTC') THEN $1
 				ELSE last_active_at
 			END,
-			updated_at = ?2
-		WHERE stable_user_id = ?3
+			updated_at = $2
+		WHERE stable_user_id = $3
 			AND ${name} IS NULL`
 }
 
@@ -187,7 +188,7 @@ function recordClaimedFunnelStage(
  * Subsequent calls still refresh last_active_at. Never throws.
  */
 async function claimActivationStamp(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		column: ActivationClaimColumn
 		stableUserId: string
@@ -223,7 +224,7 @@ async function claimActivationStamp(
 }
 
 export async function stampFirstExecute(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string; at?: string },
 	telemetry?: OnboardingFunnelEnv | null,
 ): Promise<boolean> {
@@ -237,7 +238,7 @@ export async function stampFirstExecute(
 }
 
 export async function stampFirstSearch(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string; at?: string },
 	telemetry?: OnboardingFunnelEnv | null,
 ): Promise<boolean> {
@@ -251,7 +252,7 @@ export async function stampFirstSearch(
 }
 
 export async function stampFirstSavedPackage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string; at?: string },
 	telemetry?: OnboardingFunnelEnv | null,
 ): Promise<boolean> {
@@ -265,7 +266,7 @@ export async function stampFirstSavedPackage(
 }
 
 export async function stampFirstSecret(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string; at?: string },
 	telemetry?: OnboardingFunnelEnv | null,
 ): Promise<boolean> {
@@ -279,7 +280,7 @@ export async function stampFirstSecret(
 }
 
 export async function stampFirstIntegration(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string; at?: string },
 	telemetry?: OnboardingFunnelEnv | null,
 ): Promise<boolean> {
@@ -293,7 +294,7 @@ export async function stampFirstIntegration(
 }
 
 export async function stampFirstJob(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string; at?: string },
 	telemetry?: OnboardingFunnelEnv | null,
 ): Promise<boolean> {
@@ -308,7 +309,7 @@ export async function stampFirstJob(
 
 /** Refresh last_active_at on login (and similar return signals). */
 export async function touchLastActiveAt(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string; at?: string },
 ): Promise<void> {
 	try {
@@ -316,10 +317,10 @@ export async function touchLastActiveAt(
 		await db
 			.prepare(
 				`UPDATE users
-				SET last_active_at = ?1,
-					updated_at = ?2
-				WHERE stable_user_id = ?3
-					AND (last_active_at IS NULL OR date(last_active_at) < date(?1))`,
+				SET last_active_at = $1,
+					updated_at = $2
+				WHERE stable_user_id = $3
+					AND (last_active_at IS NULL OR date(last_active_at::timestamptz AT TIME ZONE 'UTC') < date($1::text::timestamptz AT TIME ZONE 'UTC'))`,
 			)
 			.bind(at, utcSqliteTimestamp(), input.stableUserId)
 			.run()

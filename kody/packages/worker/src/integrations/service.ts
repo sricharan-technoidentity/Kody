@@ -53,7 +53,7 @@ import {
 export type { IntegrationConfig, PlatformOauthApp }
 
 type IntegrationWriteEnv = Pick<Env, 'APP_DB'> &
-	Partial<Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES' | 'SECRET_STORE_KEY'>>
+	Partial<Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES' | 'SECRET_KMS'>>
 
 type LogoWriteInput = {
 	logoBase64?: string | null

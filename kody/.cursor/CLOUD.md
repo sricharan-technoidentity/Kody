@@ -1,5 +1,14 @@
 # kody Cloud Agent Guide
 
+## Current focus: POC mode
+
+For the Temporal + AgentCore migration POC, prefer targeted tests and
+incremental verification. Production commands (full `npm run validate`, E2E
+tests, preview deploys, production health checks) are out of scope unless the
+POC slice touches them.
+
+---
+
 A full-stack web application built on Cloudflare Workers with Remix 3 (beta).
 
 ## Quick Reference

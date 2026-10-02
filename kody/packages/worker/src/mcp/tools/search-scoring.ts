@@ -1,4 +1,4 @@
-import { blendLexicalAndVectorScore } from '#worker/vectorize/scoring.ts'
+import { blendLexicalAndVectorScore } from '#worker/search-index/scoring.ts'
 
 import { type SearchMatch } from './search-format.ts'
 import {

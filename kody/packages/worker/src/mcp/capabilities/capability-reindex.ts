@@ -1,11 +1,11 @@
 import { buildCapabilityEmbedText } from './capability-search.ts'
-import { getCapabilityVectorIndex } from '#worker/vectorize/embedding.ts'
+import { getCapabilityVectorIndex } from '#worker/search-index/embedding.ts'
 import {
 	reindexVectorCandidateList,
 	type VectorReindexSweepOptions,
 	type VectorReindexSweepResult,
-} from '#worker/vectorize/reindex-sweep.ts'
-import { BUILTIN_VECTOR_NAMESPACE } from '#worker/vectorize/vector-namespaces.ts'
+} from '#worker/search-index/reindex-sweep.ts'
+import { BUILTIN_VECTOR_NAMESPACE } from '#worker/search-index/vector-namespaces.ts'
 import { type CapabilitySpec } from './types.ts'
 
 export async function reindexCapabilityVectors(

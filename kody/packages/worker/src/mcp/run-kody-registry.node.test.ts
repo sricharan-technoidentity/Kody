@@ -1,3 +1,6 @@
+vi.mock('#worker/temporal/package-workflow.ts', () => ({
+	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
+}))
 import { expect, test, vi } from 'vitest'
 import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 import { type getCapabilityRegistryForContext } from '#mcp/capabilities/registry.ts'
@@ -132,8 +135,8 @@ test('package workflow tools create instances from package context and honor cal
 					}
 				},
 			} as unknown as D1Database,
-			RUN_LOG: runLog.namespace,
-			DYNAMIC_CALLABLE_WORKFLOWS: {
+			RUN_STATE: runLog.state,
+			TEMPORAL: {
 				get: async () => {
 					throw new Error('not found')
 				},
@@ -280,8 +283,8 @@ test('runModuleWithRegistry queues inline workflows.create calls without runAt o
 				}
 			},
 		} as unknown as D1Database,
-		RUN_LOG: runLog.namespace,
-		DYNAMIC_CALLABLE_WORKFLOWS: {
+		RUN_STATE: runLog.state,
+		TEMPORAL: {
 			get: async () => {
 				throw new Error('not found')
 			},
@@ -443,22 +446,25 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 				throw new Error('metadata-only job updates must not open repo sessions')
 			},
 		},
-		JOBS: {
-			...createD1JobsStore(db),
-			async syncAlarm(input: { userId: string }) {
-				if (input.userId !== callerContext.user.userId) {
-					throw new Error(
-						`Expected JOBS.syncAlarm to be scoped to ${callerContext.user.userId}`,
-					)
-				}
-				jobManagerSyncPayloads.push(input)
-				return {
-					ok: true as const,
-					userId: input.userId,
-					nextRunAt: null,
-				}
-			},
-		},
+		JOBS: createD1JobsStore(db),
+		TEMPORAL: {
+			client: async () => ({
+				schedule: {
+					create: async ({ scheduleId }: { scheduleId: string }) => {
+						jobManagerSyncPayloads.push({ userId: scheduleId.split(':')[1]! })
+						return { scheduleId }
+					},
+					async *list() {
+						yield { scheduleId: `job:${callerContext.user.userId}:${job.id}` }
+					},
+					getHandle: (scheduleId: string) => ({
+						delete: async () => {
+							jobManagerSyncPayloads.push({ userId: scheduleId.split(':')[1]! })
+						},
+					}),
+				},
+			}),
+		} as unknown as Env['TEMPORAL'],
 		STORAGE_RUNNER: {
 			idFromName(name: string) {
 				return name as unknown as DurableObjectId

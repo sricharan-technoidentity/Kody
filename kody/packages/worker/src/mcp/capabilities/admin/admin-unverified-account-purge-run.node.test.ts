@@ -26,7 +26,7 @@ function createAppDb() {
 	)
 	applyAllMigrations(
 		sqlite,
-		new URL('../../../../../jobs-worker/migrations/', import.meta.url),
+		new URL('../../../../../worker/migrations-jobs/', import.meta.url),
 	)
 	return { sqlite, db: createD1FromSqlite(sqlite) }
 }

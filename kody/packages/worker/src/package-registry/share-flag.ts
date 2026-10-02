@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { packageShareGrantsFlagKey } from '#universal/feature-flags/registry.ts'
 import { isFeatureEnabled } from '#worker/feature-flags/service.ts'
 import { normalizeStableUserId } from '#worker/user-id.ts'
@@ -12,7 +13,7 @@ export const packageShareGrantsDisabledMessage =
  * and unresolved users are off so invite email cannot leak past a kill switch.
  */
 export async function isPackageShareGrantsEnabled(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId?: number | null
 	stableUserId?: string | null
 }): Promise<boolean> {

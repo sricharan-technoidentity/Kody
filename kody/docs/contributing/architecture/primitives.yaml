@@ -55,70 +55,12 @@ primitives:
       - docs/contributing/project-intent.md
       - docs/contributing/adding-capabilities.md
 
-  - id: status-page
-    group: surfaces
-    name: Public status page
-    summary:
-      Independently deployed status worker (status.kody.codes) probing public
-      endpoints every minute, storing history in its own Durable Object, and
-      emailing operator alerts under a capped policy.
-    code:
-      - packages/status/
-    docs:
-      - docs/contributing/setup-manifest.md
-      - docs/contributing/decisions/0004-status-page-separate-worker.md
-
-  - id: platform-worker
-    group: surfaces
-    name: Platform worker
-    summary:
-      Independently deployed platform worker owning the remaining platform
-      Durable Objects (MCP, McpClientHub, OAuthPurgeCoordinator, UserMeter,
-      Mailbox, RepoSession, RepoSessionIndex, StripePlanRefresh) so origin
-      content deploys do not reset those objects.
-    code:
-      - packages/platform-worker/
-      - packages/worker/src/platform-worker.ts
-      - packages/shared/src/platform-worker.ts
-      - tools/ci/platform-worker-config.ts
-      - tools/local-platform-dev-config.ts
-    docs:
-      - docs/contributing/decisions/0034-origin-owns-no-durable-objects.md
-      - docs/contributing/architecture/platform-worker-migration-runbook.md
-
-  - id: jobs-worker
-    group: surfaces
-    name: Jobs worker
-    summary:
-      Independently deployed jobs worker owning the JobManager Durable Object,
-      the cron/scheduled dispatch lane and queue, and the dedicated kody-jobs D1
-      database (jobs + archived_job_artifacts), calling back into the main
-      worker for job execution.
-    code:
-      - packages/jobs-worker/
-    docs:
-      - docs/contributing/decisions/0016-mono-worker-extraction.md
-      - docs/contributing/architecture/jobs-worker-migration-runbook.md
-
-  - id: highlight-worker
-    group: surfaces
-    name: Highlight worker
-    summary:
-      Service-binding-only Shiki tokenizer. Origin sends snippets over HIGHLIGHT
-      and receives serializable token trees; there is no public hostname.
-    code:
-      - packages/highlight-worker/
-    docs:
-      - docs/contributing/architecture/request-lifecycle.md
-
   - id: scheduled-cron
     group: surfaces
     name: Scheduled handler
     summary:
       Worker cron dispatcher with queue-isolated maintenance lane invocations.
     code:
-      - packages/jobs-worker/src/index.ts
-      - packages/jobs-worker/src/scheduled.ts
       - packages/worker/src/index.ts
       - packages/worker/src/scheduled/
       - packages/worker/src/jobs/reconcile-artifacts-pushes.ts
@@ -471,10 +413,12 @@ primitives:
   # --- Storage & infrastructure --------------------------------------------
   - id: d1-app-db
     group: storage
-    name: D1 app database
+    name: Application database
     summary: APP_DB relational metadata and projections.
     code:
       - packages/worker/migrations/
+      - packages/worker/migrations-pg/
+      - packages/worker/src/aws/pg-database.ts
       - packages/worker/src/db.ts
     docs:
       - docs/contributing/architecture/data-storage.md
@@ -501,23 +445,6 @@ primitives:
     docs:
       - docs/contributing/architecture/data-storage.md
 
-  - id: backup-control-plane
-    group: storage
-    name: Production backup control plane
-    summary:
-      Dedicated scheduled D1 export, production-side multi-store exporter,
-      immutable R2 retention, Access-gated operator UI, isolated restore drills,
-      and cross-store recovery contracts.
-    code:
-      - packages/backup-control-plane/
-      - packages/worker/src/dr/
-      - packages/shared/src/backup-
-      - tools/ci/backup-
-      - tools/disaster-recovery/
-    docs:
-      - docs/contributing/disaster-recovery.md
-      - docs/contributing/setup-manifest.md
-
   - id: artifacts-repos
     group: storage
     name: Artifacts repos
@@ -538,10 +465,12 @@ primitives:
 
   - id: vectorize-search
     group: storage
-    name: Vectorize search
+    name: Search index
     summary: Capability and package vector search filtered by userId.
     code:
-      - packages/worker/src/vectorize
+      - packages/worker/src/search-index
+      - packages/worker/src/aws/pg-search-index.ts
+      - packages/worker/src/aws/bedrock-embeddings.ts
       - packages/worker/src/mcp/capabilities/capability-search.ts
     docs:
       - docs/contributing/architecture/data-storage.md
@@ -562,6 +491,7 @@ primitives:
     summary: Per-user execution history and logs across every runtime surface.
     code:
       - packages/worker/src/run-records/
+      - packages/worker/src/aws/dynamo-runs.ts
       - packages/worker/src/mcp/capabilities/runs/
     docs:
       - docs/contributing/architecture/run-records.md
@@ -570,12 +500,12 @@ primitives:
     group: storage
     name: User meter
     summary:
-      Per-user UserMeter DO SQLite — authoritative for daily entitlement
-      counters, storage bytes, inbound delivery idempotency, and
-      account-deletion write leases; D1 keeps the deleting point gate and
+      Per-user UserMeter on the DynamoDB meters table — authoritative for daily
+      entitlement counters, storage bytes, inbound delivery idempotency, and
+      account-deletion write leases; Postgres keeps the deleting point gate and
       lease-repair audit log.
     code:
-      - packages/worker/src/entitlements/user-meter-do.ts
+      - packages/worker/src/aws/dynamo-meters.ts
       - packages/worker/src/entitlements/user-meter-client.ts
       - packages/worker/src/account/deletion-state.ts
     docs:
@@ -608,7 +538,6 @@ primitives:
       Cloudflare Queue ingestion for outbound Email Sending lifecycle events.
     code:
       - packages/worker/src/email/delivery-
-      - tools/ci/production-resources.ts
     docs:
       - docs/use/email-primitives.md
       - docs/contributing/setup-manifest.md
@@ -620,8 +549,7 @@ primitives:
       Durable opaque event delivery from persisted feedback to admin packages.
     code:
       - packages/worker/src/platform-feedback/dispatch-queue
-      - packages/worker/src/queue-handler
-      - tools/ci/production-queue-resources
+      - packages/worker/src/temporal/workflows/queue-message.ts
     docs:
       - docs/contributing/setup-manifest.md
       - docs/contributing/architecture/authorization.md

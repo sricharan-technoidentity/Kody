@@ -1,7 +1,5 @@
-import { quoteSqlIdentifier } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { getAccountD1UserColumnCoverage } from './data-targets.ts'
 import {
 	createAccountExport,
 	createAccountExportManifest,
@@ -14,46 +12,18 @@ import {
 } from '#worker/test-support/account-export.ts'
 import { createMemoryKvNamespace } from '#worker/test-support/memory-kv.ts'
 
-test('account export D1 coverage includes every live user-owned schema column', () => {
-	const db = new DatabaseSync(':memory:')
-	// Coverage tracks APP_DB only; jobs tables live in the jobs worker's
-	// database and are exported through the JOBS service (ADR 0016).
-	applyAllMigrations(db, new URL('../../migrations/', import.meta.url))
-	const tables = db
-		.prepare(
-			`SELECT name
-			FROM sqlite_schema
-			WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-			ORDER BY name`,
-		)
-		.all() as Array<{ name: string }>
-	const liveUserColumns = new Set<string>()
-	for (const table of tables) {
-		const columns = db
-			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
-			.all() as Array<{ name: string }>
-		for (const column of columns) {
-			if (column.name === 'user_id' || column.name.endsWith('_user_id')) {
-				liveUserColumns.add(`${table.name}.${column.name}`)
-			}
-		}
-	}
-	const coveredColumns = getAccountExportD1UserColumnCoverage()
-	const missing = [...liveUserColumns].filter(
-		(column) => !coveredColumns.has(column),
+test('account export D1 coverage is the deletion inventory coverage', () => {
+	// data-targets.node.test.ts checks that coverage against every live
+	// user-owned PostgreSQL column (jobs export through the JOBS service).
+	expect(getAccountExportD1UserColumnCoverage()).toEqual(
+		getAccountD1UserColumnCoverage(),
 	)
-	const stale = [...coveredColumns].filter(
-		(column) => !liveUserColumns.has(column),
-	)
-	expect(missing, 'user-owned D1 columns missing from account export').toEqual(
-		[],
-	)
-	expect(stale, 'account export references stale D1 columns').toEqual([])
 })
 
 test('account export documents and excludes operator-owned system email rows', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -104,8 +74,9 @@ test('account export documents and excludes operator-owned system email rows', a
 })
 
 test('account export includes submitted feedback but excludes reviewer-only relationships', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO platform_feedback (
 			id, submitter_user_id, submitter_username, submitter_email,
 			category, summary, details, status, reviewed_by_user_id,
@@ -182,8 +153,9 @@ test('account export includes submitted feedback but excludes reviewer-only rela
 })
 
 test('account export includes profile fields and social graph edges for either side', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id, display_name, bio, profile_visibility
@@ -263,8 +235,8 @@ test('account export includes profile fields and social graph edges for either s
 })
 
 test('account export separates listing-owner deletion cascades from participant ownership', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -301,7 +273,7 @@ test('account export separates listing-owner deletion cascades from participant 
 		);
 	`)
 	const ownerExport = await createAccountExport({
-		env: { APP_DB: db } as Env,
+		env: { APP_DB: database.dbFor('user-owner') } as Env,
 		dbUserId: 1,
 		mcpUserId: 'user-owner',
 	})
@@ -310,7 +282,7 @@ test('account export separates listing-owner deletion cascades from participant 
 	expect(ownerExport.d1.community_reports.rows).toEqual([])
 
 	const participantExport = await createAccountExport({
-		env: { APP_DB: db } as Env,
+		env: { APP_DB: database.dbFor('user-participant') } as Env,
 		dbUserId: 2,
 		mcpUserId: 'user-participant',
 	})
@@ -338,8 +310,8 @@ test('account export separates listing-owner deletion cascades from participant 
 })
 
 test('account write lease repair export redacts the foreign party for both perspectives', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -355,7 +327,7 @@ test('account write lease repair export redacts the foreign party for both persp
 		);
 	`)
 	const targetExport = await createAccountExport({
-		env: { APP_DB: db } as Env,
+		env: { APP_DB: database.dbFor('user-target') } as Env,
 		dbUserId: 1,
 		mcpUserId: 'user-target',
 	})
@@ -366,7 +338,7 @@ test('account write lease repair export redacts the foreign party for both persp
 		}),
 	])
 	const adminExport = await createAccountExport({
-		env: { APP_DB: db } as Env,
+		env: { APP_DB: database.dbFor('user-admin') } as Env,
 		dbUserId: 2,
 		mcpUserId: 'user-admin',
 	})
@@ -379,8 +351,9 @@ test('account write lease repair export redacts the foreign party for both persp
 })
 
 test('createAccountExport redacts secrets and credential-equivalent hashes', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -513,8 +486,9 @@ test('createAccountExport redacts secrets and credential-equivalent hashes', asy
 })
 
 test('createAccountExport records partial-failure warnings and section pagination works', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -613,11 +587,12 @@ test('createAccountExport records partial-failure warnings and section paginatio
 test('D1 export reads large tables in bounded keyset pages', async () => {
 	const rowCounts: Array<number> = []
 	const queries: Array<string> = []
-	const { sqlite, db } = createMigratedDb({
+	await using database = await createMigratedDb({
 		onQueryRows: (rowCount) => rowCounts.push(rowCount),
 		onQuery: (query) => queries.push(query),
 	})
-	sqlite.exec(`
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -628,15 +603,16 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 		);
 	`)
 	const totalRows = 502
-	const insert = sqlite.prepare(
+	await database.pg.query(
 		`INSERT INTO mcp_memories (
 			id, user_id, subject, summary, details, created_at, updated_at
-		) VALUES (?, 'user-aaa', ?, 'Summary', '', '2026-07-05', '2026-07-05')`,
+		)
+		SELECT 'memory-' || lpad(index::text, 4, '0'), 'user-aaa', 'Memory ' || index,
+			'Summary', '', '2026-07-05', '2026-07-05'
+		FROM generate_series(0, $1 - 1) AS index`,
+		[totalRows],
 	)
-	for (let index = 0; index < totalRows; index += 1) {
-		insert.run(`memory-${String(index).padStart(4, '0')}`, `Memory ${index}`)
-	}
-	sqlite.exec(`
+	await database.exec(`
 		INSERT INTO user_storage_buckets (
 			user_id, storage_id, kind, created_at, last_seen_at
 		) VALUES (
@@ -719,8 +695,9 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 })
 
 test('account export reads OAuth grant metadata from OAUTH_KV when the provider helpers are absent', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	await using database = await createMigratedDb()
+	const { db } = database
+	await database.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id

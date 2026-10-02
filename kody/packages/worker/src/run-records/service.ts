@@ -1,6 +1,5 @@
 import { toJsonSafeValue } from '@kody-internal/shared/json-safe-value.ts'
 import { packageInvocationStartedLog } from '#worker/caller-disconnect.ts'
-import { runLogDurableObjectName } from '#worker/user-scoped-durable-object-name.ts'
 import { type RunLogAdminInsightsSnapshot } from './admin-insights-snapshot.ts'
 import {
 	type ActivationMilestoneRecord,
@@ -19,10 +18,15 @@ import {
 	type RunLogEntryInput,
 	type RunLogRowInput,
 	type RunLogRpc,
-	type RunLogSqlBillingInspection,
-	type RunLogSqlBillingStats,
-	runLogSqlBillingOps,
-} from './run-log-do.ts'
+	type RunState,
+} from './run-state-types.ts'
+import {
+	type RunRecords,
+	type RunRecordsRpc,
+	normalizePageSize,
+	serializeJson,
+	truncateUtf8,
+} from './run-log-types.ts'
 import {
 	type WorkflowProjectionRecord,
 	type WorkflowProjectionReserveResult,
@@ -44,15 +48,11 @@ import {
 	runLogLevelValues,
 	runPersistenceForContext,
 	runRecordDefaultPageSize,
-	runRecordMaxJsonBytes,
 	runRecordMaxLogEntriesPerRun,
 	runRecordMaxPageSize,
 	runRecordMaxResultSnapshotBytes,
 	runRecordMaxTextBytes,
 } from './types.ts'
-
-export { runLogSqlBillingOps }
-export type { RunLogSqlBillingInspection, RunLogSqlBillingStats }
 
 const textEncoder = new TextEncoder()
 
@@ -61,47 +61,10 @@ function normalizeOptionalString(value: string | null | undefined) {
 	return trimmed && trimmed.length > 0 ? trimmed : null
 }
 
-function truncateUtf8(value: string, maxBytes: number) {
-	if (textEncoder.encode(value).length <= maxBytes) return value
-	const suffix = '... [truncated]'
-	let low = 0
-	let high = value.length
-	let best = ''
-	while (low <= high) {
-		const midpoint = Math.floor((low + high) / 2)
-		const candidate = `${value.slice(0, midpoint)}${suffix}`
-		if (textEncoder.encode(candidate).length <= maxBytes) {
-			best = candidate
-			low = midpoint + 1
-		} else {
-			high = midpoint - 1
-		}
-	}
-	return best
-}
-
-function serializeJson(value: unknown, maxBytes = runRecordMaxJsonBytes) {
-	const json = JSON.stringify(toJsonSafeValue(value))
-	if (textEncoder.encode(json).length <= maxBytes) return json
-	let preview = truncateUtf8(json, Math.max(0, maxBytes - 128))
-	let wrapped = JSON.stringify({
-		__truncated__: true,
-		preview,
-	})
-	while (textEncoder.encode(wrapped).length > maxBytes && preview.length > 0) {
-		preview = preview.slice(0, Math.floor(preview.length * 0.8))
-		wrapped = JSON.stringify({
-			__truncated__: true,
-			preview,
-		})
-	}
-	return wrapped
-}
-
 /**
  * Bound a JSON-serializable handler result for `metadata.result`. Oversized
  * values become `{ __truncated__: true, preview }` so `runGet` stays useful
- * without blowing per-user DO storage.
+ * without blowing per-user run storage.
  */
 export function snapshotRunRecordResult(
 	value: unknown,
@@ -230,18 +193,172 @@ function buildRunRow(input: {
 	}
 }
 
-function runLogBinding(env: Env) {
-	return (env as Partial<Env>).RUN_LOG ?? null
+function runRecordsBinding(env: Env): RunRecords | null {
+	return (env as Partial<Env>).RUN_RECORDS ?? null
 }
 
+function requireBinding<T>(value: T | null, message: string): T {
+	if (value == null) throw new Error(message)
+	return value
+}
+
+const ledgerExportCursor = 'invocation-ledger:'
+const projectionsExportCursor = 'workflow-projections:'
+
+/** Per-owner history in DynamoDB/S3, invocation replay in DynamoDB, workflow state in Temporal. */
 export function runLogRpc(input: { env: Env; userId: string }): RunLogRpc {
-	const namespace = runLogBinding(input.env)
-	if (!namespace) {
-		throw new Error('RUN_LOG Durable Object binding is not configured.')
+	const records = (): RunRecordsRpc =>
+		requireBinding(
+			runRecordsBinding(input.env),
+			'RUN_RECORDS binding is not configured.',
+		).forUser(input.userId)
+	const stateBinding = () =>
+		(input.env as Partial<Env> & { RUN_STATE?: RunState }).RUN_STATE ?? null
+	const state = () =>
+		requireBinding(
+			stateBinding(),
+			'RUN_STATE binding is not configured.',
+		).forUser(input.userId)
+	return {
+		startRun: (args) => records().startRun(args),
+		claimRun: (args) => records().claimRun(args),
+		finishRun: (args) => records().finishRun(args),
+		listRuns: (args) => records().listRuns(args),
+		getRun: (args) => records().getRun(args),
+		getRunByIdempotencyKey: (args) => records().getRunByIdempotencyKey(args),
+		deleteRunIfRunning: (args) => records().deleteRunIfRunning(args),
+		summarize: (args) => records().summarize(args),
+		updateRunErrorTriage: (args) => records().updateRunErrorTriage(args),
+		bulkUpdateRunErrorTriage: (args) =>
+			records().bulkUpdateRunErrorTriage(args),
+		listStorageIds: () => records().listStorageIds(),
+		upsertJobRunObservability: (args) =>
+			records().upsertJobRunObservability(args),
+		getJobRunObservability: (args) => records().getJobRunObservability(args),
+		getJobRunObservabilityBatch: (args) =>
+			records().getJobRunObservabilityBatch(args),
+		listPackageRunSuccesses: () => records().listPackageRunSuccesses(),
+		listActivationMilestones: () => records().listActivationMilestones(),
+
+		async claimPackageInvocation(args) {
+			const claimed = await state().claimPackageInvocation(args)
+			if (claimed.outcome === 'claimed' && args.run)
+				await records().startRun({
+					run: { ...args.run, invocationId: claimed.invocationId },
+					initialLogs: args.initialLogs,
+				})
+			return claimed
+		},
+		getPackageInvocation: (args) => state().getPackageInvocation(args),
+		async finishPackageInvocation(args) {
+			const finished = await state().finishPackageInvocation(args)
+			if (args.run)
+				await records().finishRun({ run: args.run, logs: args.logs })
+			return finished
+		},
+		async releasePackageInvocation(args) {
+			const result = await state().releasePackageInvocation(args)
+			if (args.runId) await records().deleteRunIfRunning({ runId: args.runId })
+			return result
+		},
+		upsertWorkflowProjection: (args) => state().upsertWorkflowProjection(args),
+		getWorkflowProjection: (args) => state().getWorkflowProjection(args),
+		findWorkflowProjectionByIdempotencyKey: (args) =>
+			state().findWorkflowProjectionByIdempotencyKey(args),
+		findWorkflowProjectionByBindingIdempotencyKey: (args) =>
+			state().findWorkflowProjectionByBindingIdempotencyKey(args),
+		listWorkflowProjections: (args) => state().listWorkflowProjections(args),
+		countActiveWorkflowProjections: () =>
+			state().countActiveWorkflowProjections(),
+		reserveWorkflowProjectionSlot: (args) =>
+			state().reserveWorkflowProjectionSlot(args),
+		deleteWorkflowProjectionIfCreating: (args) =>
+			state().deleteWorkflowProjectionIfCreating(args),
+		async getAdminInsightsSnapshot() {
+			const snapshot = await records().getAdminInsightsSnapshot()
+			if (!stateBinding()) return snapshot
+			const { workflowProjections } = await state().exportState()
+			const counts = new Map<string, number>()
+			for (const row of workflowProjections)
+				counts.set(
+					row.status ?? 'unknown',
+					(counts.get(row.status ?? 'unknown') ?? 0) + 1,
+				)
+			return {
+				...snapshot,
+				workflowStatusCounts: [...counts].map(([status, count]) => ({
+					status,
+					count,
+				})),
+			}
+		},
+		async exportRuns(args) {
+			const startAfter = args.startAfter?.trim() ?? ''
+			const statePhase =
+				startAfter.startsWith(ledgerExportCursor) ||
+				startAfter.startsWith(projectionsExportCursor)
+			const empty = {
+				runs: [],
+				logs: [],
+				jobRunObservability: [],
+				packageRunSuccesses: [],
+				activationMilestones: [],
+				nextStartAfter: null,
+				truncated: false,
+			}
+			const page = statePhase ? empty : await records().exportRuns(args)
+			const result = {
+				...page,
+				packageInvocations: [] as Array<PackageInvocationLedgerRecord>,
+				workflowProjections: [] as Array<WorkflowProjectionRecord>,
+			}
+			if (page.truncated || !stateBinding()) return result
+			let remaining =
+				normalizePageSize(args.pageSize, runRecordDefaultPageSize) -
+				page.runs.length -
+				page.jobRunObservability.length -
+				page.packageRunSuccesses.length -
+				page.activationMilestones.length
+			const all = await state().exportState()
+			const phases = [
+				['packageInvocations', ledgerExportCursor],
+				['workflowProjections', projectionsExportCursor],
+			] as const
+			let index = startAfter.startsWith(projectionsExportCursor) ? 1 : 0
+			let after = statePhase ? startAfter.slice(phases[index]![1].length) : ''
+			for (; index < phases.length; index++) {
+				const [field, prefix] = phases[index]!
+				if (remaining <= 0)
+					return { ...result, nextStartAfter: prefix + after, truncated: true }
+				const candidates = all[field]
+					.filter((row) => row.id > after)
+					.sort((a, b) => a.id.localeCompare(b.id))
+				const taken = candidates.slice(0, remaining)
+				if (field === 'packageInvocations')
+					result.packageInvocations.push(
+						...(taken as Array<PackageInvocationLedgerRecord>),
+					)
+				else
+					result.workflowProjections.push(
+						...(taken as Array<WorkflowProjectionRecord>),
+					)
+				remaining -= taken.length
+				if (candidates.length > taken.length)
+					return {
+						...result,
+						nextStartAfter: prefix + taken.at(-1)!.id,
+						truncated: true,
+					}
+				after = ''
+			}
+			return { ...result, nextStartAfter: null, truncated: false }
+		},
+		async clearAll() {
+			await records().clearAll()
+			if (stateBinding()) await state().clear()
+			return { ok: true }
+		},
 	}
-	return namespace.get(
-		namespace.idFromName(runLogDurableObjectName(input.userId)),
-	) as unknown as RunLogRpc
 }
 
 /**
@@ -255,10 +372,10 @@ export function beginRunRecord(input: {
 	context?: RunRecordContext | null
 	waitUntil?: (promise: Promise<unknown>) => void
 }): RunRecordHandle | null {
-	const namespace = runLogBinding(input.env)
+	const records = runRecordsBinding(input.env)
 	const userId = normalizeOptionalString(input.userId ?? undefined)
 	const context = input.context
-	if (!namespace || !userId || !context) return null
+	if (!records || !userId || !context) return null
 
 	try {
 		const id = crypto.randomUUID()
@@ -321,10 +438,10 @@ export async function claimRunRecord(input: {
 	| { claimed: false; run: RunRecord }
 	| null
 > {
-	const namespace = runLogBinding(input.env)
+	const records = runRecordsBinding(input.env)
 	const userId = normalizeOptionalString(input.userId ?? undefined)
 	const context = input.context
-	if (!namespace || !userId || !context) return null
+	if (!records || !userId || !context) return null
 	const idempotencyKey = normalizeOptionalString(context.idempotencyKey)
 	if (!idempotencyKey) return null
 
@@ -391,7 +508,7 @@ export async function finishRunRecord(input: {
 
 	let persistedRun: RunLogRowInput | null = null
 	try {
-		if (runLogBinding(input.env)) {
+		if (runRecordsBinding(input.env)) {
 			const finishedAt = new Date().toISOString()
 			const durationMs = Math.max(
 				0,
@@ -463,10 +580,10 @@ export async function recordRunRecord(input: {
 	startedAt?: string | null
 	waitUntil?: (promise: Promise<unknown>) => void
 }): Promise<RunRecordHandle | null> {
-	const namespace = runLogBinding(input.env)
+	const records = runRecordsBinding(input.env)
 	const userId = normalizeOptionalString(input.userId ?? undefined)
 	const context = input.context
-	if (!namespace || !userId || !context) return null
+	if (!records || !userId || !context) return null
 
 	let handle: RunRecordHandle
 	try {
@@ -501,7 +618,7 @@ export async function listRunRecords(input: {
 	limit?: number | null
 	cursor?: string | null
 }): Promise<RunRecordPage> {
-	if (!runLogBinding(input.env)) {
+	if (!runRecordsBinding(input.env)) {
 		return { runs: [], nextCursor: null }
 	}
 	const limit = Math.min(
@@ -538,7 +655,7 @@ export async function updateRunErrorTriage(input: {
 	errorTriage: RunErrorTriage | null
 	triageNote?: string | null
 }): Promise<UpdateRunErrorTriageOutcome> {
-	if (!runLogBinding(input.env)) return { ok: false, reason: 'unavailable' }
+	if (!runRecordsBinding(input.env)) return { ok: false, reason: 'unavailable' }
 	// Treat omitted / undefined note as preserve. Pass an explicit boolean over
 	// DO RPC so we do not depend on `undefined` surviving structured clone.
 	const preserveTriageNote = input.triageNote === undefined
@@ -572,7 +689,7 @@ export async function bulkUpdateRunErrorTriage(input: {
 	limit?: number | null
 	dryRun?: boolean
 }): Promise<BulkUpdateRunErrorTriageOutcome> {
-	if (!runLogBinding(input.env)) return { reason: 'unavailable' }
+	if (!runRecordsBinding(input.env)) return { reason: 'unavailable' }
 	const preserveTriageNote = input.triageNote === undefined
 	return await runLogRpc({
 		env: input.env,
@@ -597,7 +714,7 @@ export async function getRunRecord(input: {
 	userId: string
 	runId: string
 }): Promise<{ run: RunRecord; logs: Array<RunRecordLog> } | null> {
-	if (!runLogBinding(input.env)) return null
+	if (!runRecordsBinding(input.env)) return null
 	return await runLogRpc({ env: input.env, userId: input.userId }).getRun({
 		runId: input.runId,
 	})
@@ -610,7 +727,7 @@ export async function getRunRecordByIdempotencyKey(input: {
 	surface?: RunRecordContext['surface'] | null
 }): Promise<RunRecord | null> {
 	const key = normalizeOptionalString(input.idempotencyKey)
-	if (!runLogBinding(input.env) || !key) return null
+	if (!runRecordsBinding(input.env) || !key) return null
 	return await runLogRpc({
 		env: input.env,
 		userId: input.userId,
@@ -629,7 +746,7 @@ export async function abandonRunRecord(input: {
 	handle: RunRecordHandle | null
 }): Promise<void> {
 	const handle = input.handle
-	if (!handle || !runLogBinding(input.env)) return
+	if (!handle || !runRecordsBinding(input.env)) return
 	try {
 		await runLogRpc({
 			env: input.env,
@@ -730,8 +847,7 @@ export async function getPackageInvocationRecord(input: {
 }
 
 /**
- * Terminal ledger response and run-record finish in ONE awaited on-path DO
- * RPC — the counterpart to {@link claimPackageInvocationRecord}. RPC failures
+ * Terminal ledger response and run-record finish in an awaited durable write — the counterpart to {@link claimPackageInvocationRecord}. RPC failures
  * propagate (the caller decides whether a lost terminal write may poison the
  * key); run-error subscription side effects shared with
  * {@link finishRunRecord} never throw and are scheduled on `waitUntil` when
@@ -877,7 +993,7 @@ export async function summarizeRunRecords(input: {
 }): Promise<RunRecordSummary> {
 	const since =
 		normalizeOptionalString(input.since) ?? new Date(0).toISOString()
-	if (!runLogBinding(input.env)) {
+	if (!runRecordsBinding(input.env)) {
 		return {
 			since,
 			total: 0,
@@ -897,7 +1013,7 @@ export async function listRunRecordStorageIds(input: {
 	env: Env
 	userId: string
 }): Promise<Array<string>> {
-	if (!runLogBinding(input.env)) return []
+	if (!runRecordsBinding(input.env)) return []
 	return await runLogRpc({
 		env: input.env,
 		userId: input.userId,
@@ -920,7 +1036,7 @@ export async function exportRunRecords(input: {
 	nextStartAfter: string | null
 	truncated: boolean
 }> {
-	if (!runLogBinding(input.env)) {
+	if (!runRecordsBinding(input.env)) {
 		return {
 			runs: [],
 			logs: [],
@@ -954,7 +1070,7 @@ export async function clearRunRecords(input: {
 	env: Env
 	userId: string
 }): Promise<void> {
-	if (!runLogBinding(input.env)) return
+	if (!runRecordsBinding(input.env)) return
 	await runLogRpc({ env: input.env, userId: input.userId }).clearAll()
 }
 
@@ -1085,7 +1201,7 @@ export async function upsertJobRunObservability(input: {
 	userId: string
 	outcome: JobRunObservabilityUpsertInput
 }): Promise<JobRunObservabilityRecord | null> {
-	if (!runLogBinding(input.env)) return null
+	if (!runRecordsBinding(input.env)) return null
 	try {
 		return await runLogRpc({
 			env: input.env,
@@ -1102,7 +1218,7 @@ export async function getJobRunObservability(input: {
 	userId: string
 	jobId: string
 }): Promise<JobRunObservabilityRecord | null> {
-	if (!runLogBinding(input.env)) return null
+	if (!runRecordsBinding(input.env)) return null
 	try {
 		return await runLogRpc({
 			env: input.env,
@@ -1115,54 +1231,18 @@ export async function getJobRunObservability(input: {
 }
 
 /**
- * Content-free per-user RunLog snapshot for post-D1 admin insights readers.
- * Propagates binding/RPC errors. Never returns user-authored content.
+ * Content-free per-user run snapshot for post-D1 admin insights readers.
+ * Requires `RUN_RECORDS`; workflow status counts come from Temporal when
+ * bound. Propagates binding/RPC errors. Never returns user-authored content.
  */
 export async function getAdminInsightsSnapshot(input: {
 	env: Env
 	userId: string
 }): Promise<RunLogAdminInsightsSnapshot> {
-	if (!runLogBinding(input.env)) {
-		throw new Error('RUN_LOG Durable Object binding is not configured.')
-	}
 	return await runLogRpc({
 		env: input.env,
 		userId: input.userId,
 	}).getAdminInsightsSnapshot()
-}
-
-/**
- * RunLog-only SQLite rowsRead/rowsWritten counters for cost diagnosis.
- * Propagates binding/RPC errors. Never returns user content.
- */
-export async function getSqlBillingStats(input: {
-	env: Env
-	userId: string
-}): Promise<RunLogSqlBillingStats> {
-	if (!runLogBinding(input.env)) {
-		throw new Error('RUN_LOG Durable Object binding is not configured.')
-	}
-	return await runLogRpc({
-		env: input.env,
-		userId: input.userId,
-	}).getSqlBillingStats()
-}
-
-/**
- * Content-free RunLog schema + SQL-plan snapshot for cost diagnosis.
- * Propagates binding/RPC errors. Never returns user content.
- */
-export async function inspectRunLogSqlBilling(input: {
-	env: Env
-	userId: string
-}): Promise<RunLogSqlBillingInspection> {
-	if (!runLogBinding(input.env)) {
-		throw new Error('RUN_LOG Durable Object binding is not configured.')
-	}
-	return await runLogRpc({
-		env: input.env,
-		userId: input.userId,
-	}).inspectSqlBilling()
 }
 
 export async function getJobRunObservabilityBatch(input: {
@@ -1170,7 +1250,7 @@ export async function getJobRunObservabilityBatch(input: {
 	userId: string
 	jobIds: Array<string>
 }): Promise<Array<JobRunObservabilityRecord>> {
-	if (!runLogBinding(input.env)) return []
+	if (!runRecordsBinding(input.env)) return []
 	try {
 		return await runLogRpc({
 			env: input.env,
@@ -1190,7 +1270,7 @@ export async function listPackageRunSuccesses(input: {
 	env: Env
 	userId: string
 }): Promise<Array<PackageRunSuccessRecord>> {
-	if (!runLogBinding(input.env)) return []
+	if (!runRecordsBinding(input.env)) return []
 	try {
 		return await runLogRpc({
 			env: input.env,
@@ -1206,7 +1286,7 @@ export async function listActivationMilestones(input: {
 	env: Env
 	userId: string
 }): Promise<Array<ActivationMilestoneRecord>> {
-	if (!runLogBinding(input.env)) return []
+	if (!runRecordsBinding(input.env)) return []
 	try {
 		return await runLogRpc({
 			env: input.env,
@@ -1224,7 +1304,7 @@ export type {
 	PackageInvocationLedgerKey,
 	PackageInvocationLedgerRecord,
 	PackageInvocationLedgerStatus,
-} from './run-log-do.ts'
+} from './run-state-types.ts'
 export type {
 	RunLogAdminInsightsActivationMilestone,
 	RunLogAdminInsightsSnapshot,

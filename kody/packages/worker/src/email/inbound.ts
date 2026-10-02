@@ -159,7 +159,7 @@ export async function handleInboundEmail(
 		| 'LEGACY_USER_EMAIL_DOMAINS'
 		| 'LEGACY_SYSTEM_EMAIL_DOMAINS'
 		| 'USAGE_EVENTS'
-		| 'USER_METER'
+		| 'USER_METERS'
 		| 'MAILBOX'
 		| 'EMAIL_EVENTS'
 	> &

@@ -1,5 +1,7 @@
 import { toHex } from '@kody-internal/shared/hex.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
+
+type AuditDatabase = Pick<SqlDatabase, 'prepare'>
 
 export const auditEventCategories = [
 	'account',
@@ -13,7 +15,7 @@ export type AuditEventCategory = (typeof auditEventCategories)[number]
 export type AuditEventResult = (typeof auditEventResults)[number]
 
 type AuditEvent = {
-	db: D1Database | null | undefined
+	db: AuditDatabase | null | undefined
 	category: AuditEventCategory
 	action: string
 	result: AuditEventResult
@@ -96,14 +98,14 @@ async function buildAuditPayload(event: AuditEvent) {
 }
 
 async function persistAuditEvent(
-	db: D1Database | undefined,
+	db: AuditDatabase | undefined,
 	payload: Awaited<ReturnType<typeof buildAuditPayload>>,
 ) {
 	if (!db) return
-	await runD1WithRetry(() =>
-		db
-			.prepare(
-				`INSERT INTO audit_events (
+	// A disconnected append may already have committed. Retrying can duplicate it.
+	await db
+		.prepare(
+			`INSERT INTO audit_events (
 				category,
 				action,
 				result,
@@ -114,28 +116,26 @@ async function persistAuditEvent(
 				reason,
 				timestamp
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			)
-			.bind(
-				payload.category,
-				payload.action,
-				payload.result,
-				payload.emailHash ?? null,
-				payload.ipHash ?? null,
-				payload.clientId ?? null,
-				payload.path ?? null,
-				payload.reason ?? null,
-				payload.timestamp,
-			)
-			.run(),
-	)
+		)
+		.bind(
+			payload.category,
+			payload.action,
+			payload.result,
+			payload.emailHash ?? null,
+			payload.ipHash ?? null,
+			payload.clientId ?? null,
+			payload.path ?? null,
+			payload.reason ?? null,
+			payload.timestamp,
+		)
+		.run()
 }
 
 export function auditDatabaseFromEnv(runtimeEnv: {
-	AUDIT_DB?: D1Database
+	AUDIT_DB?: AuditDatabase
 	SENTRY_ENVIRONMENT?: string
 }) {
-	// Generic Workers tests opt into the real audit sink explicitly so they do
-	// not all need to migrate a second database unrelated to their behavior.
+	// Tests opt into audit persistence explicitly.
 	return runtimeEnv.SENTRY_ENVIRONMENT === 'test'
 		? undefined
 		: (runtimeEnv.AUDIT_DB ?? null)
@@ -172,7 +172,7 @@ export async function logAuditEvent(event: AuditEvent) {
 	}
 }
 
-export async function queryAuditLog(db: D1Database, query: AuditLogQuery) {
+export async function queryAuditLog(db: AuditDatabase, query: AuditLogQuery) {
 	const limit = Math.max(
 		1,
 		Math.min(Math.floor(query.limit ?? defaultAuditLogLimit), maxAuditLogLimit),

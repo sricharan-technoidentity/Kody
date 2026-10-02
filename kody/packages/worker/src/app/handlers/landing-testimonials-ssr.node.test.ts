@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { setAuthSessionSecret } from '#app/auth-session.ts'
 import { resetDataCacheForTests } from '#app/data-cache.ts'
@@ -5,50 +6,19 @@ import { createBlogPostHandler } from '#app/handlers/blog.tsx'
 import { renderAppPage } from '#app/ssr-render.tsx'
 import { getBlogPost, getReadNextBlogPost } from '#worker/blog/catalog.ts'
 import { createMemoryKv } from '#worker/test-support/auth-provider-harness.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testOidcSigningEnv } from '#worker/test-support/oidc-signing-env.ts'
 import { landingTestimonialsStorySlug } from '#universal/landing-testimonials.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-function createAnonymousTestDb() {
-	function createStatement(query: string) {
-		return {
-			query,
-			bind() {
-				return createStatement(query)
-			},
-			async all() {
-				return { results: [], meta: { changes: 0, last_row_id: 0 } }
-			},
-			async first() {
-				return null
-			},
-			async run() {
-				return { meta: { changes: 0, last_row_id: 0 } }
-			},
-		}
-	}
-
-	return {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
-}
-
-function createTestEnv() {
+function createTestEnv(db: PgDatabase) {
 	return {
 		COOKIE_SECRET: testCookieSecret,
-		SECRET_STORE_KEY: 'LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM',
+		SECRET_KMS: testSecretKms,
 		...testOidcSigningEnv,
-		APP_DB: createAnonymousTestDb(),
+		APP_DB: db,
 		BUNDLE_ARTIFACTS_KV: createMemoryKv(),
 		JOB_MANAGER: {},
 		STORAGE_RUNNER: {},
@@ -60,9 +30,10 @@ function createTestEnv() {
 test('homepage carousel SSR keeps short quotes and story links only for vignettes', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
+	await using store = await createTestDb()
 	const response = await renderAppPage({
 		request: new Request('https://example.com/'),
-		env: createTestEnv(),
+		env: createTestEnv(store.db),
 		loaderData: {},
 	})
 	expect(response.status).toBe(200)
@@ -87,9 +58,10 @@ test('homepage carousel SSR keeps short quotes and story links only for vignette
 test('early-users blog post SSR renders approved vignettes and heading anchors', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
+	await using store = await createTestDb()
 	const post = getBlogPost(landingTestimonialsStorySlug)
 	expect(post).toBeDefined()
-	const env = createTestEnv()
+	const env = createTestEnv(store.db)
 	const response = await createBlogPostHandler(env).handler({
 		request: new Request(
 			`https://example.com/blog/${landingTestimonialsStorySlug}`,

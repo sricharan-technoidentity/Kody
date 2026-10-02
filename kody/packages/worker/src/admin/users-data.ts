@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { d1ContainsLikePattern } from '#worker/d1-like-pattern.ts'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 import { readPagination } from '#worker/query-params.ts'
@@ -197,8 +198,10 @@ function buildAdminUserListWhereClause(
 	const conditions: Array<string> = []
 	const params: Array<string> = []
 	if (filters.query) {
-		const pattern = d1ContainsLikePattern(filters.query)
-		conditions.push(`(username LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\')`)
+		const pattern = d1ContainsLikePattern(filters.query).toLowerCase()
+		conditions.push(
+			`(lower(username) LIKE ? ESCAPE '\\' OR lower(email) LIKE ? ESCAPE '\\')`,
+		)
 		params.push(pattern, pattern)
 	}
 	if (filters.role) {
@@ -319,7 +322,7 @@ export type AdminUserTarget = {
 }
 
 export async function loadAdminUserByTarget(
-	db: D1Database,
+	db: SqlDatabase,
 	input: AdminUserTarget,
 ): Promise<AdminUserListItem | null> {
 	const stableUserId = normalizeStableUserId(input.stableUserId)
@@ -342,7 +345,7 @@ export async function loadAdminUserByTarget(
 					.prepare(
 						`SELECT ${adminUserRowSelectSql}
 						 FROM users
-						 WHERE email = ? COLLATE NOCASE`,
+						 WHERE lower(email) = lower(?)`,
 					)
 					.bind(email)
 					.first<AdminUserRow>()
@@ -351,7 +354,7 @@ export async function loadAdminUserByTarget(
 						.prepare(
 							`SELECT ${adminUserRowSelectSql}
 							 FROM users
-							 WHERE username = ? COLLATE NOCASE`,
+							 WHERE lower(username) = lower(?)`,
 						)
 						.bind(username)
 						.first<AdminUserRow>()
@@ -462,7 +465,7 @@ export async function clearAdminUserEmailOutboundPause(
 }
 
 export async function loadRolesByUserIds(
-	db: D1Database,
+	db: SqlDatabase,
 	userIds: Array<number>,
 ) {
 	const rolesByUserId = new Map<number, Array<RoleName>>()
@@ -585,7 +588,7 @@ function toAdminUserListItem(
 }
 
 export async function loadAdminUserRowByStableUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ): Promise<AdminUserRow | null> {
 	if (!isStableUserId(stableUserId)) return null

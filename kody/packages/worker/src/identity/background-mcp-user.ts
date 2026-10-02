@@ -1,5 +1,7 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { type McpUserContext } from '@kody-internal/shared/chat.ts'
 import { AccountSuspendedError } from '#worker/account/account-suspension.ts'
+import { emailVerificationRequiredMessage } from './email-verification-state.ts'
 import { getUserRolesAndPermissions } from './permissions-db.ts'
 import { resolveDisplayName } from './username.ts'
 
@@ -12,7 +14,7 @@ type BackgroundMcpUserCacheEntry = {
 }
 
 const backgroundMcpUserCachesByDb = new WeakMap<
-	D1Database,
+	SqlDatabase,
 	Map<string, BackgroundMcpUserCacheEntry>
 >()
 
@@ -28,12 +30,12 @@ function isMissingRbacTableError(error: unknown) {
 }
 
 async function loadBackgroundMcpUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<McpUserContext> {
 	const user = await db
 		.prepare(
-			`SELECT id, email, username, display_name, suspended_at
+			`SELECT id, email, username, display_name, suspended_at, email_verified_at
 			 FROM users
 			 WHERE stable_user_id = ?`,
 		)
@@ -44,12 +46,16 @@ async function loadBackgroundMcpUser(
 			username: string
 			display_name: string | null
 			suspended_at: string | null
+			email_verified_at: string | null
 		}>()
 	if (!user) {
 		throw new Error(`Background MCP user was not found: ${userId}`)
 	}
 	if (user.suspended_at) {
 		throw new AccountSuspendedError()
+	}
+	if (!user.email_verified_at) {
+		throw new Error(emailVerificationRequiredMessage)
 	}
 	const profileDisplayName = user.display_name?.trim()
 
@@ -114,7 +120,8 @@ async function loadBackgroundMcpUser(
  *
  * This is the suspension choke point for background lanes (jobs, package
  * invocations and subscriptions, workflows, retrievers, realtime hooks):
- * a suspended account throws `AccountSuspendedError` instead of resolving.
+ * a suspended account throws `AccountSuspendedError` instead of resolving,
+ * and an unverified account must verify its email before execution can begin.
  *
  * The short per-binding cache deduplicates nested and bursty package calls
  * while allowing account profile changes to propagate without isolate-wide
@@ -123,7 +130,7 @@ async function loadBackgroundMcpUser(
  * suspension) are evicted immediately, so unsuspending takes effect at once.
  */
 export async function resolveBackgroundMcpUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<McpUserContext> {
 	let cache = backgroundMcpUserCachesByDb.get(db)

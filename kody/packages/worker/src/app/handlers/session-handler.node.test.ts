@@ -7,7 +7,8 @@ import {
 } from '#app/auth-session.ts'
 import { createSessionHandler } from '#app/handlers/session.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
-import { executePreparedD1Batch } from '#worker/test-support/d1-prepared-batch.ts'
+import { type PgDatabase } from '#worker/aws/pg-database.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 const rememberedSession: AuthSession = {
@@ -26,99 +27,27 @@ function createSessionRequestContext(cookie: string) {
 	)
 }
 
-function createSessionTestDb() {
-	const users = new Map([
+/** The remembered account, served through its own scoped writer. */
+async function createSessionTestDb() {
+	const store = await createTestDb()
+	await store.pg.query(
+		`INSERT INTO users (id, email, username, password_hash, stable_user_id, created_at, updated_at)
+		 VALUES (1, 'user@example.com', 'session-user', 'unused', $1, $2, $2),
+		        (2, 'other@example.com', 'other-user', 'unused', $3, $2, $2)`,
 		[
-			1,
-			{
-				id: 1,
-				email: 'user@example.com',
-				username: 'session-user',
-				password_hash: 'unused',
-				stable_user_id: testStableUserIdFromEmail('user@example.com'),
-				created_at: new Date(0).toISOString(),
-				updated_at: new Date(0).toISOString(),
-			},
+			rememberedSession.stableUserId,
+			new Date(0).toISOString(),
+			testStableUserIdFromEmail('other@example.com'),
 		],
-	])
-
-	function createStatement(query: string, params: Array<unknown> = []) {
-		const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
-		const executeAll = async () => {
-			if (
-				normalizedQuery.startsWith('select') &&
-				normalizedQuery.includes('from "users"') &&
-				/"stable_user_id"\s*=/.test(normalizedQuery)
-			) {
-				const user = [...users.values()].find(
-					(row) => row.stable_user_id === params[0],
-				)
-				return {
-					results: user ? [{ ...user }] : [],
-					meta: { changes: 0, last_row_id: 0 },
-				}
-			}
-			if (
-				normalizedQuery.includes('from user_roles ur') &&
-				normalizedQuery.includes('join roles r')
-			) {
-				return {
-					results: [],
-					meta: { changes: 0, last_row_id: 0 },
-				}
-			}
-			// Feature-flag evaluation during /session refresh; empty state uses
-			// registry defaults without throwing.
-			if (
-				normalizedQuery.includes('from feature_flags') ||
-				normalizedQuery.includes('from feature_flag_user_overrides')
-			) {
-				return {
-					results: [],
-					meta: { changes: 0, last_row_id: 0 },
-				}
-			}
-			return {
-				results: [],
-				meta: { changes: 0, last_row_id: 0 },
-			}
-		}
-		return {
-			query,
-			bind(...nextParams: Array<unknown>) {
-				return createStatement(query, nextParams)
-			},
-			async all() {
-				return executeAll()
-			},
-			async first() {
-				const result = await executeAll()
-				return result.results[0] ?? null
-			},
-			async run() {
-				return { meta: { changes: 0, last_row_id: 0 } }
-			},
-		}
-	}
-
-	return {
-		prepare(query: string) {
-			return createStatement(query)
-		},
-		async batch(statements: Array<{ query?: string }>) {
-			return await executePreparedD1Batch(statements)
-		},
-		async exec() {
-			return
-		},
-	} as unknown as D1Database
+	)
+	return store
 }
 
-function createEnv(db = createSessionTestDb()) {
+function createEnv(db: PgDatabase) {
 	return {
 		APP_DB: db,
 		COOKIE_SECRET: testCookieSecret,
-	} as Env
+	} as unknown as Env
 }
 
 async function withMockedNow<T>(now: number, callback: () => Promise<T>) {
@@ -133,7 +62,10 @@ async function withMockedNow<T>(now: number, callback: () => Promise<T>) {
 
 test('session handler only renews remembered sessions after the renewal window', async () => {
 	setAuthSessionSecret(testCookieSecret)
-	const session = createSessionHandler(createEnv())
+	await using store = await createSessionTestDb()
+	const session = createSessionHandler(
+		createEnv(store.forUser(rememberedSession.stableUserId).db),
+	)
 	const now = Date.UTC(2026, 1, 1)
 	const scenarios = [
 		{
@@ -188,27 +120,19 @@ test('session handler only renews remembered sessions after the renewal window',
 
 test('session handler clears cookies for unknown stable user ids', async () => {
 	setAuthSessionSecret(testCookieSecret)
-	const session = createSessionHandler(createEnv())
-	const invalidCookies = await Promise.all([
-		createAuthCookie(
-			{
-				stableUserId: 'f'.repeat(64),
-				email: 'missing@example.com',
-				rememberMe: false,
-			},
+	await using store = await createSessionTestDb()
+	for (const identity of [
+		{ stableUserId: 'f'.repeat(64), email: 'missing@example.com' },
+		{ stableUserId: 'e'.repeat(64), email: 'user@example.com' },
+	]) {
+		const cookie = await createAuthCookie(
+			{ ...identity, rememberMe: false },
 			false,
-		),
-		createAuthCookie(
-			{
-				stableUserId: 'e'.repeat(64),
-				email: 'user@example.com',
-				rememberMe: false,
-			},
-			false,
-		),
-	])
-
-	for (const cookie of invalidCookies) {
+		)
+		// Each request runs on the writer for the account its cookie names.
+		const session = createSessionHandler(
+			createEnv(store.forUser(identity.stableUserId).db),
+		)
 		const response = await session.handler(createSessionRequestContext(cookie))
 
 		expect(response.status).toBe(200)

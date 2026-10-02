@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { deletePasskeysForUser } from '#app/passkeys.ts'
 import { disableTwoFactor } from '#app/two-factor.ts'
 
@@ -12,7 +13,7 @@ export function clearedFactorsAuditReason(cleared: ClearedAccountFactors) {
 }
 
 export async function clearSecondFactorsAndConnections(
-	d1: D1Database,
+	d1: SqlDatabase,
 	userId: number,
 ): Promise<ClearedAccountFactors> {
 	const twoFactorRows = await disableTwoFactor(d1, userId)

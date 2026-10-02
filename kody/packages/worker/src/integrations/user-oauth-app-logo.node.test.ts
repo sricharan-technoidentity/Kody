@@ -1,7 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestObjectBucket } from '#worker/test-support/aws/fake-s3.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	createFakeImagesBinding,
 	tinyPngBytes,
@@ -15,74 +15,27 @@ import {
 	setUserOauthAppLogo,
 } from './user-oauth-app-logo.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
-type StoredObject = {
-	bytes: Uint8Array
-	httpMetadata?: { contentType?: string; cacheControl?: string }
-	customMetadata?: Record<string, string>
-	httpEtag: string
-	size: number
-}
-
-function createInMemoryR2() {
-	const objects = new Map<string, StoredObject>()
-	const bucket = {
-		async put(
-			key: string,
-			bytes: Uint8Array,
-			options?: {
-				httpMetadata?: { contentType?: string; cacheControl?: string }
-				customMetadata?: Record<string, string>
-			},
-		) {
-			objects.set(key, {
-				bytes,
-				...(options?.httpMetadata
-					? { httpMetadata: options.httpMetadata }
-					: {}),
-				...(options?.customMetadata
-					? { customMetadata: options.customMetadata }
-					: {}),
-				httpEtag: `"etag-${objects.size}"`,
-				size: bytes.byteLength,
-			})
-		},
-		async get(key: string) {
-			const stored = objects.get(key)
-			if (!stored) return null
-			return {
-				...stored,
-				body: new Blob([stored.bytes]).stream(),
-				async arrayBuffer() {
-					const copy = new Uint8Array(stored.bytes.byteLength)
-					copy.set(stored.bytes)
-					return copy.buffer
-				},
-			}
-		},
-		async delete(key: string) {
-			objects.delete(key)
-		},
-	} as unknown as R2Bucket
-	return { bucket, objects }
-}
-
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
-	const r2 = createInMemoryR2()
+async function createHarness() {
+	const database = await createTestDb({ userId: 'user-1' })
+	const db = database.db as unknown as D1Database
+	const r2 = createTestObjectBucket('kody-test-community-assets')
 	const env = {
 		APP_DB: db,
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		COMMUNITY_ASSETS: r2.bucket,
 		IMAGES: createFakeImagesBinding(),
-	} as Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY' | 'COMMUNITY_ASSETS' | 'IMAGES'>
-	return { sqlite, db, env, r2 }
+	} as Pick<Env, 'APP_DB' | 'SECRET_KMS' | 'COMMUNITY_ASSETS' | 'IMAGES'>
+	return {
+		db,
+		env,
+		r2,
+		[Symbol.asyncDispose]: () => database[Symbol.asyncDispose](),
+	}
 }
 
-async function provisionApp(harness: ReturnType<typeof createHarness>) {
+async function provisionApp(
+	harness: Awaited<ReturnType<typeof createHarness>>,
+) {
 	return upsertOauthAppWithoutConnection({
 		env: harness.env,
 		userId: 'user-1',
@@ -101,7 +54,7 @@ async function provisionApp(harness: ReturnType<typeof createHarness>) {
 }
 
 test('lazy refit of a favicon logo keeps faviconSourceHost', async () => {
-	const harness = createHarness()
+	await using harness = await createHarness()
 	const app = await provisionApp(harness)
 	const previousKey = `user-oauth-app-logos/${app.userId}/${app.slug}/aaaaaaaaaaaaaaaa.png`
 	await harness.env.COMMUNITY_ASSETS.put(previousKey, tinyPngBytes, {
@@ -150,7 +103,7 @@ test('lazy refit of a favicon logo keeps faviconSourceHost', async () => {
 })
 
 test('lazy refit does not overwrite a newer user logo key', async () => {
-	const harness = createHarness()
+	await using harness = await createHarness()
 	const app = await provisionApp(harness)
 	const previousKey = `user-oauth-app-logos/${app.userId}/${app.slug}/aaaaaaaaaaaaaaaa.png`
 	const newerKey = `user-oauth-app-logos/${app.userId}/${app.slug}/bbbbbbbbbbbbbbbb.webp`
@@ -218,7 +171,7 @@ test('lazy refit does not overwrite a newer user logo key', async () => {
 })
 
 test('lost same-hash refit race keeps the stored user logo', async () => {
-	const harness = createHarness()
+	await using harness = await createHarness()
 	const app = await provisionApp(harness)
 	const previousKey = `user-oauth-app-logos/${app.userId}/${app.slug}/aaaaaaaaaaaaaaaa.png`
 	await harness.env.COMMUNITY_ASSETS.put(previousKey, tinyPngBytes, {

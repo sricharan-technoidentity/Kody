@@ -253,12 +253,12 @@ export async function findOauthAppByAppTuple(input: {
 			WHERE user_id = ?
 				AND client_id = ?
 				AND token_url = ?
-				AND authorize_url IS ?
-				AND api_base_url IS ?
+				AND authorize_url IS NOT DISTINCT FROM ?
+				AND api_base_url IS NOT DISTINCT FROM ?
 				AND flow = ?
-				AND use_pkce IS ?
-				AND token_exchange_style IS ?
-				AND scope_separator IS ?
+				AND use_pkce IS NOT DISTINCT FROM ?
+				AND token_exchange_style IS NOT DISTINCT FROM ?
+				AND scope_separator IS NOT DISTINCT FROM ?
 				AND extra_authorize_params_json = ?
 			LIMIT 1`,
 		)
@@ -482,15 +482,12 @@ export async function addPlatformIntegrationRequiredHosts(input: {
 		.prepare(
 			`UPDATE user_integrations
 			SET required_hosts_json = (
-				SELECT json_group_array(host)
+				SELECT COALESCE(jsonb_agg(host ORDER BY host), '[]'::jsonb)::text
 				FROM (
-					SELECT value AS host
-					FROM json_each(user_integrations.required_hosts_json)
+					SELECT jsonb_array_elements_text(user_integrations.required_hosts_json::jsonb) AS host
 					UNION
-					SELECT value AS host
-					FROM json_each(?)
-					ORDER BY host
-				)
+					SELECT jsonb_array_elements_text(?::jsonb) AS host
+				) AS hosts
 			)
 			WHERE user_id = ? AND name = ? AND platform_app_slug IS NOT NULL`,
 		)
@@ -702,7 +699,7 @@ export async function writeIntegrationAuthFailure(input: {
 				auth_failed_http_status = ?,
 				auth_failed_reconnectable = ?,
 				updated_at = ?
-			WHERE user_id = ? AND name = ? AND token_refreshed_at IS ?`,
+			WHERE user_id = ? AND name = ? AND token_refreshed_at IS NOT DISTINCT FROM ?`,
 		)
 		.bind(
 			now,

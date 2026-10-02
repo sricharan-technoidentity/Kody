@@ -1,3 +1,6 @@
+vi.mock('#worker/temporal/package-workflow.ts', () => ({
+	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
+}))
 import { expect, test, vi } from 'vitest'
 import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 import { type getCapabilityRegistryForContext } from '#mcp/capabilities/registry.ts'
@@ -47,8 +50,8 @@ test('runBundledModuleWithRegistry passes params and injects runtime helpers', a
 				}
 			},
 		} as unknown as D1Database,
-		RUN_LOG: runLog.namespace,
-		DYNAMIC_CALLABLE_WORKFLOWS: {
+		RUN_STATE: runLog.state,
+		TEMPORAL: {
 			get: async () => {
 				throw new Error('not found')
 			},

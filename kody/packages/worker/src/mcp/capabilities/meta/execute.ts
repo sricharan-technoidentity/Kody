@@ -176,7 +176,7 @@ export const executeCapability = defineDomainCapability(
 						ok: false,
 						conversationId,
 						error:
-							'Unable to claim execute idempotency key; RUN_LOG is unavailable.',
+							'Unable to claim execute idempotency key; RUN_RECORDS is unavailable.',
 						logs: [],
 					}
 				}

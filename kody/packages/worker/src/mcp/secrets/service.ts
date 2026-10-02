@@ -56,7 +56,7 @@ type SecretOwnerContext = {
 	storageContext?: StorageContext | null
 }
 
-type SecretWriteEnv = Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'> & UserMeterEnv
+type SecretWriteEnv = Pick<Env, 'APP_DB' | 'SECRET_KMS'> & UserMeterEnv
 
 type SaveSecretInput = SecretOwnerContext & {
 	env: SecretWriteEnv
@@ -76,14 +76,14 @@ type ListSecretsInput = SecretOwnerContext & {
 }
 
 type ResolveSecretInput = SecretOwnerContext & {
-	env: Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'>
+	env: Pick<Env, 'APP_DB' | 'SECRET_KMS'>
 	name: string
 	scope?: SecretScope | null
 	includeExpired?: boolean
 }
 
 type UpdateSecretInput = SecretOwnerContext & {
-	env: Pick<Env, 'APP_DB' | 'SECRET_STORE_KEY'>
+	env: Pick<Env, 'APP_DB' | 'SECRET_KMS'>
 	name: string
 	scope: SecretScope
 	value?: string | null

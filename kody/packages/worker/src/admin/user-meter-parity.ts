@@ -6,7 +6,7 @@ import {
 import {
 	dailyEntitlementResources,
 	type DailyEntitlementResource,
-} from '#worker/entitlements/user-meter-do.ts'
+} from '#worker/entitlements/user-meter-client.ts'
 import { calculateUserD1StorageBytes } from '#worker/entitlements/service.ts'
 import { type JobsStore } from '@kody-internal/shared/jobs/store.ts'
 import { isStableUserId, normalizeStableUserId } from '#worker/user-id.ts'

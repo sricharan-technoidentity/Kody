@@ -111,6 +111,18 @@ export function createFakeRunLogNamespace() {
 			async getWorkflowProjection(input: { id: string }) {
 				return projections.get(input.id) ?? null
 			},
+			async findWorkflowProjectionByBindingIdempotencyKey(input: {
+				idempotencyKey: string
+				bindingName: string
+			}) {
+				return (
+					[...projections.values()].find(
+						(row) =>
+							row.idempotencyKey === input.idempotencyKey &&
+							row.bindingName === input.bindingName,
+					) ?? null
+				)
+			},
 			async findWorkflowProjectionByIdempotencyKey(input: {
 				idempotencyKey: string
 				bindingName?: string | null
@@ -224,11 +236,7 @@ export function createFakeRunLogNamespace() {
 
 	return {
 		stubs,
-		namespace: {
-			idFromName: (name: string) =>
-				({ toString: () => name }) as unknown as DurableObjectId,
-			get: (id: DurableObjectId) => stubFor(String(id)).rpc,
-		} as unknown as DurableObjectNamespace,
+		state: { forUser: (name: string) => stubFor(name).rpc },
 	}
 }
 
@@ -318,9 +326,26 @@ export function createJobMutationDatabase(input: {
 									(row) => row['source_id'] === params[0],
 								) as T | null
 							}
+							if (
+								normalized.startsWith('SELECT jobs.*') &&
+								normalized.includes('enabled = 1')
+							)
+								return null
 							throw new Error(`Unsupported first query: ${query}`)
 						},
 						async all<T = Record<string, unknown>>() {
+							if (
+								normalized ===
+								'SELECT * FROM jobs WHERE user_id = ? ORDER BY next_run_at ASC, name ASC'
+							) {
+								return {
+									results: selectAll(
+										'jobs',
+										(row) => row['user_id'] === params[0],
+									) as T[],
+								}
+							}
+
 							if (
 								normalized ===
 								'SELECT * FROM published_bundle_artifacts WHERE user_id = ? AND source_id = ? ORDER BY updated_at DESC, created_at DESC'
@@ -493,7 +518,7 @@ export function createRunKodyRegistryTestEnv(
 	const repoSessionIndex = createInMemoryRepoSessionIndexEnv(appDb)
 	return {
 		...bindings,
-		USER_METER: userMeter.env.USER_METER,
+		USER_METERS: userMeter.env.USER_METERS,
 		REPO_SESSION_INDEX: repoSessionIndex.REPO_SESSION_INDEX,
 	} as Env
 }

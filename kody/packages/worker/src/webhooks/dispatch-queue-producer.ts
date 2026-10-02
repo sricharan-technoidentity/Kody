@@ -1,7 +1,11 @@
+import { type KodyTemporal } from '#worker/temporal/client.ts'
+import { taskQueues, workflowIds } from '#worker/temporal/ids.ts'
+import { startKodyWorkflow } from '#worker/temporal/start.ts'
+import { type WebhookDeliveryInput } from '#worker/temporal/workflows/webhook-delivery.ts'
 import { type WebhookExportParams } from './types.ts'
 
-// Cloudflare Queues caps a message (body + metadata) at 128,000 bytes. Keep
-// enough headroom for transport metadata and structured-clone framing.
+// Delivery messages ride in Temporal history; keep the former 128 KB queue
+// cap so larger bodies spill to the payload store (large data by reference).
 export const webhookDispatchQueueMessageMaxBytes = 120_000
 
 export const webhookDispatchPayloadKvPrefix = 'webhook-dispatch-payload:v1:'
@@ -192,9 +196,36 @@ export function getWebhookDispatchQueueMessageBytes(
 	return new TextEncoder().encode(JSON.stringify(message)).byteLength
 }
 
-export async function enqueueWebhookDispatch(input: {
-	queue: Pick<Queue<WebhookDispatchQueueMessage>, 'send'>
+/**
+ * Acknowledged delivery: start `WebhookDelivery` (`{endpointId}:{deliveryId}`).
+ * The front door already applied the rate limit, so the workflow admits
+ * without its Update; the message rides as the invocation's detail.
+ */
+export async function startWebhookDelivery(input: {
+	env: { TEMPORAL?: KodyTemporal }
 	message: WebhookDispatchQueueMessage
 }) {
-	await input.queue.send(input.message)
+	const { message } = input
+	const delivery: WebhookDeliveryInput = {
+		userId: message.endpoint.userId,
+		endpointId: message.endpoint.id,
+		deliveryId: message.deliveryId,
+		packageId: message.endpoint.packageId,
+		exportName: message.exportName,
+		params: {},
+		rateLimitPerMinute: null,
+		detail: message,
+	}
+	return startKodyWorkflow(input.env.TEMPORAL, {
+		workflowType: 'WebhookDelivery',
+		workflowId: workflowIds.webhookDelivery(
+			message.endpoint.id,
+			message.deliveryId,
+		),
+		taskQueue: taskQueues.app,
+		args: [delivery],
+		userId: message.endpoint.userId,
+		surface: 'webhook',
+		packageId: message.endpoint.packageId,
+	})
 }

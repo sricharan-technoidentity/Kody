@@ -1,3 +1,7 @@
+import { DynamicCallableWorkflowBase } from './package-workflows-test-harness.ts'
+vi.mock('#worker/temporal/package-workflow.ts', () => ({
+	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
+}))
 import { expect, test, vi } from 'vitest'
 import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
 import { planLimits } from '#universal/plans.ts'
@@ -9,7 +13,6 @@ import {
 } from '#worker/run-records/service.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import {
-	DynamicCallableWorkflowBase,
 	cancelWorkflowRunForUser,
 	createDynamicCallableWorkflow,
 	dynamicCallableWorkflowsBindingName,
@@ -118,7 +121,7 @@ test('createDynamicCallableWorkflow verifies package ownership before queueing p
 	const created = await createDynamicCallableWorkflow({
 		env: {
 			APP_DB: db,
-			DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+			TEMPORAL: binding.workflow,
 		} as Env,
 		userId: 'user-1',
 		packageContext: null,
@@ -152,7 +155,7 @@ test('createDynamicCallableWorkflow verifies package ownership before queueing p
 		createDynamicCallableWorkflow({
 			env: {
 				APP_DB: createWorkflowRunsDatabase({ savedPackage: null }),
-				DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+				TEMPORAL: binding.workflow,
 				RUN_LOG: {} as DurableObjectNamespace,
 			} as Env,
 			userId: 'user-1',
@@ -172,7 +175,7 @@ test('createDynamicCallableWorkflow verifies package ownership before queueing p
 		createDynamicCallableWorkflow({
 			env: {
 				APP_DB: db,
-				DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+				TEMPORAL: binding.workflow,
 			} as Env,
 			userId: 'user-1',
 			body: {
@@ -193,7 +196,7 @@ test('createDynamicCallableWorkflow dedupes queued runs by user and idempotency 
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 
@@ -272,7 +275,7 @@ test('createDynamicCallableWorkflow dedupes queued runs by user and idempotency 
 	})
 	const preProjectionEnv = {
 		APP_DB: preProjectionDb,
-		DYNAMIC_CALLABLE_WORKFLOWS: {
+		TEMPORAL: {
 			get: preProjectionGet,
 			create: preProjectionCreate,
 		} as unknown as Workflow,
@@ -315,7 +318,7 @@ test('createDynamicCallableWorkflow dedupes queued runs by user and idempotency 
 		createDynamicCallableWorkflow({
 			env: {
 				APP_DB: createWorkflowRunsDatabase(),
-				DYNAMIC_CALLABLE_WORKFLOWS: existingOverLimitBinding.workflow,
+				TEMPORAL: existingOverLimitBinding.workflow,
 				RUN_LOG: {} as DurableObjectNamespace,
 			} as Env,
 			userId: 'user-1',
@@ -356,7 +359,7 @@ test('createDynamicCallableWorkflow dedupes queued runs by user and idempotency 
 	})
 	const failedCreateEnv = {
 		APP_DB: failedCreateDb,
-		DYNAMIC_CALLABLE_WORKFLOWS: {
+		TEMPORAL: {
 			get: retryGet,
 			create: retryCreate,
 		} as unknown as Workflow,
@@ -406,7 +409,7 @@ test('createDynamicCallableWorkflow dedupes queued runs by user and idempotency 
 	const userOne = await createDynamicCallableWorkflow({
 		env: {
 			APP_DB: createWorkflowRunsDatabase(),
-			DYNAMIC_CALLABLE_WORKFLOWS: perUserBinding.workflow,
+			TEMPORAL: perUserBinding.workflow,
 			RUN_LOG: {} as DurableObjectNamespace,
 		} as Env,
 		userId: 'user-1',
@@ -434,7 +437,7 @@ test('createDynamicCallableWorkflow dedupes queued runs by user and idempotency 
 					updated_at: '2026-05-03T00:00:00.000Z',
 				},
 			}),
-			DYNAMIC_CALLABLE_WORKFLOWS: perUserBinding.workflow,
+			TEMPORAL: perUserBinding.workflow,
 			RUN_LOG: {} as DurableObjectNamespace,
 		} as Env,
 		userId: 'user-2',
@@ -452,7 +455,7 @@ test('createDynamicCallableWorkflow dedupes queued runs by user and idempotency 
 	const erroredBinding = createStatefulWorkflowBinding()
 	const erroredEnv = {
 		APP_DB: createWorkflowRunsDatabase(),
-		DYNAMIC_CALLABLE_WORKFLOWS: erroredBinding.workflow,
+		TEMPORAL: erroredBinding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 	const erroredFirst = await createDynamicCallableWorkflow({
@@ -492,7 +495,7 @@ test('RunLog-only list, cancel, idempotency, and concurrency stay D1-free', asyn
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 
@@ -611,7 +614,7 @@ test('RunLog terminal stickiness blocks later active regression after cancel', a
 	const binding = createStatefulWorkflowBinding()
 	const env = {
 		APP_DB: createWorkflowRunsDatabase(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 
@@ -670,7 +673,7 @@ test('RunLog-only concurrent capacity blocks create without D1 workflow import',
 	const binding = createStatefulWorkflowBinding()
 	const env = {
 		APP_DB: createWorkflowRunsDatabase(),
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 	const freeLimit = planLimits.free.maxConcurrentWorkflows
@@ -709,7 +712,7 @@ test('createDynamicCallableWorkflow enforces concurrent workflow entitlements ac
 	const concurrentBinding = createStatefulWorkflowBinding()
 	const concurrentEnv = {
 		APP_DB: createWorkflowRunsDatabase(),
-		DYNAMIC_CALLABLE_WORKFLOWS: concurrentBinding.workflow,
+		TEMPORAL: concurrentBinding.workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env
 
@@ -767,7 +770,7 @@ test('createDynamicCallableWorkflow enforces concurrent workflow entitlements ac
 		await createDynamicCallableWorkflow({
 			env: {
 				APP_DB: createWorkflowRunsDatabase(),
-				DYNAMIC_CALLABLE_WORKFLOWS: createStatefulWorkflowBinding().workflow,
+				TEMPORAL: createStatefulWorkflowBinding().workflow,
 				RUN_LOG: {} as DurableObjectNamespace,
 			} as Env,
 			userId: 'user-1',
@@ -823,7 +826,7 @@ test('createDynamicCallableWorkflow enforces concurrent workflow entitlements ac
 				APP_DB: createWorkflowRunsDatabase({
 					users: [{ email, plan: 'pro', stable_user_id: userId }],
 				}),
-				DYNAMIC_CALLABLE_WORKFLOWS: proBinding.workflow,
+				TEMPORAL: proBinding.workflow,
 				RUN_LOG: {} as DurableObjectNamespace,
 			} as Env,
 			userId,
@@ -859,7 +862,7 @@ test('createDynamicCallableWorkflow enforces concurrent workflow entitlements ac
 			APP_DB: createWorkflowRunsDatabase({
 				users: [{ email, plan: 'pro', stable_user_id: userId }],
 			}),
-			DYNAMIC_CALLABLE_WORKFLOWS: createStatefulWorkflowBinding().workflow,
+			TEMPORAL: createStatefulWorkflowBinding().workflow,
 			RUN_LOG: {} as DurableObjectNamespace,
 		} as Env,
 		userId,
@@ -880,7 +883,7 @@ test('createDynamicCallableWorkflow enforces concurrent workflow entitlements ac
 			APP_DB: createWorkflowRunsDatabase({
 				users: [{ email, plan: 'max', stable_user_id: userId }],
 			}),
-			DYNAMIC_CALLABLE_WORKFLOWS: createStatefulWorkflowBinding().workflow,
+			TEMPORAL: createStatefulWorkflowBinding().workflow,
 			RUN_LOG: {} as DurableObjectNamespace,
 		} as Env,
 		userId,
@@ -899,7 +902,7 @@ test('listWorkflowRunsForUser returns recent workflow statuses', async () => {
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 	} as Env
 	const created = await createDynamicCallableWorkflow({
 		env,
@@ -953,7 +956,7 @@ test('DynamicCallableWorkflowBase records workflow_run usage on terminal transit
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -1013,7 +1016,7 @@ test('DynamicCallableWorkflowBase records workflow_run usage on terminal transit
 	const failedDb = createWorkflowRunsDatabase()
 	const failedEnv = {
 		APP_DB: failedDb,
-		DYNAMIC_CALLABLE_WORKFLOWS: failedBinding.workflow,
+		TEMPORAL: failedBinding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const failedCreated = await createDynamicCallableWorkflow({
@@ -1096,7 +1099,7 @@ test('workflow_run usage is recorded once across replays and never on failed ter
 	const db = createWorkflowRunsDatabase()
 	const env = {
 		APP_DB: db,
-		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		TEMPORAL: binding.workflow,
 		APP_BASE_URL: 'https://app.example.com',
 	} as Env
 	const created = await createDynamicCallableWorkflow({
@@ -1147,7 +1150,7 @@ test('workflow_run usage is recorded once across replays and never on failed ter
 		const statusFailureDb = createWorkflowRunsDatabase()
 		const statusFailureEnv = {
 			APP_DB: statusFailureDb,
-			DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+			TEMPORAL: binding.workflow,
 			APP_BASE_URL: 'https://app.example.com',
 			RUN_LOG: {} as DurableObjectNamespace,
 		} as Env

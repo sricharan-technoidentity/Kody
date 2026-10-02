@@ -1,10 +1,8 @@
-import { DatabaseSync } from 'node:sqlite'
 import { RequestContext } from 'remix/router'
-import { beforeAll, expect, test, vi } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { setAuthSessionSecret } from '#app/auth-session.ts'
-import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { createPgDatabase, type SqlDatabase } from '#worker/aws/pg-database.ts'
 import {
 	auditEventSummaries,
 	logAuditEventSpy,
@@ -30,33 +28,7 @@ const { createAuthHandler } = await import('#app/handlers/auth.ts')
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 const conflictMessage = formerEmailClaimedSignupMessage
 
-function applyMigrations(db: DatabaseSync) {
-	const migrationsDir = new URL('../../../migrations/', import.meta.url)
-	applyAllMigrations(db, migrationsDir)
-}
-
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyMigrations(sqlite)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
-}
-
-function seedSquattingAccount(
-	sqlite: DatabaseSync,
-	input: { email: string; username: string; stableUserId: string },
-) {
-	sqlite.exec(`
-		INSERT INTO users (username, email, stable_user_id, password_hash)
-		VALUES (
-			${quoteSqlString(input.username)},
-			${quoteSqlString(input.email)},
-			${quoteSqlString(input.stableUserId)},
-			'oauth_created_no_usable_password'
-		);
-	`)
-}
-
-function createHandler(db: D1Database) {
+function createHandler(db: SqlDatabase) {
 	return createAuthHandler({
 		COOKIE_SECRET: testCookieSecret,
 		APP_DB: db,
@@ -76,19 +48,18 @@ async function signup(
 	return handler.handler(new RequestContext(request))
 }
 
-beforeAll(() => {
-	setAuthSessionSecret(testCookieSecret)
-})
-
 test('signup returns 409 when sha256(email) collides with an existing stable_user_id', async () => {
+	setAuthSessionSecret(testCookieSecret)
 	const victimEmail = 'victim@example.com'
 	const victimStableUserId = await createStableUserIdFromEmail(victimEmail)
-	const { sqlite, db } = createMigratedDb()
-	seedSquattingAccount(sqlite, {
-		email: 'attacker@example.com',
-		username: 'attacker',
-		stableUserId: victimStableUserId,
-	})
+	await using fixture = await createTestDb()
+	// Identity allocation is a trusted account-administration operation.
+	const db = createPgDatabase({ connection: fixture.pg, role: 'kody_admin' })
+	await db
+		.prepare(`INSERT INTO users (username, email, stable_user_id, password_hash)
+		VALUES ('attacker', 'attacker@example.com', ?, 'oauth_created_no_usable_password')`)
+		.bind(victimStableUserId)
+		.run()
 	const openHandler = createHandler(db)
 
 	const openResponse = await signup(openHandler, {
@@ -102,7 +73,9 @@ test('signup returns 409 when sha256(email) collides with an existing stable_use
 		error: conflictMessage,
 		code: formerEmailClaimedSignupCode,
 	})
-	expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM users`).get()).toEqual({
+	expect(
+		await db.prepare('SELECT COUNT(*) AS count FROM users').first(),
+	).toEqual({
 		count: 1,
 	})
 	expect(lifecycleMocks.scheduleUserCreatedEvent).not.toHaveBeenCalled()

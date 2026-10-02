@@ -1,3 +1,4 @@
+import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
@@ -163,7 +164,7 @@ test('secretList from execute returns caller-owned package metadata with package
 	)
 	const env = {
 		APP_DB: createD1FromSqlite(sqlite),
-		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	} as Env
 	const userId = 'user-execute-list'

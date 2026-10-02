@@ -49,11 +49,7 @@ import { handlePackageAppOriginRequest } from '#app/package-app-origin.ts'
 import { refuseNonCanonicalProductionHost } from '#app/canonical-host.ts'
 import { serveAnonymousHtmlFromCache } from '#app/anonymous-html-edge-cache.ts'
 import { handleInboundEmail } from '#worker/email/inbound.ts'
-import { handleQueueBatch } from '#worker/queue-handler.ts'
-import { handleDrRestoreRequest } from '#worker/dr/dr-restore.ts'
-import { handleDrExportRequest } from '#worker/dr/dr-export-maintenance.ts'
 import { handleDoPitrRequest } from '#worker/dr/do-pitr-maintenance.ts'
-import { handleMailboxImportRequest } from '#worker/dr/mailbox-import-maintenance.ts'
 import { handleStatusIncidentEventRequest } from '#worker/status-incidents/maintenance.ts'
 import { verifyPublicFormProtection } from '#app/public-form-protection.ts'
 import { getLegacyHostRedirectResponse } from '#worker/app-legacy-redirect.ts'
@@ -266,20 +262,8 @@ const appHandler = withCors({
 			return handleJobReindexRequest(request, env)
 		}
 
-		if (url.pathname === '/__maintenance/dr-restore') {
-			return handleDrRestoreRequest(request, env)
-		}
-
-		if (url.pathname === '/__maintenance/dr-export') {
-			return handleDrExportRequest(request, env)
-		}
-
 		if (url.pathname === '/__maintenance/do-pitr') {
 			return handleDoPitrRequest(request, env)
-		}
-
-		if (url.pathname === '/__maintenance/dr-mailbox-import') {
-			return handleMailboxImportRequest(request, env)
 		}
 
 		if (url.pathname === '/__maintenance/status-incidents') {
@@ -517,11 +501,6 @@ const workerHandler = {
 			// message.setReject inside handleInboundEmail.
 			await handleInboundEmail(message, env, ctx)
 		})
-	},
-	async queue(batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext) {
-		await runWithDynamicWorkerEvaluationBudget(
-			async () => await handleQueueBatch(batch, env, ctx),
-		)
 	},
 } satisfies ExportedHandler<Env>
 

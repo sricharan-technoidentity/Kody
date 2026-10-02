@@ -1,7 +1,8 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { ensureCommunityFlowSchema } from './community-flow-test-schema.ts'
+import {
+	createTestCommunityDb,
+	type TestCommunityDb,
+} from '#worker/test-support/aws/test-community-db.ts'
 import {
 	getCommunityListingById,
 	insertCommunityBan,
@@ -15,16 +16,8 @@ import {
 } from './service.ts'
 import { type CommunityListingStatus } from './types.ts'
 
-async function createListingsDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	await ensureCommunityFlowSchema(createD1FromSqlite(sqlite))
-	const queries: Array<string> = []
-	const db = createD1FromSqlite(sqlite, { queries })
-	return { db, queries }
-}
-
 async function insertListing(
-	db: D1Database,
+	database: TestCommunityDb,
 	input: {
 		id: string
 		status?: CommunityListingStatus
@@ -33,9 +26,10 @@ async function insertListing(
 	},
 ) {
 	const kodyId = input.kodyId ?? input.id
-	await insertCommunityListing(db, {
+	const ownerUserId = input.ownerUserId ?? 'owner-1'
+	await insertCommunityListing(database.owner(ownerUserId), {
 		id: input.id,
-		owner_user_id: input.ownerUserId ?? 'owner-1',
+		owner_user_id: ownerUserId,
 		package_id: `pkg-${input.id}`,
 		source_id: `src-${input.id}`,
 		kody_id: kodyId,
@@ -51,78 +45,77 @@ async function insertListing(
 	})
 }
 
+async function insertFork(
+	database: TestCommunityDb,
+	input: { id: string; forkerUserId: string },
+) {
+	await insertCommunityFork(database.owner(input.forkerUserId), {
+		id: input.id,
+		listing_id: 'listing-b',
+		forker_user_id: input.forkerUserId,
+		origin_commit: 'commit-1',
+		forked_package_id: `pkg-${input.id}`,
+		forked_source_id: `src-${input.id}`,
+		target_kody_id: 'beta',
+		listing_name: '@owner/beta',
+		listing_kody_id: 'beta',
+	})
+}
+
 test('getCommunityListingsByIds returns public listings in input order with batched aggregates', async () => {
-	const { db, queries } = await createListingsDb()
+	await using database = await createTestCommunityDb()
+	const { community, admin, queries } = database
 
 	queries.length = 0
 	expect(
-		await getCommunityListingsByIds(db, [], { includeDelisted: false }),
+		await getCommunityListingsByIds(community, [], { includeDelisted: false }),
 	).toEqual([])
 	expect(queries).toEqual([])
 
-	await insertListing(db, { id: 'listing-a', kodyId: 'alpha' })
-	await insertListing(db, { id: 'listing-b', kodyId: 'beta' })
-	await insertListing(db, { id: 'listing-c', kodyId: 'gamma' })
-	await insertListing(db, {
+	await insertListing(database, { id: 'listing-a', kodyId: 'alpha' })
+	await insertListing(database, { id: 'listing-b', kodyId: 'beta' })
+	await insertListing(database, { id: 'listing-c', kodyId: 'gamma' })
+	await insertListing(database, {
 		id: 'listing-delisted',
 		kodyId: 'retired',
 		status: 'delisted',
 	})
-	await insertListing(db, {
+	await insertListing(database, {
 		id: 'listing-banned-owner',
 		kodyId: 'banned-pkg',
 		ownerUserId: 'owner-banned',
 	})
-	await insertCommunityBan(db, {
+	await insertCommunityBan(admin, {
 		user_id: 'owner-banned',
 		banned_by_user_id: 'admin-1',
 		reason: 'spam',
 	})
-	await upsertCommunityRating(db, {
+	await upsertCommunityRating(database.owner('rater-1'), {
 		id: 'rating-b',
 		listing_id: 'listing-b',
 		user_id: 'rater-1',
 		stars: 4,
 		adaptation_effort: 2,
-		note: null,
+		note: 'private to the rater',
 	})
-	await insertCommunityFork(db, {
-		id: 'fork-b-1',
-		listing_id: 'listing-b',
-		forker_user_id: 'forker-1',
-		origin_commit: 'commit-1',
-		forked_package_id: 'pkg-fork-b-1',
-		forked_source_id: 'src-fork-b-1',
-		target_kody_id: 'beta',
-		listing_name: '@owner/beta',
-		listing_kody_id: 'beta',
-	})
-	await insertCommunityFork(db, {
-		id: 'fork-b-2',
-		listing_id: 'listing-b',
-		forker_user_id: 'forker-2',
-		origin_commit: 'commit-1',
-		forked_package_id: 'pkg-fork-b-2',
-		forked_source_id: 'src-fork-b-2',
-		target_kody_id: 'beta',
-		listing_name: '@owner/beta',
-		listing_kody_id: 'beta',
-	})
+	await insertFork(database, { id: 'fork-b-1', forkerUserId: 'forker-1' })
+	await insertFork(database, { id: 'fork-b-2', forkerUserId: 'forker-2' })
 
+	// Visitors see active listings only; delisted rows are moderation state.
 	expect(
-		await getCommunityListingById(db, {
+		await getCommunityListingById(community, {
 			listingId: 'listing-delisted',
-			includeDelisted: false,
+			includeDelisted: true,
 		}),
 	).toBeNull()
 	expect(
-		await getCommunityListingById(db, {
+		await getCommunityListingById(community, {
 			listingId: 'missing',
 			includeDelisted: false,
 		}),
 	).toBeNull()
 	expect(
-		await getCommunityListingById(db, {
+		await getCommunityListingById(community, {
 			listingId: 'listing-banned-owner',
 			includeDelisted: false,
 		}),
@@ -132,10 +125,17 @@ test('getCommunityListingsByIds returns public listings in input order with batc
 			status: 'active',
 		}),
 	)
+	// Another user's own writer cannot read the listing at all.
+	expect(
+		await getCommunityListingById(database.owner('rater-1'), {
+			listingId: 'listing-a',
+			includeDelisted: true,
+		}),
+	).toBeNull()
 
 	queries.length = 0
 	const publicRows = await getCommunityListingsByIds(
-		db,
+		community,
 		[
 			'listing-c',
 			'missing',
@@ -165,7 +165,7 @@ test('getCommunityListingsByIds returns public listings in input order with batc
 	expect(queries.filter((query) => query.includes(' IN ('))).toHaveLength(3)
 
 	const withDelisted = await getCommunityListingsByIds(
-		db,
+		admin,
 		['listing-delisted', 'listing-a', 'missing'],
 		{ includeDelisted: true },
 	)
@@ -174,7 +174,7 @@ test('getCommunityListingsByIds returns public listings in input order with batc
 		'listing-a',
 	])
 	expect(
-		await getCommunityListingById(db, {
+		await getCommunityListingById(admin, {
 			listingId: 'listing-delisted',
 			includeDelisted: true,
 		}),
@@ -183,11 +183,35 @@ test('getCommunityListingsByIds returns public listings in input order with batc
 	)
 
 	const single = await getCommunityListingWithAggregates({
-		env: { APP_DB: db } as Env,
+		env: {
+			APP_DB: database.owner('visitor'),
+			COMMUNITY_DB: community,
+		} as unknown as Env,
 		listingId: 'listing-b',
 		includeDelisted: false,
 	})
 	expect(publicRows.find((listing) => listing.id === 'listing-b')).toEqual(
 		single,
 	)
+
+	// The public and moderation roles never see rating notes or credentials,
+	// and the public role cannot write.
+	for (const sql of [
+		'SELECT note FROM community_ratings',
+		'SELECT email FROM users',
+		'SELECT password_hash FROM users',
+	]) {
+		await expect(community.prepare(sql).all()).rejects.toThrow(
+			/permission denied/,
+		)
+	}
+	await expect(
+		admin.prepare('SELECT note FROM community_ratings').all(),
+	).rejects.toThrow(/permission denied/)
+	await expect(
+		community
+			.prepare(`UPDATE community_listings SET name = 'x' WHERE id = ?`)
+			.bind('listing-a')
+			.run(),
+	).rejects.toThrow(/read-only|permission denied/)
 })

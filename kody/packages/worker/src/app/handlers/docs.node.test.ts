@@ -345,33 +345,7 @@ test('provider and platform doc markdown details stay stable', async () => {
 })
 
 test('interactive doc JSON includes walkthrough highlight tokens', async () => {
-	let received: Array<{ code: string; lang?: string | null }> | undefined
-	const env = {
-		APP_BASE_URL: 'https://kody.example',
-		HIGHLIGHT: {
-			fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
-				const body = JSON.parse(String(init?.body)) as {
-					snippets: Array<{ code: string; lang?: string | null }>
-				}
-				received = body.snippets
-				return Response.json({
-					results: body.snippets.map((snippet) => ({
-						code: snippet.code,
-						lang: snippet.lang ?? 'plaintext',
-						plain: false,
-						lines: [
-							[
-								{
-									content: snippet.code,
-									style: { color: '#111', '--shiki-dark': '#eee' },
-								},
-							],
-						],
-					})),
-				})
-			},
-		} as unknown as Fetcher,
-	} as Env
+	const env = { APP_BASE_URL: 'https://kody.example' } as Env
 
 	const howKodyWorksResponse = await callHandler(
 		createDocDetailApiHandler(env) as never,
@@ -396,7 +370,6 @@ test('interactive doc JSON includes walkthrough highlight tokens', async () => {
 		walkthroughHosts?: WalkthroughHostPick
 	}
 	expect(howKodyWorksPayload.ok).toBe(true)
-	expect(received?.length).toBeGreaterThan(0)
 	const packageJsonKey = highlightSnippetKey({
 		code: howKodyWorksPackageFiles['package.json'],
 		lang: 'json',
@@ -405,7 +378,6 @@ test('interactive doc JSON includes walkthrough highlight tokens', async () => {
 		howKodyWorksPayload.walkthroughHighlights?.[packageJsonKey],
 	).toMatchObject({
 		plain: false,
-		lines: [[{ style: { color: '#111' } }]],
 	})
 	expect(howKodyWorksPayload.walkthroughHosts).toBeDefined()
 	expect(

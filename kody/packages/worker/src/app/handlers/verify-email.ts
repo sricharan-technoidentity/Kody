@@ -5,6 +5,7 @@ import {
 	logAuditEvent,
 } from '#worker/audit-log.ts'
 import { verifyEmailToken } from '#app/email-verification.ts'
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 import { scheduleKitSubscriberSync } from '#worker/kit/subscriber-sync.ts'
 import { sendConnectAgentEmail } from '#app/user-account-emails.ts'
 import { resolveVerifyEmailSuccessCta } from '#universal/safe-redirect.ts'
@@ -39,6 +40,7 @@ export function createVerifyEmailHandler(env: Env) {
 		async handler({ request, url }) {
 			const result = await verifyEmailToken({
 				db: env.APP_DB,
+				forUser: getAccountWriterFactory(env),
 				token: url.searchParams.get('token'),
 			})
 			const requestIp = getRequestIp(request) ?? undefined
