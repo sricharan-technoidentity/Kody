@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
@@ -56,7 +57,7 @@ async function createEnv() {
 		admin: createPgDatabase({
 			connection: database.pg,
 			role: 'kody_admin',
-		}) as unknown as D1Database,
+		}) as unknown as SqlDatabase,
 		q: pgQuery(database.pg),
 		[Symbol.asyncDispose]: () => database[Symbol.asyncDispose](),
 	}

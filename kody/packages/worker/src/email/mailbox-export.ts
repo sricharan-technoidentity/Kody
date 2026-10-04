@@ -1,3 +1,4 @@
+import { type MailboxSqlValue, type MailboxSql } from './mailbox-sql.ts'
 import { emailAttachmentBlobKey, emailRawMimeKey } from './blob-keys.ts'
 import {
 	mailboxBlobRefAttachmentCursorPrefix,
@@ -19,13 +20,13 @@ import {
 	mapMailboxThreadRow,
 } from './mailbox-mappers.ts'
 
-export function exportMailboxFromStore(
-	sql: SqlStorage,
+export async function exportMailboxFromStore(
+	sql: MailboxSql,
 	input: {
 		pageSize?: number
 		startAfter?: string | null
 	},
-): MailboxExportResult {
+): Promise<MailboxExportResult> {
 	const pageSize = normalizeMailboxPageSize(input.pageSize)
 	const startAfterRaw =
 		typeof input.startAfter === 'string' && input.startAfter.length > 0
@@ -67,7 +68,7 @@ export function exportMailboxFromStore(
 		}
 
 		const currentPhase = phaseOrder[phaseIndex]!
-		const page = exportPhasePage(sql, {
+		const page = await exportPhasePage(sql, {
 			phase: currentPhase,
 			startAfterId,
 			limit: remaining,
@@ -106,19 +107,19 @@ export function exportMailboxFromStore(
 	return result
 }
 
-function exportPhasePage(
-	sql: SqlStorage,
+async function exportPhasePage(
+	sql: MailboxSql,
 	input: {
 		phase: MailboxExportPhase
 		startAfterId: string
 		limit: number
 	},
-): {
+): Promise<{
 	rows: Array<MailboxExportRow>
 	taken: number
 	truncated: boolean
 	nextId: string
-} {
+}> {
 	if (input.limit <= 0) {
 		return {
 			rows: [],
@@ -144,8 +145,8 @@ function exportPhasePage(
 			}
 		}
 	}
-	const rows = sql
-		.exec<Record<string, SqlStorageValue>>(
+	const rows = (
+		await sql.exec<Record<string, MailboxSqlValue>>(
 			`SELECT * FROM ${tableForPhase(input.phase)}
 			WHERE id > ?
 			ORDER BY id ASC
@@ -153,7 +154,7 @@ function exportPhasePage(
 			input.startAfterId,
 			limit + 1,
 		)
-		.toArray()
+	).toArray()
 	const truncated = rows.length > limit
 	const pageRows = truncated ? rows.slice(0, limit) : rows
 	const last = pageRows[pageRows.length - 1]
@@ -189,14 +190,14 @@ function exportPhasePage(
  * from the canonical helper (even when the stored column is null). External
  * attachment keys are included only when they match the canonical helper.
  */
-export function listMailboxBlobReferences(
-	sql: SqlStorage,
+export async function listMailboxBlobReferences(
+	sql: MailboxSql,
 	input: {
 		ownerId: string | null
 		pageSize?: number
 		startAfter?: string | null
 	},
-): MailboxBlobReferencePage {
+): Promise<MailboxBlobReferencePage> {
 	if (input.ownerId == null) {
 		return { references: [], nextStartAfter: null, truncated: false }
 	}
@@ -211,8 +212,8 @@ export function listMailboxBlobReferences(
 	let remaining = pageSize
 
 	if (phase === 'raw_mime') {
-		const rows = sql
-			.exec<{ id: string }>(
+		const rows = (
+			await sql.exec<{ id: string }>(
 				`SELECT id FROM email_messages
 				WHERE direction = 'inbound' AND id > ?
 				ORDER BY id ASC
@@ -220,7 +221,7 @@ export function listMailboxBlobReferences(
 				startAfterId,
 				remaining + 1,
 			)
-			.toArray()
+		).toArray()
 		const truncated = rows.length > remaining
 		const pageRows = truncated ? rows.slice(0, remaining) : rows
 		for (const row of pageRows) {
@@ -247,7 +248,7 @@ export function listMailboxBlobReferences(
 				truncated: true,
 			}
 		}
-		const attachmentPage = listAttachmentBlobReferences(sql, {
+		const attachmentPage = await listAttachmentBlobReferences(sql, {
 			ownerId,
 			startAfterId: '',
 			limit: remaining,
@@ -260,28 +261,32 @@ export function listMailboxBlobReferences(
 		}
 	}
 
-	return listAttachmentBlobReferences(sql, {
+	return await listAttachmentBlobReferences(sql, {
 		ownerId,
 		startAfterId,
 		limit: remaining,
 	})
 }
 
-function listAttachmentBlobReferences(
-	sql: SqlStorage,
+async function listAttachmentBlobReferences(
+	sql: MailboxSql,
 	input: {
 		ownerId: string
 		startAfterId: string
 		limit: number
 	},
-): MailboxBlobReferencePage {
+): Promise<MailboxBlobReferencePage> {
 	if (input.limit <= 0) {
 		return { references: [], nextStartAfter: null, truncated: false }
 	}
 	// Scan past non-canonical keys so callers never receive forgeable refs.
 	const scanLimit = Math.max(input.limit * 4, 32)
-	const rows = sql
-		.exec<{ id: string; message_id: string; storage_key: string | null }>(
+	const rows = (
+		await sql.exec<{
+			id: string
+			message_id: string
+			storage_key: string | null
+		}>(
 			`SELECT id, message_id, storage_key FROM email_attachments
 			WHERE storage_kind = 'external' AND id > ?
 			ORDER BY id ASC
@@ -289,7 +294,7 @@ function listAttachmentBlobReferences(
 			input.startAfterId,
 			scanLimit,
 		)
-		.toArray()
+	).toArray()
 	const references: Array<MailboxBlobReference> = []
 	let lastScannedId = input.startAfterId
 	for (const row of rows) {

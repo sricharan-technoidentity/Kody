@@ -1,7 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+
 import { stringifyMcpServerLastError } from './oauth-settle-error.ts'
 import {
 	getMcpServerSettingRowById,
@@ -9,12 +9,9 @@ import {
 	updateMcpServerSettingLastErrorRow,
 } from './settings-repo.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
 test('mcp_server_settings last_error persists sanitized JSON for the owning user only', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	await insertMcpServerSettingRow({
 		db,
 		row: {

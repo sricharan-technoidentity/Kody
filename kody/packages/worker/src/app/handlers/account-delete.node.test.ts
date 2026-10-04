@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { beforeAll, expect, test, vi } from 'vitest'
 import { RequestContext } from 'remix/router'
 import type * as AccountDeletion from '#app/account-deletion.ts'
@@ -62,7 +63,7 @@ const signedInUser = {
 function createHandler() {
 	return createAccountDeleteHandler({
 		COOKIE_SECRET: testCookieSecret,
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		APP_BASE_URL: 'https://kody.example',
 	} as Env)
 }

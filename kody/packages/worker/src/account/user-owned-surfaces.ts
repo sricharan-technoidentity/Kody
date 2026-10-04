@@ -99,11 +99,11 @@ export const accountUserOwnedDurableObjectSurfaces: ReadonlyArray<UserOwnedDurab
 		},
 		{
 			id: 'repo_session',
-			binding: 'REPO_SESSION',
+			binding: 'REPO_SESSIONS',
 			deletionResultKey: 'repoSessions',
 			export: 'exclude',
 			excludeReason:
-				'Ephemeral editing workspace, including REPO_SESSION_BLOBS spill purged with the session Durable Object. Canonical repo-backed source is exported as Artifacts repo pointers via entity_sources; session catalog metadata is exported from RepoSessionIndex.',
+				'Ephemeral editing workspace, including REPO_SESSION_BLOBS spill purged with the owner-scoped interpreter session. Canonical repo-backed source is exported as Artifacts repo pointers via entity_sources; session catalog metadata is exported from DynamoDB.',
 		},
 		{
 			id: 'mcp_client_hub',
@@ -157,11 +157,11 @@ export const accountUserOwnedDurableObjectSurfaces: ReadonlyArray<UserOwnedDurab
 		},
 		{
 			id: 'repo_session_index',
-			binding: 'REPO_SESSION_INDEX',
+			binding: 'REPO_SESSION_CATALOG',
 			deletionResultKey: 'repoSessionIndexes',
 			export: 'include',
 			notes:
-				'Per-user repo session catalog (REPO_SESSION_INDEX binding; idFromName(userId)). Authority for session rows, active counts, conversation resume, export, and deletion inventory. Workspace bytes stay in per-session RepoSession DOs. D1 keeps only the thin repo_session_due_owners hint plus the storage-bucket inventory cursor.',
+				'Per-user repo session catalog (REPO_SESSION_CATALOG binding; owner partition). Authority for session rows, active counts, conversation resume, export, and deletion inventory. Workspace bytes stay in per-owner interpreter sessions. Aurora keeps only the thin repo_session_due_owners hint plus the storage-bucket inventory cursor.',
 		},
 		{
 			id: 'mcp',

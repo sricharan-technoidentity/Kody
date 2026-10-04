@@ -1,16 +1,16 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+
 import { consumeSearchRateLimit } from './search-rate-limit.ts'
 
-const migrationsDirectory = new URL('../migrations/', import.meta.url)
 const stableUserId = 'ab'.repeat(32)
 
 test('back-to-back searches resolve the rate-limit plan from the hot-path cache', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
+	await using database = await createTestDb({ userId: stableUserId })
+	const sqlite = database.pg
+
+	const db = database.db
 	await db
 		.prepare(
 			`INSERT INTO users (username, email, password_hash, stable_user_id, plan)

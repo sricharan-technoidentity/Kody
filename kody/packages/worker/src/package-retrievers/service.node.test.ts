@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleError } from '#worker/test-support/console-spies.ts'
 
@@ -31,7 +32,7 @@ vi.mock('#mcp/run-kody-registry.ts', () => ({
 }))
 
 vi.mock('#worker/identity/background-mcp-user.ts', () => ({
-	resolveBackgroundMcpUser: async (_db: D1Database, userId: string) => ({
+	resolveBackgroundMcpUser: async (_db: SqlDatabase, userId: string) => ({
 		userId,
 		email: `${userId}@example.com`,
 		username: userId,

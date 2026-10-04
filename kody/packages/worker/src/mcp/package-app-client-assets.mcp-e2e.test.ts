@@ -22,7 +22,7 @@ type PackageSaveResult = {
 }
 
 function readExecuteResult<T>(toolResult: CallToolResult): T {
-	expect(toolResult.isError).toBeFalsy()
+	expect(toolResult.isError, JSON.stringify(toolResult)).toBeFalsy()
 	const structured = toolResult.structuredContent as ExecuteStructured
 	expect(structured.error).toBeUndefined()
 	expect(structured.result).toBeTruthy()
@@ -132,7 +132,7 @@ document.querySelector<HTMLHeadingElement>('#title')!.dataset.hydrated = 'true'
 export const ready = Button('ready')
 `
 
-test('kody.app.client and kody.app.assets publish and serve end-to-end on a real local worker', async () => {
+test('kody.app.client and kody.app.assets publish and serve end-to-end on the Node front door and real Runner', async () => {
 	silenceExpectedConsoleWarns([
 		/Ignoring duplicate module:.*generated\/esbuild\.wasm/,
 	])

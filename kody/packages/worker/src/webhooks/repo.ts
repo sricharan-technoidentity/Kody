@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { WebhookEndpointIdRaceError } from './errors.ts'
 import {
 	type WebhookEndpointRecord,
@@ -46,7 +47,7 @@ function mapEndpointRow(row: WebhookEndpointRow): WebhookEndpointRecord {
  * overlap window (`previousExpiresAt`, default 24h from `now`).
  */
 export async function upsertWebhookEndpointSecret(input: {
-	db: D1Database
+	db: SqlDatabase
 	id: string
 	userId: string
 	packageId: string
@@ -150,7 +151,7 @@ export async function upsertWebhookEndpointSecret(input: {
 }
 
 export async function listWebhookEndpointsForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<Array<WebhookEndpointRecord>> {
 	const result = await input.db
@@ -166,7 +167,7 @@ export async function listWebhookEndpointsForUser(input: {
 }
 
 export async function getWebhookEndpointByKey(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	webhookName: string
@@ -184,7 +185,7 @@ export async function getWebhookEndpointByKey(input: {
 }
 
 export async function getWebhookEndpointByIdForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	endpointId: string
 }): Promise<WebhookEndpointRecord | null> {
@@ -201,7 +202,7 @@ export async function getWebhookEndpointByIdForUser(input: {
 }
 
 export async function setWebhookEndpointEnabled(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	webhookName: string
@@ -231,7 +232,7 @@ export async function setWebhookEndpointEnabled(input: {
 
 /** Drop the rotate-overlap previous secret (confirmed on the new URL, or expired). */
 export async function clearWebhookEndpointPreviousUrlSecret(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	endpointId: string
 	urlSecretHash: string

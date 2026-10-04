@@ -1,4 +1,4 @@
-import { type JsonSchemaToolDescriptor } from '@cloudflare/codemode'
+import type { JsonSchemaToolDescriptor } from '@cloudflare/codemode'
 import { type Tool } from '@modelcontextprotocol/sdk/types.js'
 import { type McpServerConnectionEvent } from './connection-episodes.ts'
 

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getUsernameFormatValidationError } from '#worker/identity/username.ts'
 import { resolveUserStableId } from '#worker/user-id.ts'
 
@@ -9,7 +10,7 @@ export type PublicUserIdentity = {
 }
 
 export async function findPublicUserIdentityByStableUserId(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<PublicUserIdentity | null> {
 	const userId = input.userId.trim()
@@ -39,7 +40,7 @@ export async function findPublicUserIdentityByStableUserId(input: {
 }
 
 export async function findPublicUserIdentityByUsername(input: {
-	db: D1Database
+	db: SqlDatabase
 	username: string
 }): Promise<PublicUserIdentity | null> {
 	const username = input.username.trim()
@@ -69,7 +70,7 @@ export async function findPublicUserIdentityByUsername(input: {
 }
 
 export async function resolvePublicUsername(input: {
-	db: D1Database
+	db: SqlDatabase
 	username?: string | null
 	email?: string | null
 }): Promise<string | null> {

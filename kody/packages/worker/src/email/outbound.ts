@@ -1,13 +1,14 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { base64ToBytes } from '@kody-internal/shared/base64.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import {
 	accountSuspendedMessage,
 	getAccountRestrictionsByStableUserId,
 } from '#worker/account/account-suspension.ts'
-import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
+import { sendSesEmail } from './ses.ts'
 import { isAccountEmailVerified } from '#worker/identity/email-verification-state.ts'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import {
 	assertWithinEntitlement,
@@ -46,16 +47,13 @@ import { type EmailMessageRecord, type EmailProcessingStatus } from './types.ts'
 type SendEmailEnv = Pick<
 	Env,
 	| 'APP_DB'
-	| 'EMAIL'
+	| 'SES_MAIL'
 	| 'EMAIL_BLOBS'
 	| 'USAGE_EVENTS'
 	| 'APP_BASE_URL'
 	| 'USER_EMAIL_DOMAIN'
-	| 'CLOUDFLARE_ACCOUNT_ID'
-	| 'CLOUDFLARE_API_BASE_URL'
-	| 'CLOUDFLARE_API_TOKEN'
 	| 'USER_METERS'
-	| 'MAILBOX'
+	| 'MAILBOX_STORE'
 	| 'EMAIL_EVENTS'
 > &
 	EmailReportingEnv &
@@ -154,7 +152,7 @@ export class OutboundEmailPersistenceError extends Error {
 }
 
 async function resolveSelfRecipients(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	to: string | Array<string> | null | undefined
 	accountEmail: string
@@ -364,44 +362,7 @@ async function requireStoredEmailMessage(input: {
 	return mailboxMessageToEmailMessageRecord(stored, input.userId)
 }
 
-async function sendViaBinding(input: {
-	env: SendEmailEnv
-	from: string
-	to: Array<string>
-	subject: string
-	text?: string | null
-	html?: string | null
-	replyTo?: string | null
-	headers: Record<string, string>
-	attachments: Array<PreparedOutboundAttachment>
-}) {
-	const binding = input.env.EMAIL
-	if (!binding) return { sent: false, messageId: null }
-	const result = await binding.send({
-		from: input.from,
-		to: input.to.length === 1 ? input.to[0]! : input.to,
-		subject: input.subject,
-		...(input.replyTo ? { replyTo: input.replyTo } : {}),
-		headers: input.headers,
-		...(input.text ? { text: input.text } : {}),
-		...(input.html ? { html: input.html } : {}),
-		...(input.attachments.length > 0
-			? {
-					// The binding treats string content as raw text, so binary
-					// payloads must go through as bytes rather than base64.
-					attachments: input.attachments.map((attachment) => ({
-						disposition: 'attachment' as const,
-						filename: attachment.filename,
-						type: attachment.contentType,
-						content: attachment.bytes,
-					})),
-				}
-			: {}),
-	})
-	return { sent: true, messageId: result.messageId ?? null }
-}
-
-async function sendViaRestFallback(input: {
+async function sendViaSes(input: {
 	env: SendEmailEnv
 	from: string
 	to: Array<string>
@@ -416,39 +377,28 @@ async function sendViaRestFallback(input: {
 	if (!html) {
 		throw new Error('Email text or HTML body is required.')
 	}
-	const result = await sendCloudflareEmail(
-		{
-			accountId: input.env.CLOUDFLARE_ACCOUNT_ID,
-			apiBaseUrl: input.env.CLOUDFLARE_API_BASE_URL,
-			apiToken: input.env.CLOUDFLARE_API_TOKEN,
-		},
-		{
-			from: input.from,
-			to: input.to.length === 1 ? input.to[0]! : input.to,
-			subject: input.subject,
-			html,
-			text: input.text ?? undefined,
-			replyTo: input.replyTo ?? undefined,
-			headers:
-				Object.keys(input.headers).length > 0 ? input.headers : undefined,
-			attachments:
-				input.attachments.length > 0
-					? // The REST API expects base64 string content.
-						input.attachments.map((attachment) => ({
-							content: attachment.contentBase64,
-							filename: attachment.filename,
-							type: attachment.contentType,
-							disposition: 'attachment' as const,
-							// The inferred schema output type requires this key even
-							// when undefined; JSON.stringify drops it from the payload.
-							contentId: undefined,
-						}))
-					: undefined,
-		},
-	)
-	if (!result.ok) {
-		throw new Error(result.error ?? 'Cloudflare email send was skipped.')
-	}
+	const result = await sendSesEmail(input.env, {
+		from: input.from,
+		to: input.to.length === 1 ? input.to[0]! : input.to,
+		subject: input.subject,
+		html,
+		text: input.text ?? undefined,
+		replyTo: input.replyTo ?? undefined,
+		headers: Object.keys(input.headers).length > 0 ? input.headers : undefined,
+		attachments:
+			input.attachments.length > 0
+				? // The REST API expects base64 string content.
+					input.attachments.map((attachment) => ({
+						content: attachment.contentBase64,
+						filename: attachment.filename,
+						type: attachment.contentType,
+						disposition: 'attachment' as const,
+						// The inferred schema output type requires this key even
+						// when undefined; JSON.stringify drops it from the payload.
+						contentId: undefined,
+					}))
+				: undefined,
+	})
 	return result.messageId ?? null
 }
 
@@ -842,7 +792,7 @@ export async function sendOutboundEmail(
 		try {
 			let acceptedProviderMessageId: string | null
 			try {
-				const bindingResult = await sendViaBinding({
+				acceptedProviderMessageId = await sendViaSes({
 					env: input.env,
 					from,
 					to,
@@ -855,21 +805,6 @@ export async function sendOutboundEmail(
 					headers: providerHeaders,
 					attachments,
 				})
-				acceptedProviderMessageId = bindingResult.sent
-					? bindingResult.messageId
-					: await sendViaRestFallback({
-							env: input.env,
-							from,
-							to,
-							subject,
-							text,
-							html,
-							replyTo: input.replyTo
-								? (normalizeEmailAddress(input.replyTo) ?? undefined)
-								: undefined,
-							headers: providerHeaders,
-							attachments,
-						})
 			} catch (error) {
 				// Provider did not accept the send. Safe to mark failed / clear id.
 				sendOutcome = 'error'
@@ -958,7 +893,7 @@ export async function sendOutboundEmail(
 			// index write must not turn provider acceptance into a resend signal;
 			// the Mailbox alarm retries its durable pending repair.
 			if (acceptedProviderMessageId) {
-				await runD1WithRetry(() =>
+				await runSqlWithRetry(() =>
 					upsertOutboundProviderIndexRow({
 						db: input.env.APP_DB,
 						providerMessageId: acceptedProviderMessageId,

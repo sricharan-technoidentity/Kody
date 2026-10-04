@@ -568,27 +568,27 @@ test('retries transient platform errors during staging and target rebuild, then 
 
 	consoleWarn.mockClear()
 	resetMocks()
-	const d1Run = vi
+	const sqlRun = vi
 		.fn()
 		.mockResolvedValueOnce({
 			ok: false,
-			message: 'internal error; reference = s46pgsm6st3fg81p6qumom80',
+			message: 'Connection terminated unexpectedly',
 		})
 		.mockResolvedValueOnce({
 			ok: true,
 			message: 'rebuilt',
 		})
-	const d1Discard = vi.fn(async () => undefined)
+	const sqlDiscard = vi.fn(async () => undefined)
 	mockModule.createIsolatedArtifactRebuildRunner.mockReturnValue({
 		touch: vi.fn(),
-		run: d1Run,
-		discard: d1Discard,
+		run: sqlRun,
+		discard: sqlDiscard,
 	})
 	mockModule.listPublishedPackageArtifactTargets.mockResolvedValue([
 		sampleTargets[0],
 	])
 	mockModule.stagePublishedPackageArtifactRebuild.mockResolvedValue({
-		stagingKey: 'repo-artifact-rebuild-staging:v1:user-1:stage-d1',
+		stagingKey: 'repo-artifact-rebuild-staging:v1:user-1:stage-sql',
 	})
 
 	await rebuildPublishedPackageArtifactsViaRepoSession({
@@ -603,11 +603,11 @@ test('retries transient platform errors during staging and target rebuild, then 
 		baseUrl: 'https://kody.test',
 	})
 
-	expect(d1Run).toHaveBeenCalledTimes(2)
+	expect(sqlRun).toHaveBeenCalledTimes(2)
 	expect(mockModule.stagePublishedPackageArtifactRebuild).toHaveBeenCalledTimes(
 		2,
 	)
-	expect(d1Discard).toHaveBeenCalledTimes(2)
+	expect(sqlDiscard).toHaveBeenCalledTimes(2)
 	expect(consoleWarn).toHaveBeenCalledTimes(1)
 	expect(String(consoleWarn.mock.calls[0]?.[0])).toContain(
 		'rebuildPublishedPackageArtifactsViaRepoSession transient platform error',

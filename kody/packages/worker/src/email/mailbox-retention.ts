@@ -91,27 +91,27 @@ export function computeMailboxRetentionReschedule(input: {
  * Overdue rows yield timestamps in the past — callers must apply retry backoff
  * or continuation instead of scheduling at now+1s blindly.
  */
-export function nextMailboxRetentionDueAtMs(
+export async function nextMailboxRetentionDueAtMs(
 	store: MailboxStore,
 	nowMs = Date.now(),
-): number | null {
+): Promise<number | null> {
 	let next: number | null = null
 	const consider = (at: number) => {
 		if (!Number.isFinite(at)) return
 		if (next == null || at < next) next = at
 	}
 
-	const oldestMessage = store.oldestMessageCreatedAt(
+	const oldestMessage = await store.oldestMessageCreatedAt(
 		new Date(nowMs).toISOString(),
 	)
 	if (oldestMessage) {
 		consider(Date.parse(oldestMessage) + messageRetentionMs)
 	}
-	const oldestEvent = store.oldestDeliveryEventCreatedAt()
+	const oldestEvent = await store.oldestDeliveryEventCreatedAt()
 	if (oldestEvent) {
 		consider(Date.parse(oldestEvent) + deliveryEventRetentionMs)
 	}
-	const earliestRetryAt = store.earliestMessageRetentionRetryAt()
+	const earliestRetryAt = await store.earliestMessageRetentionRetryAt()
 	if (earliestRetryAt) {
 		consider(Date.parse(earliestRetryAt))
 	}
@@ -238,7 +238,7 @@ export async function deleteMailboxRetentionCandidate(input: {
 	candidate: MailboxRetentionMessageCandidate
 	cutoff: string
 }): Promise<MailboxRetentionMessageDeleteResult> {
-	const current = input.store.getMessageForRetention(input.candidate.id)
+	const current = await input.store.getMessageForRetention(input.candidate.id)
 	if (
 		current == null ||
 		current.created_at >= input.cutoff ||
@@ -253,14 +253,14 @@ export async function deleteMailboxRetentionCandidate(input: {
 		ownerId: input.ownerId,
 		messageId: current.id,
 		direction: current.direction,
-		attachments: input.store.listAttachmentsForRetention([current.id]),
+		attachments: await input.store.listAttachmentsForRetention([current.id]),
 	})
 	try {
 		await deleteMailboxBlobKeys(input.blobs, keys)
 	} catch (error) {
 		console.warn('mailbox-retention-blob-delete-failed', { error })
 		const failedAtMs = Date.now()
-		input.store.recordMessageRetentionFailure({
+		await input.store.recordMessageRetentionFailure({
 			messageId: current.id,
 			retryAt: new Date(
 				failedAtMs + mailboxRetentionRetryDelayMs,
@@ -270,24 +270,26 @@ export async function deleteMailboxRetentionCandidate(input: {
 		})
 		return 'blob-delete-failed'
 	}
-	input.store.tombstoneAndDeleteMessage({
+	await input.store.tombstoneAndDeleteMessage({
 		messageId: current.id,
 		deletedAt: new Date().toISOString(),
 	})
 	return 'deleted'
 }
 
-export function selectMailboxRetentionCandidate(
+export async function selectMailboxRetentionCandidate(
 	store: MailboxStore,
 	cutoff: string,
 	now = new Date().toISOString(),
-): MailboxRetentionMessageCandidate | null {
+): Promise<MailboxRetentionMessageCandidate | null> {
 	return (
-		store.listExpiredMessagesForRetention({
-			cutoff,
-			now,
-			limit: mailboxRetentionMessageCandidatesPerTurn,
-		})[0] ?? null
+		(
+			await store.listExpiredMessagesForRetention({
+				cutoff,
+				now,
+				limit: mailboxRetentionMessageCandidatesPerTurn,
+			})
+		)[0] ?? null
 	)
 }
 
@@ -317,20 +319,22 @@ export async function enforceMailboxRetention(input: {
 		deleteMessage: input.deleteMessage,
 	})
 
-	input.store.pruneExpiredDeliveryEvents({
+	await input.store.pruneExpiredDeliveryEvents({
 		cutoff: eventCutoff,
 		limit: mailboxRetentionMetadataBatchSize,
 	})
-	input.store.pruneOrphanThreads(mailboxRetentionMetadataBatchSize)
+	await input.store.pruneOrphanThreads(mailboxRetentionMetadataBatchSize)
 
 	const expiredWorkRemaining =
-		input.store.hasExpiredMessages(messageCutoff) ||
-		input.store.hasExpiredDeliveryEvents(eventCutoff)
+		(await input.store.hasExpiredMessages(messageCutoff)) ||
+		(await input.store.hasExpiredDeliveryEvents(eventCutoff))
 	const now = new Date().toISOString()
 	const eligibleExpiredWorkRemaining =
-		input.store.hasEligibleExpiredMessages({ cutoff: messageCutoff, now }) ||
-		input.store.hasExpiredDeliveryEvents(eventCutoff)
-	const retryAt = input.store.earliestMessageRetentionRetryAt()
+		(await input.store.hasEligibleExpiredMessages({
+			cutoff: messageCutoff,
+			now,
+		})) || (await input.store.hasExpiredDeliveryEvents(eventCutoff))
+	const retryAt = await input.store.earliestMessageRetentionRetryAt()
 	const earliestRetryAtMs = retryAt == null ? null : Date.parse(retryAt)
 
 	return {

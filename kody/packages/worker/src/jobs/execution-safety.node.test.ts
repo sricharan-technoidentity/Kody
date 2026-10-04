@@ -161,7 +161,7 @@ test('transient platform failures back off the same occurrence while permanent o
 	const now = new Date('2026-07-29T12:00:00.000Z')
 	expect(
 		isTransientJobExecutionError(
-			new Error('D1_ERROR: Network connection lost.'),
+			new Error('Connection terminated unexpectedly'),
 		),
 	).toBe(true)
 	expect(
@@ -204,7 +204,7 @@ test('transient platform failures back off the same occurrence while permanent o
 	)
 	expect(
 		markPreExecutionTransientError(
-			new Error('D1_ERROR: Network connection lost.'),
+			new Error('Connection terminated unexpectedly'),
 		),
 	).toBeInstanceOf(TransientJobExecutionError)
 	expect(

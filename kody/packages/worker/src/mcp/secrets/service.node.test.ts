@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
@@ -509,7 +510,7 @@ function createSecretTestDb(
 				throw error
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	function corruptUserSecret(userId: string, name: string) {
 		const bucket = buckets.get(getBucketKey(userId, 'user', ''))

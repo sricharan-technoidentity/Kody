@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	nullable,
 	object,
@@ -143,7 +144,7 @@ function mapTokenRow(
 }
 
 export async function getActivePackageInvocationTokenForPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	tokenHash: string
@@ -164,7 +165,7 @@ export async function getActivePackageInvocationTokenForPackage(input: {
 }
 
 export async function updatePackageInvocationTokenLastUsed(input: {
-	db: D1Database
+	db: SqlDatabase
 	id: string
 }) {
 	const result = await input.db
@@ -179,7 +180,7 @@ export async function updatePackageInvocationTokenLastUsed(input: {
 }
 
 export async function listPackageInvocationTokensByPackageId(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 }) {
@@ -197,7 +198,7 @@ export async function listPackageInvocationTokensByPackageId(input: {
 }
 
 export async function getPackageInvocationTokenById(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	tokenId: string
 }) {
@@ -215,7 +216,7 @@ export async function getPackageInvocationTokenById(input: {
 }
 
 export async function insertPackageInvocationToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: {
 		id: string
 		userId: string
@@ -253,7 +254,7 @@ export async function insertPackageInvocationToken(input: {
 }
 
 export async function updatePackageInvocationToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	id: string
@@ -287,7 +288,7 @@ export async function updatePackageInvocationToken(input: {
 }
 
 export async function revokePackageInvocationToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	id: string
@@ -308,7 +309,7 @@ export async function revokePackageInvocationToken(input: {
 }
 
 export async function reinstatePackageInvocationToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	id: string
@@ -328,7 +329,7 @@ export async function reinstatePackageInvocationToken(input: {
 }
 
 export async function deletePackageInvocationToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	id: string
@@ -346,7 +347,7 @@ export async function deletePackageInvocationToken(input: {
 }
 
 export async function deletePackageInvocationTokensForPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 }) {

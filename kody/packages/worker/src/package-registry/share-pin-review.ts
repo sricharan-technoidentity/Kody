@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getEntitySourceById } from '#worker/repo/entity-sources.ts'
 import { readPublishedSourceSnapshot } from '#worker/package-runtime/published-runtime-artifacts.ts'
 import { getSavedPackageById } from './repo.ts'
@@ -16,7 +17,7 @@ const truncatedPinAcknowledgeMessage =
 
 export async function assertSharePinAcknowledgeReview(input: {
 	env: Env
-	db: D1Database
+	db: SqlDatabase
 	granteeUserId: string
 	grantId: string
 	packageId?: string
@@ -49,7 +50,7 @@ export async function assertSharePinAcknowledgeReview(input: {
 
 async function assertGrantSnapshotsAllowPinAcknowledge(input: {
 	env: Env
-	db: D1Database
+	db: SqlDatabase
 	grant: PackageShareGrantRow
 	expectedPublishedCommit?: string
 }) {

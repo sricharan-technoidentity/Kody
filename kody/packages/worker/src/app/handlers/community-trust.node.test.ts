@@ -1,7 +1,8 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createCommunityTrustApiPostHandler } from './community-trust.ts'
 
-const env = { APP_DB: {} as D1Database } as Env
+const env = { APP_DB: {} as SqlDatabase } as Env
 
 test('community trust POST returns 410 gone', async () => {
 	const handler = createCommunityTrustApiPostHandler(env)

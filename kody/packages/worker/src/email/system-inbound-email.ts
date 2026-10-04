@@ -79,7 +79,7 @@ export async function handleSystemInboundEmail(input: {
 		| 'BUNDLE_ARTIFACTS_KV'
 		| 'APP_BASE_URL'
 		| 'USAGE_EVENTS'
-		| 'MAILBOX'
+		| 'MAILBOX_STORE'
 		| 'USER_METERS'
 	>
 	recipient: string

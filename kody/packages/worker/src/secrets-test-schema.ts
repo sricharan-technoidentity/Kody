@@ -1,8 +1,9 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Workers-unit D1 does not apply migrations. Suites that call packageGet
  * (which lists package-scoped secret metadata) need these tables.
  */
-export async function ensureSecretBucketsTestSchema(db: D1Database) {
+export async function ensureSecretBucketsTestSchema(db: SqlDatabase) {
 	await db
 		.prepare(
 			`CREATE TABLE IF NOT EXISTS secret_buckets (

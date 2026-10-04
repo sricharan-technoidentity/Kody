@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { RequestContext } from 'remix/router'
 import {
@@ -14,10 +15,10 @@ function createHealthyBindings() {
 		APP_COMMIT_SHA: 'abc123',
 		APP_DB: {
 			prepare: () => ({ first: async () => ({ 1: 1 }) }),
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 		AUDIT_DB: {
 			prepare: () => ({ first: async () => ({ 1: 1 }) }),
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 		OAUTH_KV: { get: async () => null } as unknown as KVNamespace,
 		COMMUNITY_ASSETS: { head: async () => null } as unknown as R2Bucket,
 	}
@@ -65,7 +66,7 @@ test('collectHealthComponents reports healthy, failed, and unavailable bindings'
 				throw new Error('database is unavailable')
 			},
 		}),
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	const failed = await collectHealthComponents(bindings)
 	expect(failed.ok).toBe(false)
 	expect(
@@ -91,7 +92,7 @@ test('collectHealthComponents reports healthy, failed, and unavailable bindings'
 	}
 })
 
-test('D1 checks retry transient blips but fail fast on other errors', async () => {
+test('PostgreSQL checks retry transient blips but fail fast on other errors', async () => {
 	let auditAttempts = 0
 	const bindings = createHealthyBindings()
 	bindings.AUDIT_DB = {
@@ -99,12 +100,12 @@ test('D1 checks retry transient blips but fail fast on other errors', async () =
 			first: async () => {
 				auditAttempts += 1
 				if (auditAttempts === 1) {
-					throw new Error('D1_ERROR: Network connection lost.')
+					throw new Error('Connection terminated unexpectedly')
 				}
 				return { 1: 1 }
 			},
 		}),
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	const recovered = await collectHealthComponents(bindings)
 	expect(auditAttempts).toBe(2)
 	expect(recovered.ok).toBe(true)
@@ -119,10 +120,10 @@ test('D1 checks retry transient blips but fail fast on other errors', async () =
 		prepare: () => ({
 			first: async () => {
 				appAttempts += 1
-				throw new Error('no such table: users')
+				throw new Error('relation "users" does not exist')
 			},
 		}),
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	const failed = await collectHealthComponents(failingBindings)
 	expect(appAttempts).toBe(1)
 	expect(failed.ok).toBe(false)
@@ -136,10 +137,10 @@ test('D1 checks retry transient blips but fail fast on other errors', async () =
 		prepare: () => ({
 			first: async () => {
 				persistentAttempts += 1
-				throw new Error('D1_ERROR: Network connection lost.')
+				throw new Error('Connection terminated unexpectedly')
 			},
 		}),
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	const persistent = await collectHealthComponents(persistentBindings)
 	expect(persistentAttempts).toBe(3)
 	expect(persistent.ok).toBe(false)
@@ -159,7 +160,7 @@ test('D1 checks retry transient blips but fail fast on other errors', async () =
 				return { 1: 1 }
 			},
 		}),
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	const recoveredFromHang = await collectHealthComponents(hungBindings)
 	expect(hungAttempts).toBe(2)
 	expect(recoveredFromHang.ok).toBe(true)
@@ -178,7 +179,7 @@ test('health components handler memoizes, coalesces in-flight work, and returns 
 			prepareCalls += 1
 			return { first: async () => ({ 1: 1 }) }
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	const handler = createHealthComponentsHandler(bindings)
 
 	const first = await handler.handler(createRequestContext())
@@ -208,7 +209,7 @@ test('health components handler memoizes, coalesces in-flight work, and returns 
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	const concurrentHandler = createHealthComponentsHandler(concurrentBindings)
 	const firstInFlight = concurrentHandler.handler(createRequestContext())
 	const secondInFlight = concurrentHandler.handler(createRequestContext())

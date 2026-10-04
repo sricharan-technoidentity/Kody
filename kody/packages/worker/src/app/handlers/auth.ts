@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type Action } from 'remix/router'
 import { enum_, object, parseSafe, string } from 'remix/data-schema'
 import {
@@ -523,7 +524,7 @@ export function createAuthHandler(env: Env) {
 					try {
 						await ensureDefaultEmailInbox({
 							// ponytail: D1-typed until P6 moves mailboxes; it reclaims stale address rows cross-user.
-							db: accountDb as D1Database,
+							db: accountDb as SqlDatabase,
 							userId: record.stableUserId,
 							username: normalizedUsername,
 							domain: platformEmailDomain,
@@ -560,7 +561,7 @@ export function createAuthHandler(env: Env) {
 				try {
 					await attributeReferralAtSignup({
 						// ponytail: the referrer lookup is cross-user; P4 `entitlements` gives it a definer.
-						db: accountDb as D1Database,
+						db: accountDb as SqlDatabase,
 						refereeStableUserId: record.stableUserId,
 						refereeUsername: normalizedUsername,
 						referralCode: resolveReferralCodeForSignup({
@@ -605,7 +606,7 @@ export function createAuthHandler(env: Env) {
 			}
 
 			// Only the address is known before sign-in; continue on its owner's writer.
-			const accountDb = await resolveTokenOwnerDb<D1Database | PgDatabase>({
+			const accountDb = await resolveTokenOwnerDb<SqlDatabase | PgDatabase>({
 				db: env.APP_DB,
 				forUser: getAccountWriterFactory(env),
 				kind: 'account_email',

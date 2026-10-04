@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Shared `users` provisioning for `*.workers.test.ts` suites. Local D1 starts
  * empty and never applies migrations, so each suite creates the tables it
@@ -144,7 +145,7 @@ const optionalColumns: Record<UsersTestSchemaColumn, UsersColumnDefinition> = {
 }
 
 export async function ensureUsersTestSchema(input: {
-	db: D1Database
+	db: SqlDatabase
 	columns?: ReadonlyArray<UsersTestSchemaColumn>
 }) {
 	const additive: Array<readonly [string, UsersColumnDefinition]> = [
@@ -196,7 +197,7 @@ export async function ensureUsersTestSchema(input: {
  * `users` because entitlement resolution reads the wallet balance for any
  * account on the purchasable Pro (including gift and referral overlays).
  */
-export async function ensureCreditWalletsTestTable(db: D1Database) {
+export async function ensureCreditWalletsTestTable(db: SqlDatabase) {
 	await db
 		.prepare(
 			`CREATE TABLE IF NOT EXISTS credit_wallets (

@@ -12,7 +12,7 @@ vi.mock('./vectorize.ts', () => ({
 		mockModule.upsertSavedPackageVector(...args),
 }))
 
-vi.mock('@sentry/cloudflare', () => ({
+vi.mock('#worker/front-door/telemetry.ts', () => ({
 	captureException: (...args: Array<unknown>) =>
 		mockModule.captureException(...args),
 }))

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { joinAppUrl } from '#worker/app-base-url.ts'
 import { pruneDeliveryAlertEvents } from '#worker/email/delivery-alert-events.ts'
 import { dispatchEmailDeliveryBurstSubscriptionEvent } from './email-delivery-burst-package-subscriptions.ts'
@@ -9,7 +10,7 @@ export const emailDeliveryAlertCooldownMinutes = 6 * 60
 export const emailDeliveryAlertKvKey = 'ops-alert:email-delivery-burst:v2'
 
 type EmailDeliveryAlertEnv = {
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 	APP_BASE_URL?: string
 	BUNDLE_ARTIFACTS_KV?: KVNamespace
 }

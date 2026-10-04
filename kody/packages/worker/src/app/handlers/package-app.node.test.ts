@@ -67,7 +67,7 @@ const mockModule = vi.hoisted(() => ({
 	),
 }))
 
-vi.mock('@sentry/cloudflare', () => ({
+vi.mock('#worker/front-door/telemetry.ts', () => ({
 	isInitialized: (...args: Array<unknown>) =>
 		mockModule.isSentryInitialized(...args),
 	getClient: (...args: Array<unknown>) => mockModule.getSentryClient(...args),

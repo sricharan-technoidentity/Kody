@@ -1,0 +1,76 @@
+import { env } from '#worker/test-support/mail.ts'
+import {
+	runMailbox as runInDurableObject,
+	test,
+} from '#worker/test-support/mail.ts'
+import { expect } from 'vitest'
+import { type MailboxService as Mailbox } from './mailbox-service.ts'
+import { rpcFor, stubFor, uniqueUserId } from '#worker/test-support/mail.ts'
+import { baseDeliveryEvent, baseMessage } from './mailbox-test-helpers.ts'
+import {
+	emailOutboundProviderCloudflare,
+	getOutboundProviderIndexRow,
+} from './outbound-provider-index.ts'
+import { ensureEmailTestSchema } from './test-schema.ts'
+
+test('accepted terminal persists repair, alarm repairs D1, and replay never resends', async () => {
+	const userId = uniqueUserId('provider-repair')
+	const messageId = 'provider-repair-message'
+	const providerMessageId = 'provider-repair-id'
+	const acceptedAt = '2026-08-03T00:00:00.000Z'
+	const mailbox = rpcFor(userId)
+	await mailbox.upsertMessageGraph({
+		ownerId: userId,
+		message: baseMessage(userId, {
+			id: messageId,
+			direction: 'outbound',
+			processingStatus: 'stored',
+			rawMimeKey: null,
+		}),
+	})
+	const terminal = {
+		ownerId: userId,
+		messageId,
+		processingStatus: 'sent' as const,
+		providerMessageId,
+		error: null,
+		sentAt: acceptedAt,
+		event: baseDeliveryEvent({
+			id: 'provider-repair-sent-event',
+			messageId,
+			eventType: 'sent',
+			provider: emailOutboundProviderCloudflare,
+			providerMessageId,
+			createdAt: acceptedAt,
+			updatedAt: acceptedAt,
+		}),
+		providerIndexRepair: {
+			provider: emailOutboundProviderCloudflare,
+			providerMessageId,
+			messageId,
+			inboxId: null,
+			createdAt: acceptedAt,
+		},
+	}
+	await mailbox.commitOutboundTerminal(terminal)
+	await mailbox.commitOutboundTerminal(terminal)
+	await expect(
+		mailbox.getOutboundProviderIndexRepairStatus({ ownerId: userId }),
+	).resolves.toMatchObject({ pendingCount: 1 })
+	await expect(
+		getOutboundProviderIndexRow({ db: env.APP_DB, providerMessageId }),
+	).resolves.toBeNull()
+
+	await runInDurableObject(stubFor(userId), async (instance: Mailbox) => {
+		await instance.alarm()
+	})
+	await expect(
+		mailbox.getOutboundProviderIndexRepairStatus({ ownerId: userId }),
+	).resolves.toMatchObject({ pendingCount: 0 })
+	await expect(
+		getOutboundProviderIndexRow({ db: env.APP_DB, providerMessageId }),
+	).resolves.toMatchObject({ userId, messageId })
+	expect(
+		await mailbox.listDeliveryEvents({ messageId, limit: 10 }),
+	).toHaveLength(1)
+})

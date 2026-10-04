@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { jsonResponse } from '#worker/json-response.ts'
 import { type Action } from 'remix/router'
 import { enum_, object, optional, parseSafe, string } from 'remix/data-schema'
@@ -238,7 +239,7 @@ export function createAccountTwoFactorApiHandler(env: Env) {
 }
 
 async function loadTwoFactorStatus(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<AccountTwoFactorLoaderData> {
 	return {

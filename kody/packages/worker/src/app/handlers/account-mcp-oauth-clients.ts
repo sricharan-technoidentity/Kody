@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { jsonResponse } from '#worker/json-response.ts'
 import { type Action } from 'remix/router'
 import { enum_, object, optional, parseSafe, string } from 'remix/data-schema'
@@ -195,7 +196,7 @@ export function createAccountMcpOauthClientsApiHandler(env: Env) {
 }
 
 async function loadClientsPayload(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<AccountMcpOauthClientsLoaderData> {
 	const clients: Array<UserMcpOauthClientListItem> =

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
@@ -24,7 +25,7 @@ function createContext() {
 						}),
 					}),
 				}),
-			} as unknown as D1Database,
+			} as unknown as SqlDatabase,
 		} as Env,
 		callerContext: createMcpCallerContext({
 			baseUrl: 'https://example.com',

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { isValidKodyInstanceName } from '@kody-internal/shared/stable-name.ts'
 
 export type UserRepoRow = {
@@ -64,7 +65,7 @@ export function assertValidUserRepoName(name: string) {
 }
 
 export async function insertUserRepo(
-	db: D1Database,
+	db: SqlDatabase,
 	row: Omit<UserRepoRow, 'created_at' | 'updated_at' | 'is_private'> & {
 		created_at?: string
 		updated_at?: string
@@ -94,7 +95,7 @@ export async function insertUserRepo(
 }
 
 export async function getUserRepoById(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; repoId: string },
 ): Promise<UserRepoRecord | null> {
 	const row = await db
@@ -109,7 +110,7 @@ export async function getUserRepoById(
 }
 
 export async function getUserRepoByName(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; name: string },
 ): Promise<UserRepoRecord | null> {
 	const normalized = normalizeUserRepoName(input.name)
@@ -129,7 +130,7 @@ export type UserRepoListRecord = UserRepoRecord & {
 }
 
 export async function listUserRepos(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<Array<UserRepoListRecord>> {
 	const result = await db
@@ -159,7 +160,7 @@ export async function listUserRepos(
 }
 
 export async function updateUserRepo(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		repoId: string
@@ -191,7 +192,7 @@ export async function updateUserRepo(
 }
 
 export async function deleteUserRepo(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; repoId: string },
 ): Promise<boolean> {
 	const result = await db
@@ -202,7 +203,7 @@ export async function deleteUserRepo(
 }
 
 export async function renameUserRepo(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; repoId: string; name: string },
 ): Promise<boolean> {
 	const name = assertValidUserRepoName(input.name)
@@ -222,7 +223,7 @@ export async function renameUserRepo(
  * plain repo with the same bare name exists for promotion guidance.
  */
 export async function findPlainRepoPromotionHint(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; packageIdOrKodyId: string },
 ): Promise<UserRepoRecord | null> {
 	const trimmed = input.packageIdOrKodyId.trim()

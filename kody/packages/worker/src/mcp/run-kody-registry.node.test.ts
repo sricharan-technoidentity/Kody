@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 vi.mock('#worker/temporal/package-workflow.ts', () => ({
 	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
 }))
@@ -134,7 +135,7 @@ test('package workflow tools create instances from package context and honor cal
 						},
 					}
 				},
-			} as unknown as D1Database,
+			} as unknown as SqlDatabase,
 			RUN_STATE: runLog.state,
 			TEMPORAL: {
 				get: async () => {
@@ -282,7 +283,7 @@ test('runModuleWithRegistry queues inline workflows.create calls without runAt o
 					},
 				}
 			},
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 		RUN_STATE: runLog.state,
 		TEMPORAL: {
 			get: async () => {
@@ -465,15 +466,13 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 				},
 			}),
 		} as unknown as Env['TEMPORAL'],
-		STORAGE_RUNNER: {
-			idFromName(name: string) {
-				return name as unknown as DurableObjectId
-			},
-			get() {
-				return {
-					clearStorage: async () => ({ ok: true as const }),
-				}
-			},
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				(function () {
+					return {
+						clearStorage: async () => ({ ok: true as const }),
+					}
+				})(JSON.stringify([bucket.userId, bucket.storageId])),
 		},
 	})
 	await insertRepoSession(
@@ -672,13 +671,11 @@ test('buildKodyFns tracks secretSet values for execute redaction', async () => {
 test('buildKodyFns rejects package storage kody tools that collide with capabilities', async () => {
 	silenceIncidentalRuntimeWarnings()
 	const env = {
-		STORAGE_RUNNER: {
-			idFromName(name: string) {
-				return name
-			},
-			get() {
-				return {}
-			},
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				(function () {
+					return {}
+				})(JSON.stringify([bucket.userId, bucket.storageId])),
 		},
 	} as unknown as Env
 	const callerContext = createMcpCallerContext({

@@ -1,4 +1,4 @@
-import { InMemoryFs } from '@cloudflare/shell'
+import { createEphemeralGitWorkspace } from './ephemeral-git-workspace.ts'
 import rawGit from 'isomorphic-git'
 import { expect, test } from 'vitest'
 import { createIsomorphicGitFs } from './isomorphic-git-fs.ts'
@@ -12,7 +12,7 @@ test('bare workspace filesystem trips isomorphic-git bindFs without unlink/rmdir
 	// and throws "Cannot read properties of undefined (reading 'bind')" for the
 	// first missing command — the production cron cleanup failure mode when
 	// rawGit.push received a bare workspace fs.
-	const workspaceFileSystem = new InMemoryFs()
+	const workspaceFileSystem = createEphemeralGitWorkspace().filesystem
 	await workspaceFileSystem.mkdir('/session', { recursive: true })
 	await expect(
 		rawGit.init({
@@ -24,7 +24,7 @@ test('bare workspace filesystem trips isomorphic-git bindFs without unlink/rmdir
 })
 
 test('workspace filesystem adapter supports raw isomorphic-git operations', async () => {
-	const workspaceFileSystem = new InMemoryFs()
+	const workspaceFileSystem = createEphemeralGitWorkspace().filesystem
 	await workspaceFileSystem.mkdir('/session', { recursive: true })
 	const fs = createIsomorphicGitFs(workspaceFileSystem) as RawGitInitFs
 

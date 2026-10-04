@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { type readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import {
@@ -223,7 +224,7 @@ function messageToListItem(
 }
 
 async function loadUsage(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: EntitlementUsageEnv
 	userId: string
 	email: string
@@ -295,7 +296,7 @@ async function loadUsage(input: {
 }
 
 async function loadInboxes(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<Array<AccountEmailInbox>> {
 	const [inboxes, addresses] = await Promise.all([

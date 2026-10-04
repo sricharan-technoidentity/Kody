@@ -6,8 +6,8 @@ For the current migration POC, use this reduced scope. Do not run production
 workflows.
 
 - Read [`planss/kody-migration-plan.md`](./planss/kody-migration-plan.md) first;
-  `planss/execution plan.md` is a duplicate and should not be edited.
-- Goal: prove one vertical slice of Temporal + AgentCore in isolation.
+  then the demo readiness plan; historical execution logs are archived.
+- Goal: execute the demo readiness plan step by step in isolation.
 - Out of scope: live data migration, deployment, cutover, preview testing,
   production health checks, PR shipping, Discord summaries, visual recaps.
 - Do not invoke `ship-pr`, `preview-manual-test`, `control-kody` preview/health,
@@ -30,29 +30,19 @@ email inboxes, durable storage).
 
 ## Temporal + AgentCore migration context
 
-For migration work, read the documents in `planss/` in this order:
+Read [current migration overview](./planss/kody-migration-plan.md), then the
+[demo readiness plan](./planss/poc-demo-readiness-plan.md),
+[POC architecture](./docs/poc/architecture.md) and
+[fresh readiness evidence](./docs/poc/readiness.md).
 
-1. [Current component reference](./planss/Kody%20Architecture%20%E2%80%94%20Component%20Reference.md)
-   and the live [architecture docs](./docs/contributing/architecture/index.md)
-   for the Cloudflare system. Where a snapshot conflicts with the repository or
-   an accepted decision, use the repository and the
-   [decision index](./docs/contributing/decisions/index.md).
-2. [Component comparison](./planss/Kody%20on%20Temporal%20%2B%20AgentCore%20%E2%80%94%20Component%20Comparison.md)
-   and [target architecture](./planss/Kody%20on%20Temporal%20%2B%20AgentCore%20%E2%80%94%20Target%20Architecture.md)
-   for the proposed AWS and Temporal system, its unverified assumptions, and
-   the production data-copy and cutover plan. Treat target behavior as a
-   proposal until implemented.
-3. [POC execution plan](./planss/kody-migration-plan.md) for phased
-   implementation and phase status. `planss/execution plan.md` is a duplicate;
-   update only `kody-migration-plan.md` when recording POC progress. The POC
-   excludes live data migration, deployment, and cutover.
-
-Preserve per-user isolation, the two-tool MCP surface, existing package
-behavior, and published URLs and grants. The `workerd` Runner is the critical
-compatibility proof: fakes alone do not establish that published packages run
-unchanged. POC phase checks are incremental; the plan's instruction not to run
-`npm run validate` during POC work does not replace the repository's
-authoritative gate. Do not claim production migration complete from POC gates.
+Preserve owner isolation, the two MCP tools, package compatibility and published
+URLs/grants. Use `npm run demo` / `npm run dev` for the local launcher and
+`npm run demo:check` for focused evidence. Existing Kody code changes require
+the unchanged `CI=1 npm run validate`. Browser tests use separate test controls.
+Only explicitly configured sandbox service proofs may contact existing AWS
+resources; never deploy, provision, cut over or copy live data. No git writes.
+Historical P0–P8 evidence and proposals live in
+`docs/audits/migration-2026-10-04`.
 
 This file is intentionally brief. Detailed instructions live in focused docs:
 

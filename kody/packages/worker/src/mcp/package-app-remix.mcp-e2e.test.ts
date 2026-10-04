@@ -23,14 +23,14 @@ type PackageSaveResult = {
 }
 
 function readExecuteResult<T>(toolResult: CallToolResult): T {
-	expect(toolResult.isError).toBeFalsy()
+	expect(toolResult.isError, JSON.stringify(toolResult)).toBeFalsy()
 	const structured = toolResult.structuredContent as ExecuteStructured
 	expect(structured.error).toBeUndefined()
 	expect(structured.result).toBeTruthy()
 	return structured.result as T
 }
 
-test('a Remix package app publishes and serves SSR routes, a form action, middleware, and the hydration module on a real local worker', async () => {
+test('a Remix package app publishes and serves SSR routes, a form action, middleware, and the hydration module on the Node front door and real Runner', async () => {
 	silenceExpectedConsoleWarns([
 		/Ignoring duplicate module:.*generated\/esbuild\.wasm/,
 	])

@@ -30,10 +30,18 @@ test('a scheduled job consumes its meter and fans a failure out to a subscriber'
 		expect(env.runner.invocations).toHaveLength(2)
 		expect(env.runner.invocations[1]?.payload).toMatchObject({
 			surface: 'subscription',
+			bundleKey: expect.any(String),
+			runToken: expect.any(String),
+		})
+		const payload = env.runner.invocations[1]!.payload as { bundleKey: string }
+		const graph = JSON.parse(
+			new TextDecoder().decode(env.objects.get(payload.bundleKey)!),
+		)
+		expect(graph).toMatchObject({
 			packageId: 'alerts',
 			params: { runId: result.eventId, surface: 'job', error: 'failed' },
 		})
 	} finally {
 		await close()
 	}
-})
+}, 60_000)

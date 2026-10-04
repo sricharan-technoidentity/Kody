@@ -1,8 +1,7 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import {
 	upsertIntegration,
 	upsertOauthAppWithoutConnection,
@@ -18,17 +17,18 @@ import {
 	loadExistingConnectionSummary,
 } from './account-integrations-data.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
+async function createEnv(userId = 'user-123') {
+	const sqlite = await createTestPg()
 
-function applyAllMigrations(db: DatabaseSync) {
-	applyRepositoryMigrations(db, migrationsDirectory)
-}
-
-function createEnv() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite)
 	return {
-		env: { APP_DB: createD1FromSqlite(sqlite) } as Env,
+		adminDb: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+		env: {
+			APP_DB: createPgDatabase({
+				connection: sqlite,
+				role: 'kody_writer',
+				userId,
+			}),
+		} as Env,
 	}
 }
 
@@ -56,7 +56,7 @@ const googleConfig = {
 }
 
 test('loadAccountIntegrationByName covers setup prefill, reconnect, and exact-slug apps', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-integrations-loader')
 	const userId = 'user-integrations-loader'
 
 	expect(
@@ -120,7 +120,7 @@ test('loadAccountIntegrationByName covers setup prefill, reconnect, and exact-sl
 
 	await upsertOauthAppWithoutConnection({
 		env,
-		userId: 'user-abandoned',
+		userId: 'user-integrations-loader',
 		config: {
 			name: 'notion',
 			tokenUrl: 'https://api.notion.com/v1/oauth/token',
@@ -133,7 +133,7 @@ test('loadAccountIntegrationByName covers setup prefill, reconnect, and exact-sl
 	})
 	const connectionless = await loadAccountIntegrationByName(
 		env,
-		fakeUser('user-abandoned'),
+		fakeUser('user-integrations-loader'),
 		'notion',
 	)
 	expect(connectionless).toMatchObject({
@@ -144,7 +144,7 @@ test('loadAccountIntegrationByName covers setup prefill, reconnect, and exact-sl
 })
 
 test('connect lookup never prefills a built-in and converts platform reconnects to BYO', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-platform-priority')
 	const userId = 'user-platform-priority'
 	const platformEnv = {
 		...env,
@@ -152,7 +152,7 @@ test('connect lookup never prefills a built-in and converts platform reconnects 
 	} as Env
 
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: adminDb,
 		env: platformEnv,
 		app: {
 			slug: 'github',
@@ -338,7 +338,7 @@ test('connect lookup never prefills a built-in and converts platform reconnects 
 })
 
 test('loadAccountIntegrationsData includes OAuth apps with their connections', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-integrations-apps-loader')
 	const userId = 'user-integrations-apps-loader'
 
 	await upsertIntegration({
@@ -422,7 +422,7 @@ test('loadAccountIntegrationsData includes OAuth apps with their connections', a
 })
 
 test('loadAccountIntegrationsData lists built-in apps next to user-registered apps', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-integrations-platform-list')
 	const userId = 'user-integrations-platform-list'
 	const platformEnv = {
 		...env,
@@ -430,7 +430,7 @@ test('loadAccountIntegrationsData lists built-in apps next to user-registered ap
 	} as Env
 
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: adminDb,
 		env: platformEnv,
 		app: {
 			slug: 'google',

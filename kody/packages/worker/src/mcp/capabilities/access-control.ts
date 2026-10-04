@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
 import { auditDatabaseFromEnv } from '#worker/audit-log.ts'
 import {
@@ -67,7 +68,7 @@ function disabledFeatureFlags(): CallerFeatureFlags {
 }
 
 async function resolveFeatureFlagUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ): Promise<number | null> {
 	const row = await db

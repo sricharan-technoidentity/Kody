@@ -1,3 +1,4 @@
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 import {
 	loadPackageSourceBySourceId,
 	type LoadedPackageSource,
@@ -218,6 +219,7 @@ async function ensurePackageLoaded(
 	const existing = state.packages.get(packageKey)
 	if (existing) return existing
 	const resolution = await resolveSavedPackageImport({
+		forUser: getAccountWriterFactory(state.env),
 		db: state.env.APP_DB,
 		userId: state.userId,
 		specifier: parsed,

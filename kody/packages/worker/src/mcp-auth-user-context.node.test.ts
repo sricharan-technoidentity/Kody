@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleError } from '#worker/test-support/console-spies.ts'
 
@@ -51,7 +52,7 @@ function createMockAppDb(options: {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	return { db, queries }
 }
 

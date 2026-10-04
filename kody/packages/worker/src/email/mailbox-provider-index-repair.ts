@@ -1,3 +1,5 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import { type MailboxSql } from './mailbox-sql.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { upsertOutboundProviderIndexRow } from './outbound-provider-index.ts'
 
@@ -37,11 +39,11 @@ function nextRetryAt(now: Date, attemptCount: number) {
 	return new Date(now.getTime() + delay).toISOString()
 }
 
-export function upsertMailboxProviderIndexRepair(
-	sql: SqlStorage,
+export async function upsertMailboxProviderIndexRepair(
+	sql: MailboxSql,
 	input: MailboxProviderIndexRepairInput,
 ) {
-	sql.exec(
+	await sql.exec(
 		`INSERT INTO email_outbound_provider_index_repairs (
 			provider, provider_message_id, message_id, inbox_id, created_at,
 			updated_at, retry_at, attempt_count, last_error
@@ -62,27 +64,27 @@ export function upsertMailboxProviderIndexRepair(
 	)
 }
 
-export function clearMailboxProviderIndexRepair(
-	sql: SqlStorage,
+export async function clearMailboxProviderIndexRepair(
+	sql: MailboxSql,
 	input: { provider: string; providerMessageId: string },
 ) {
-	const row = sql
-		.exec<{ changes: number }>(
+	const row = (
+		await sql.exec<{ changes: number }>(
 			`DELETE FROM email_outbound_provider_index_repairs
 			WHERE provider = ? AND provider_message_id = ?
 			RETURNING 1 AS changes`,
 			input.provider,
 			input.providerMessageId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	return row != null
 }
 
-export function getMailboxProviderIndexRepairStatus(
-	sql: SqlStorage,
-): MailboxProviderIndexRepairStatus {
-	const row = sql
-		.exec<{
+export async function getMailboxProviderIndexRepairStatus(
+	sql: MailboxSql,
+): Promise<MailboxProviderIndexRepairStatus> {
+	const row = (
+		await sql.exec<{
 			pending_count: number
 			oldest_pending_at: string | null
 			next_retry_at: string | null
@@ -93,7 +95,7 @@ export function getMailboxProviderIndexRepairStatus(
 				MIN(retry_at) AS next_retry_at
 			FROM email_outbound_provider_index_repairs`,
 		)
-		.one()
+	).one()
 	return {
 		pendingCount: Number(row.pending_count),
 		oldestPendingAt: row.oldest_pending_at,
@@ -101,25 +103,25 @@ export function getMailboxProviderIndexRepairStatus(
 	}
 }
 
-export function nextMailboxProviderIndexRepairDueAtMs(
-	sql: SqlStorage,
-): number | null {
-	const retryAt = getMailboxProviderIndexRepairStatus(sql).nextRetryAt
+export async function nextMailboxProviderIndexRepairDueAtMs(
+	sql: MailboxSql,
+): Promise<number | null> {
+	const retryAt = (await getMailboxProviderIndexRepairStatus(sql)).nextRetryAt
 	if (!retryAt) return null
 	const parsed = Date.parse(retryAt)
 	return Number.isFinite(parsed) ? parsed : Date.now()
 }
 
 export async function repairPendingMailboxProviderIndexes(input: {
-	sql: SqlStorage
-	db: D1Database
+	sql: MailboxSql
+	db: SqlDatabase
 	ownerId: string
 	now?: Date
 	limit?: number
 }): Promise<{ attempted: number; repaired: number; failed: number }> {
 	const now = input.now ?? new Date()
-	const rows = input.sql
-		.exec<PendingRepairRow>(
+	const rows = (
+		await input.sql.exec<PendingRepairRow>(
 			`SELECT provider, provider_message_id, message_id, inbox_id,
 				created_at, attempt_count
 			FROM email_outbound_provider_index_repairs
@@ -129,7 +131,7 @@ export async function repairPendingMailboxProviderIndexes(input: {
 			now.toISOString(),
 			input.limit ?? mailboxProviderIndexRepairBatchSize,
 		)
-		.toArray()
+	).toArray()
 	let repaired = 0
 	let failed = 0
 	for (const row of rows) {
@@ -143,14 +145,14 @@ export async function repairPendingMailboxProviderIndexes(input: {
 				inboxId: row.inbox_id,
 				now: now.toISOString(),
 			})
-			clearMailboxProviderIndexRepair(input.sql, {
+			await clearMailboxProviderIndexRepair(input.sql, {
 				provider: row.provider,
 				providerMessageId: row.provider_message_id,
 			})
 			repaired += 1
 		} catch (error) {
 			const attemptCount = row.attempt_count + 1
-			input.sql.exec(
+			await input.sql.exec(
 				`UPDATE email_outbound_provider_index_repairs
 				SET attempt_count = ?, last_error = ?, retry_at = ?, updated_at = ?
 				WHERE provider = ? AND provider_message_id = ?`,

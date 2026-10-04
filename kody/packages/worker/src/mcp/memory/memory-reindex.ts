@@ -8,7 +8,7 @@ import {
 	type VectorReindexSweepResult,
 } from '#worker/search-index/reindex-sweep.ts'
 import { userVectorNamespace } from '#worker/search-index/vector-namespaces.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { buildMemoryEmbedTextFromRow } from './memory-embed.ts'
 import { listMemoriesPage } from './repo.ts'
 import { memoryVectorId } from './memory-vectorize.ts'
@@ -38,7 +38,7 @@ export async function reindexMemoryVectors(
 		deadlineMs: options?.deadlineMs,
 		force: options?.force,
 		listPage: ({ afterId, limit }) =>
-			runD1WithRetry(() =>
+			runSqlWithRetry(() =>
 				listMemoriesPage({
 					db: env.APP_DB,
 					afterId,

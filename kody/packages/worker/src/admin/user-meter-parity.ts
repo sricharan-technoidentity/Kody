@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import {
 	userMeterRpc,
@@ -61,7 +62,7 @@ function countDeltaParity(input: {
 	return { delta, parity: delta === 0 }
 }
 
-async function userExists(db: D1Database, stableUserId: string) {
+async function userExists(db: SqlDatabase, stableUserId: string) {
 	const row = await db
 		.prepare(`SELECT 1 AS present FROM users WHERE stable_user_id = ?`)
 		.bind(stableUserId)
@@ -94,7 +95,7 @@ async function readDailyMeterCounts(input: {
 }
 
 async function readStorageParity(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: UserMeterEnv
 	jobs?: JobsStore
 	stableUserId: string
@@ -129,7 +130,7 @@ async function readStorageParity(input: {
 }
 
 async function readDeletionParity(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: UserMeterEnv
 	stableUserId: string
 }): Promise<DeletionParity> {
@@ -159,7 +160,7 @@ async function readDeletionParity(input: {
  * surface as `needsBootstrap`.
  */
 export async function loadAdminUserMeterParityReport(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: UserMeterEnv
 	/** Jobs-worker byte contribution (see calculateUserD1StorageBytes). */
 	jobs?: JobsStore

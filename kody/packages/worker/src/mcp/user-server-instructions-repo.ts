@@ -1,5 +1,6 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 export async function getMcpUserServerInstructions(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<string | null> {
 	const row = await db
@@ -12,7 +13,7 @@ export async function getMcpUserServerInstructions(
 }
 
 export async function saveMcpUserServerInstructions(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	instructions: string,
 ): Promise<void> {

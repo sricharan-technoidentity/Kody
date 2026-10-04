@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { normalizePackageNameInput } from '#worker/package-registry/package-name.ts'
@@ -25,7 +26,7 @@ function requireExactlyOnePackageSourceIdentity(input: PackageSourceIdentity) {
 }
 
 export async function resolveOwnedPackageSource(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	ownerScope?: string
 	args: PackageSourceIdentity

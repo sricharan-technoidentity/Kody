@@ -21,3 +21,5 @@ export function createDynamicWorkerCompatibilityOptions(): DynamicWorkerCompatib
 		compatibilityFlags: [...dynamicWorkerCompatibilityFlags],
 	}
 }
+
+export const dynamicWorkerUsageTailLoaderIdSuffix = '-cpu1'

@@ -1,5 +1,5 @@
 import { type SqlDatabase } from '#worker/aws/pg-database.ts'
-import { d1ContainsLikePattern } from '#worker/d1-like-pattern.ts'
+import { containsLikePattern } from '#worker/sql-like-pattern.ts'
 import { chunkArray } from '@kody-internal/shared/chunk.ts'
 import { parseTagsJson } from '@kody-internal/shared/tags-json.ts'
 import { classifyForkListingRelation } from '#universal/community-listing-ahead.ts'
@@ -567,7 +567,7 @@ export async function searchSavedPackagesByUserId(
 	const params: Array<unknown> = [input.userId]
 	const query = input.query?.trim() ?? ''
 	if (query) {
-		const pattern = d1ContainsLikePattern(query.toLowerCase())
+		const pattern = containsLikePattern(query.toLowerCase())
 		conditions.push(
 			`(LOWER(name) LIKE ? ESCAPE '\\'
 				OR LOWER(kody_id) LIKE ? ESCAPE '\\'

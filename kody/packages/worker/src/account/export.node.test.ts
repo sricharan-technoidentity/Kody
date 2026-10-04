@@ -37,7 +37,7 @@ test('account export documents and excludes operator-owned system email rows', a
 	const accountExport = await createAccountExport({
 		env: {
 			APP_DB: db,
-			MAILBOX: createMailboxBinding({
+			MAILBOX_STORE: createMailboxBinding({
 				blobReferences: () => [
 					{
 						kind: 'raw_mime',
@@ -429,17 +429,17 @@ test('createAccountExport redacts secrets and credential-equivalent hashes', asy
 	const accountExport = await createAccountExport({
 		env: {
 			APP_DB: db,
-			STORAGE_RUNNER: {
-				idFromName: (name: string) => name as unknown as DurableObjectId,
-				get: () => ({
-					exportStorage: async () => ({
-						entries: [],
-						estimatedBytes: 0,
-						truncated: false,
-						nextStartAfter: null,
-						pageSize: 500,
-					}),
-				}),
+			STORAGE_CELLS: {
+				forBucket: (bucket: { userId: string; storageId: string }) =>
+					(() => ({
+						exportStorage: async () => ({
+							entries: [],
+							estimatedBytes: 0,
+							truncated: false,
+							nextStartAfter: null,
+							pageSize: 500,
+						}),
+					}))(JSON.stringify([bucket.userId, bucket.storageId])),
 			},
 		} as unknown as Env,
 		dbUserId: 1,
@@ -531,9 +531,11 @@ test('createAccountExport records partial-failure warnings and section paginatio
 	})
 	const env = {
 		APP_DB: db,
-		STORAGE_RUNNER: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({ exportStorage }),
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				(() => ({ exportStorage }))(
+					JSON.stringify([bucket.userId, bucket.storageId]),
+				),
 		},
 		OAUTH_PROVIDER: {
 			async listUserGrants() {
@@ -623,7 +625,7 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 
 	const env = {
 		APP_DB: db,
-		MAILBOX: createMailboxBinding(),
+		MAILBOX_STORE: createMailboxBinding(),
 	} as Env
 	const accountExport = await createAccountExport({
 		env,
@@ -670,7 +672,7 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 	const manifest = await createAccountExportManifest({
 		env: {
 			APP_DB: db,
-			MAILBOX: createMailboxBinding(),
+			MAILBOX_STORE: createMailboxBinding(),
 			OAUTH_PROVIDER: {
 				async listUserGrants() {
 					oauthPage += 1
@@ -739,7 +741,7 @@ test('account export reads OAuth grant metadata from OAUTH_KV when the provider 
 	})
 	const env = {
 		APP_DB: db,
-		MAILBOX: createMailboxBinding(),
+		MAILBOX_STORE: createMailboxBinding(),
 		OAUTH_KV: kv,
 	} as Env
 	const expectedGrants = ['grant-1', 'grant-2'].map((id) => ({
@@ -796,7 +798,7 @@ test('account export reads OAuth grant metadata from OAUTH_KV when the provider 
 	)
 
 	const withoutOAuthSurface = await createAccountExport({
-		env: { APP_DB: db, MAILBOX: createMailboxBinding() } as Env,
+		env: { APP_DB: db, MAILBOX_STORE: createMailboxBinding() } as Env,
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 		generatedAt: '2026-07-05T00:00:00.000Z',

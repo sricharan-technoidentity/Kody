@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	maxRestorableTextColumnBytes,
 	utf8ByteLength,
@@ -214,7 +215,7 @@ export async function deleteValue(input: DeleteValueInput) {
 }
 
 async function getAccessibleBuckets(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: ValueScope | null
 	storageContext: StorageContext | null
@@ -238,7 +239,7 @@ async function getAccessibleBuckets(input: {
 }
 
 async function getExistingBucketForScope(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: ValueScope
 	storageContext: StorageContext | null
@@ -254,7 +255,7 @@ async function getExistingBucketForScope(input: {
 }
 
 async function getOrCreateValueBucket(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: ValueScope
 	storageContext: StorageContext | null

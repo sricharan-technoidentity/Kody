@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	defaultJobRetentionDays,
 	evaluateJobRetentionEligibility,
@@ -40,7 +41,7 @@ type UserRetentionRow = {
 }
 
 export async function readJobRetentionPreferencesForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<JobRetentionPreferences> {
 	const row = await input.db
@@ -66,7 +67,7 @@ export async function readJobRetentionPreferencesForUser(input: {
 }
 
 export async function updateJobRetentionPreferencesForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	successOnceDays: number
 	failedOrNeverRanOnceDays: number
@@ -117,7 +118,7 @@ export async function updateJobRetentionPreferencesForUser(input: {
 }
 
 async function loadPreferencesByUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	userIds: ReadonlyArray<string>,
 ): Promise<Map<string, JobRetentionPreferences>> {
 	const preferences = new Map<string, JobRetentionPreferences>()

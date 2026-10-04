@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Tiny Analytics Engine writer for funnel stamps. No MCP client classifier
  * and no Waiting imports, so runtime execute can stamp without growing the
@@ -24,7 +25,7 @@ export type OnboardingFunnelEnv = {
 	 * Shared with write envs (`UsageEnv`, secret/integration writers) so
 	 * those narrower picks stay assignable. The funnel does not query it.
 	 */
-	APP_DB?: D1Database
+	APP_DB?: SqlDatabase
 }
 
 type OnboardingFunnelPoint = {

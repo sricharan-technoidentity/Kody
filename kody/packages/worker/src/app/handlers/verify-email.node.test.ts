@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createVerifyEmailHandler } from '#app/handlers/verify-email.ts'
 import { verifyEmailToken } from '#app/email-verification.ts'
@@ -40,7 +41,7 @@ test('verify-email handler wires success CTA from redirectTo and rejects open re
 		newlyVerified: false,
 	})
 	const handler = createVerifyEmailHandler({
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env)
 
 	const oauthResume = '/oauth/authorize?client_id=demo'
@@ -103,7 +104,7 @@ test('verify-email sends the connect-agent mail only on newly verified accounts'
 		newlyVerified: true,
 	})
 	const handler = createVerifyEmailHandler({
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env)
 	await handler.handler({
 		request: new Request('https://example.com/verify-email?token=ok'),

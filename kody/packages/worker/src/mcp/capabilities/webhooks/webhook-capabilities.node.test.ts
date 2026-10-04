@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
@@ -69,7 +70,7 @@ function createCapabilityContext(input?: {
 	} | null
 }) {
 	return {
-		env: { APP_DB: {} as D1Database } as Env,
+		env: { APP_DB: {} as SqlDatabase } as Env,
 		callerContext: createMcpCallerContext({
 			baseUrl: 'https://heykody.dev',
 			executionOrigin: input?.executionOrigin ?? 'interactive',

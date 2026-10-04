@@ -1,11 +1,11 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { type PermissionString, type RoleName } from '#universal/permissions.ts'
 import type * as AuditLog from '#worker/audit-log.ts'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createFakeImagesBinding } from '#worker/test-support/images-binding.ts'
 
 const mockModule = vi.hoisted(() => ({
@@ -30,8 +30,6 @@ vi.mock('#worker/audit-log.ts', async (importOriginal) => {
 const { createAdminPlatformIntegrationsApiHandler } =
 	await import('./admin-platform-integrations.ts')
 
-const migrationsDirectory = new URL('../../../migrations/', import.meta.url)
-
 function createActor(roles: Array<RoleName>) {
 	const permissions: Array<PermissionString> = roles.includes('admin')
 		? ['read:user:any', 'update:user:any']
@@ -54,12 +52,12 @@ function createActor(roles: Array<RoleName>) {
 	}
 }
 
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
+async function createHarness() {
+	const sqlite = await createTestPg()
+
 	const objects = new Map<string, Uint8Array>()
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
+		APP_DB: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
 		SECRET_KMS: testSecretKms,
 		COMMUNITY_ASSETS: {
 			async put(key: string, bytes: Uint8Array) {
@@ -99,7 +97,7 @@ const saveGithubBody = {
 }
 
 test('admin save and delete return HTTP shapes without echoing secrets', async () => {
-	const { sqlite, env } = createHarness()
+	const { sqlite, env } = await createHarness()
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(createActor(['admin']))
 	const handler = createAdminPlatformIntegrationsApiHandler(env)
 	const url = new URL('https://example.com/admin/platform-integrations.json')
@@ -121,13 +119,14 @@ test('admin save and delete return HTTP shapes without echoing secrets', async (
 		'platform-github-client-secret-value',
 	)
 
-	sqlite
-		.prepare(
-			`INSERT INTO user_integrations (
+	await pgQuery(sqlite).run(
+		`INSERT INTO user_integrations (
 				user_id, name, app_slug, platform_app_slug
 			) VALUES (?, ?, NULL, ?)`,
-		)
-		.run('user-1', 'github', 'github')
+		'user-1',
+		'github',
+		'github',
+	)
 
 	const blocked = await invoke({ action: 'delete', slug: 'github' })
 	expect(blocked.status).toBe(400)
@@ -136,14 +135,14 @@ test('admin save and delete return HTTP shapes without echoing secrets', async (
 		error: expect.stringContaining('still has 1 user connection'),
 	})
 
-	sqlite.prepare('DELETE FROM user_integrations').run()
+	await pgQuery(sqlite).run('DELETE FROM user_integrations')
 	const deleted = await invoke({ action: 'delete', slug: 'github' })
 	expect(deleted.status).toBe(200)
 	await expect(deleted.json()).resolves.toMatchObject({ apps: [] })
 })
 
 test('save with newSlug renames in place, keeping the secret and connections', async () => {
-	const { sqlite, env } = createHarness()
+	const { sqlite, env } = await createHarness()
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(createActor(['admin']))
 	const handler = createAdminPlatformIntegrationsApiHandler(env)
 	const url = new URL('https://example.com/admin/platform-integrations.json')
@@ -155,13 +154,14 @@ test('save with newSlug renames in place, keeping the secret and connections', a
 		} as never)
 
 	await invoke(saveGithubBody)
-	sqlite
-		.prepare(
-			`INSERT INTO user_integrations (
+	await pgQuery(sqlite).run(
+		`INSERT INTO user_integrations (
 				user_id, name, app_slug, platform_app_slug
 			) VALUES (?, ?, NULL, ?)`,
-		)
-		.run('user-1', 'github', 'github')
+		'user-1',
+		'github',
+		'github',
+	)
 
 	// Rename plus a same-call edit; clientSecret omitted → retained.
 	const renamed = await invoke({
@@ -187,9 +187,9 @@ test('save with newSlug renames in place, keeping the secret and connections', a
 	})
 	// The connection moved lanes-intact: same name, new app reference.
 	expect(
-		sqlite
-			.prepare(`SELECT name, platform_app_slug FROM user_integrations`)
-			.get(),
+		await pgQuery(sqlite).get(
+			`SELECT name, platform_app_slug FROM user_integrations`,
+		),
 	).toEqual({ name: 'github', platform_app_slug: 'github-platform' })
 
 	// Renaming onto an occupied slug is a clean 400.
@@ -259,7 +259,7 @@ test('save with newSlug renames in place, keeping the secret and connections', a
 })
 
 test('non-admin callers are rejected', async () => {
-	const { env } = createHarness()
+	const { env } = await createHarness()
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(createActor(['user']))
 	const handler = createAdminPlatformIntegrationsApiHandler(env)
 	const response = await handler.handler({

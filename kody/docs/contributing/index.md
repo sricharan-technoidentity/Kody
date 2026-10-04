@@ -3,6 +3,17 @@
 Documentation for people and agents **developing this repository**: setup, code
 style, tests, MCP capabilities, and runtime architecture.
 
+## Current POC entry path
+
+Start with [the local walkthrough](../poc/demo.md),
+[service matrix](../poc/architecture.md), and
+[fresh readiness evidence](../poc/readiness.md). The Node/Temporal POC excludes
+production deployments, previews, PR shipping and live migration. Use focused
+`npm run demo:check`; application changes also run the unchanged
+`CI=1 npm run validate` gate. AWS proofs require explicitly selected existing
+resources and [separate configuration](../poc/aws.md). Historical workflow pages
+below remain background references, not POC actions.
+
 ## Setup and workflow
 
 - [Getting started](./getting-started.md), [project intent](./project-intent.md)
@@ -20,8 +31,6 @@ style, tests, MCP capabilities, and runtime architecture.
   `@kentcdodds/verification-skill-maintain`)
 - [Optional Cloudflare offerings](./cloudflare-offerings.md)
 - [Cursor Cloud Agent notes](./cloud-agents.md)
-- [Nx remote cache](../../packages/nx-cache/readme.md) (self-hosted HTTP cache
-  shared by agents and CI)
 - [Harness engineering](./harness-engineering.md) (agent-first loop, promoting
   lessons into checkers before should-lists)
 - [Code health receipts](./code-health-receipts.md) (measured quality numbers

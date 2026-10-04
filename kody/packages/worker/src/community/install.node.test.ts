@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const mockModule = vi.hoisted(() => ({
@@ -25,7 +26,7 @@ vi.mock('#worker/package-registry/service.ts', () => ({
 
 import { installCommunityListing } from './install.ts'
 
-const env = { APP_DB: {} as D1Database } as Env
+const env = { APP_DB: {} as SqlDatabase } as Env
 
 function preparedFork() {
 	return {

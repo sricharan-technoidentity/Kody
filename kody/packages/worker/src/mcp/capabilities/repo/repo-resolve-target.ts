@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type z } from 'zod'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { resolveOwnedPackageSource } from '#mcp/capabilities/packages/resolve-package-source.ts'
@@ -19,7 +20,7 @@ type RepoOpenSessionInput = z.infer<typeof repoOpenSessionInputSchema>
 type RepoResolvedTarget = z.infer<typeof repoResolvedTargetSchema>
 
 async function requireOwnedEntitySource(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	sourceId: string
 }): Promise<EntitySourceRow> {
@@ -43,7 +44,7 @@ function toResolvedSourceTarget(source: EntitySourceRow): RepoResolvedTarget {
 }
 
 async function requirePackageTarget(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	ownerScope?: string
 	target: Extract<RepoTarget, { kind: 'package' }>
@@ -70,7 +71,7 @@ async function requirePackageTarget(input: {
 }
 
 async function requirePlainRepoTarget(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	target: Extract<RepoTarget, { kind: 'repo' }>
 }): Promise<{ source: EntitySourceRow; resolvedTarget: RepoResolvedTarget }> {
@@ -109,7 +110,7 @@ async function requirePlainRepoTarget(input: {
 }
 
 export async function resolveRepoSourceReference(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	ownerScope?: string
 	args: Pick<RepoOpenSessionInput, 'source_id' | 'target'>
@@ -156,7 +157,7 @@ export async function resolveRepoSourceReference(input: {
 }
 
 export async function resolveRepoTargetFromSource(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	sourceId: string
 }): Promise<RepoResolvedTarget> {

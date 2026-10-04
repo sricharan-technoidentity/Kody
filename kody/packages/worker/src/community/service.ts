@@ -1705,7 +1705,7 @@ export type AdoptCommunityForkResult = {
 }
 
 async function resolveOwnedCommunityPackageNameLeaf(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	value: string
 }) {

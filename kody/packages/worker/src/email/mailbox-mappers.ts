@@ -1,3 +1,4 @@
+import { type MailboxSqlValue } from './mailbox-sql.ts'
 import {
 	maxRestorableTextColumnBytes,
 	truncateToUtf8Bytes,
@@ -82,7 +83,7 @@ function requireOptionalPersistedEnum<T extends string>(
 }
 
 export function mapMailboxThreadRow(
-	row: Record<string, SqlStorageValue>,
+	row: Record<string, MailboxSqlValue>,
 ): MailboxThreadRecord {
 	return {
 		id: String(row['id']),
@@ -102,7 +103,7 @@ export function mapMailboxThreadRow(
 }
 
 export function mapMailboxMessageRow(
-	row: Record<string, SqlStorageValue>,
+	row: Record<string, MailboxSqlValue>,
 ): MailboxMessageRecord {
 	return {
 		id: String(row['id']),
@@ -183,7 +184,7 @@ export function mapMailboxMessageRow(
 }
 
 export function mapMailboxAttachmentRow(
-	row: Record<string, SqlStorageValue>,
+	row: Record<string, MailboxSqlValue>,
 ): MailboxAttachmentRecord {
 	return {
 		id: String(row['id']),
@@ -205,7 +206,7 @@ export function mapMailboxAttachmentRow(
 }
 
 export function mapMailboxDeliveryEventRow(
-	row: Record<string, SqlStorageValue>,
+	row: Record<string, MailboxSqlValue>,
 ): MailboxDeliveryEventRecord {
 	return {
 		id: String(row['id']),

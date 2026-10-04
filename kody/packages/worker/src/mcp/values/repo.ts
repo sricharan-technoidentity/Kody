@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	type ValueBucketRow,
 	type ValueEntryRow,
@@ -16,7 +17,7 @@ type ValueMetadataRow = {
 }
 
 export async function getValueBucket(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: ValueScope
 	bindingKey: string
@@ -37,7 +38,7 @@ export async function getValueBucket(input: {
 }
 
 export async function upsertValueBucket(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<ValueBucketRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -67,7 +68,7 @@ export async function upsertValueBucket(input: {
 }
 
 export async function getValueEntry(input: {
-	db: D1Database
+	db: SqlDatabase
 	bucketId: string
 	name: string
 }): Promise<ValueEntryRow | null> {
@@ -84,7 +85,7 @@ export async function getValueEntry(input: {
 }
 
 export async function upsertValueEntry(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<ValueEntryRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -114,7 +115,7 @@ export async function upsertValueEntry(input: {
 }
 
 export async function deleteValueEntry(input: {
-	db: D1Database
+	db: SqlDatabase
 	bucketId: string
 	name: string
 }): Promise<boolean> {
@@ -126,7 +127,7 @@ export async function deleteValueEntry(input: {
 }
 
 export async function listValueMetadataForBucket(input: {
-	db: D1Database
+	db: SqlDatabase
 	bucket: ValueBucketRow
 }): Promise<Array<ValueMetadataRow>> {
 	const { results } = await input.db
@@ -151,7 +152,7 @@ export async function listValueMetadataForBucket(input: {
  * Empty buckets do not count. Used to gate the agent-facing retirement notice.
  */
 export async function userHasPersistedValues(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	now?: string
 }): Promise<boolean> {
@@ -171,7 +172,7 @@ export async function userHasPersistedValues(input: {
 }
 
 export async function listValueMetadataForBuckets(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	buckets: ReadonlyArray<ValueBucketRow>
 	now?: string

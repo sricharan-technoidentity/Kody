@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type z } from 'zod'
 import { defineDomainCapability } from '#mcp/capabilities/define-domain-capability.ts'
 import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
@@ -29,7 +30,7 @@ function toResolvedSourceTarget(source: EntitySourceRow): RepoResolvedTarget {
 }
 
 async function resolveListSessionTarget(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	source: EntitySourceRow
 }): Promise<RepoResolvedTarget> {

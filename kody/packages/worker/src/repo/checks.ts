@@ -762,6 +762,7 @@ export async function validatePackageBundles(input: {
 				})
 			} else if (target.bundleKind === 'client') {
 				await buildKodyAppClientBundle({
+					env: input.env,
 					sourceFiles: input.sourceFiles,
 					entryPoint: target.path,
 				})

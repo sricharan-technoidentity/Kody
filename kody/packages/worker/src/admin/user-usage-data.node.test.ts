@@ -1,6 +1,7 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
-import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-catalog.ts'
 import { createInMemoryRunLogUsageEnv } from '#worker/test-support/run-log-usage.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { type RepoSessionRow } from '#worker/repo/types.ts'
@@ -10,7 +11,7 @@ import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { loadAdminUserUsageData } from './user-usage-data.ts'
 
 const resourceCountsByDb = new WeakMap<
-	D1Database,
+	SqlDatabase,
 	Record<string, ResourceCount>
 >()
 
@@ -40,7 +41,7 @@ function createUsageRepoSessionRow(
 	}
 }
 
-function withUserMeter(env: { APP_DB: D1Database } & Record<string, unknown>) {
+function withUserMeter(env: { APP_DB: SqlDatabase } & Record<string, unknown>) {
 	const meter = createInMemoryUserMeterEnv()
 	const runLog = createInMemoryRunLogUsageEnv()
 	const repoSessionIndex = createInMemoryRepoSessionIndexEnv(env.APP_DB)
@@ -55,26 +56,21 @@ function withUserMeter(env: { APP_DB: D1Database } & Record<string, unknown>) {
 		repoSessionIndex.indexes.set(userId, rows)
 	}
 	const mailbox = {
-		idFromName(userId: string) {
-			return { userId } as unknown as DurableObjectId
-		},
-		get(id: DurableObjectId) {
-			const userId = (id as unknown as { userId: string }).userId
+		forUser(userId: string) {
 			return {
 				async countMessages() {
-					return {
-						total: resourceCounts[userId]?.stored_email_messages ?? 0,
-					}
+					return { total: resourceCounts[userId]?.stored_email_messages ?? 0 }
 				},
 			}
 		},
-	} as unknown as DurableObjectNamespace
+	}
+
 	return {
 		...env,
 		...meter.env,
 		...runLog.env,
-		REPO_SESSION_INDEX: repoSessionIndex.REPO_SESSION_INDEX,
-		MAILBOX: mailbox,
+		REPO_SESSION_CATALOG: repoSessionIndex.REPO_SESSION_CATALOG,
+		MAILBOX_STORE: mailbox,
 		meter,
 		runLog,
 	}
@@ -202,7 +198,7 @@ async function createAdminUserUsageTestDb(input: {
 	const subject = input.users[0]?.stable_user_id ?? 'missing-stable-user'
 	const db = Object.assign(database.forUser(subject).reader, {
 		[Symbol.asyncDispose]: database[Symbol.asyncDispose],
-	}) as unknown as D1Database & AsyncDisposable
+	}) as unknown as SqlDatabase & AsyncDisposable
 	resourceCountsByDb.set(db, resourceCounts)
 	return db
 }

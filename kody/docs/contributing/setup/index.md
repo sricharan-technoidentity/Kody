@@ -1,16 +1,13 @@
 # Setup
 
-Quick notes for getting a local kody environment running. Load only the page you
-need.
+- [Local development](./local-development.md): supported Node/Temporal demo
+  launcher.
+- [Checks](./checks.md): unchanged authoritative gate and focused checks.
+- [Migrations](./migrations.md): preserved SQL history; no live migration in the
+  POC.
+- [Seeding](./seeding.md): synthetic demo accounts and session reset.
+- [Documentation maintenance](./documentation-maintenance.md).
+- [Dependency auditing](./dependency-auditing.md).
 
-- [Local development](./local-development.md) — prerequisites, install,
-  `npm run dev` / `npm run dev:ensure`, D1/KV, mocks, and env files
-- [Checks](./checks.md) — `npm run validate` and test commands
-- [Authoring D1 migrations](./migrations.md)
-- [Documentation maintenance](./documentation-maintenance.md)
-- [Seed test account](./seeding.md)
-- [PR preview deployments](./preview-deploys.md)
-- [Dependency auditing](./dependency-auditing.md)
-
-Use [Remix skills](../remix.md) instead of vendoring generated package docs in
-this repo.
+Deployment and production migration are outside the POC. Historical setup lives
+in [the audit area](../../audits/migration-2026-10-04/index.md).

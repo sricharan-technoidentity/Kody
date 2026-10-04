@@ -1,5 +1,9 @@
-import { temporal as proto } from '@temporalio/proto'
-import { TestWorkflowEnvironment } from '@temporalio/testing'
+import temporalProto from '@temporalio/proto'
+const proto = temporalProto.temporal
+import {
+	TestWorkflowEnvironment,
+	type LocalTestWorkflowEnvironmentOptions,
+} from '@temporalio/testing'
 import { Runtime, Worker } from '@temporalio/worker'
 import { type KmsEnvelope } from '#worker/aws/kms-envelope.ts'
 import { type KodyActivities } from '#worker/temporal/activities/types.ts'
@@ -49,6 +53,7 @@ function installQuietRuntime() {
 export async function createTemporalEnv(
 	options: {
 		timeSkipping?: boolean
+		server?: LocalTestWorkflowEnvironmentOptions['server']
 		kms?: KmsEnvelope
 		idempotency?: KodyTemporal['idempotency']
 		results?: KodyTemporal['results']
@@ -61,10 +66,32 @@ export async function createTemporalEnv(
 	const namespace = 'default'
 	const client = { dataConverter: kodyDataConverter({ kms, namespace }) }
 	const test = options.timeSkipping
-		? await TestWorkflowEnvironment.createTimeSkipping({ client })
+		? await TestWorkflowEnvironment.createTimeSkipping({
+				client,
+				server: process.env.KODY_TEMPORAL_TEST_EXECUTABLE
+					? {
+							executable: {
+								type: 'existing-path',
+								path: process.env.KODY_TEMPORAL_TEST_EXECUTABLE,
+							},
+						}
+					: undefined,
+			})
 		: await TestWorkflowEnvironment.createLocal({
 				client,
-				server: { searchAttributes: kodySearchAttributeKeys },
+				server: {
+					ip: '127.0.0.1',
+					...(process.env.KODY_TEMPORAL_EXECUTABLE
+						? {
+								executable: {
+									type: 'existing-path',
+									path: process.env.KODY_TEMPORAL_EXECUTABLE,
+								},
+							}
+						: {}),
+					...options.server,
+					searchAttributes: kodySearchAttributeKeys,
+				},
 			})
 	if (options.timeSkipping) {
 		// The test server has no CLI flag for these; register them directly.
@@ -96,6 +123,13 @@ export async function createTemporalEnv(
 	}
 	const workers: Array<Worker> = []
 	const running: Array<Promise<void>> = []
+	let lastInput:
+		| { activities: Partial<KodyActivities>; queues?: ReadonlyArray<TaskQueue> }
+		| undefined
+	async function stopWorkers() {
+		for (const worker of workers.splice(0)) worker.shutdown()
+		await Promise.all(running.splice(0))
+	}
 	const run = (started: Array<Worker>) => {
 		for (const worker of started) {
 			workers.push(worker)
@@ -106,12 +140,18 @@ export async function createTemporalEnv(
 	return {
 		/** Client in the test namespace, with the KMS codec. */
 		client: test.client,
+		address: test.address,
 		temporal,
+		async restartWorkers() {
+			await stopWorkers()
+			if (lastInput) await this.startWorkers(lastInput)
+		},
 		/** Kody workers for the given queues (default: all four). */
 		async startWorkers(input: {
 			activities: Partial<KodyActivities>
 			queues?: ReadonlyArray<TaskQueue>
 		}) {
+			lastInput = input
 			return run(
 				await createKodyWorkers({
 					connection: test.nativeConnection,
@@ -147,9 +187,11 @@ export async function createTemporalEnv(
 			return run([worker])[0]!
 		},
 		async close() {
-			for (const worker of workers) worker.shutdown()
-			await Promise.all(running)
-			await test.teardown()
+			try {
+				await stopWorkers()
+			} finally {
+				await test.teardown()
+			}
 		},
 	}
 }

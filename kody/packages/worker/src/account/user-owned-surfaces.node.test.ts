@@ -90,7 +90,7 @@ test('account deletion and export consume the out-of-band surface registry', () 
 			(surface) => surface.id === 'repo_session_index',
 		),
 	).toMatchObject({
-		binding: 'REPO_SESSION_INDEX',
+		binding: 'REPO_SESSION_CATALOG',
 		deletionResultKey: 'repoSessionIndexes',
 		export: 'include',
 	})

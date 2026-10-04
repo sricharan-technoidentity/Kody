@@ -3,9 +3,13 @@ import { type EmbeddingPort } from './bedrock-embeddings.ts'
 import { type createPgSearchIndex } from './pg-search-index.ts'
 import { type KodyTemporal } from '#worker/temporal/client.ts'
 
+import { type createStorageCells } from '#worker/storage-cell/storage-cell.ts'
+
 type KvItem = { pk: string; sk: string; [key: string]: unknown }
 
 export type AwsEnv = {
+	userId: string
+	STORAGE_CELLS: ReturnType<typeof createStorageCells>
 	AWS_REGION: string
 	AWS_ACCESS_KEY_ID: string
 	AWS_SECRET_ACCESS_KEY: string

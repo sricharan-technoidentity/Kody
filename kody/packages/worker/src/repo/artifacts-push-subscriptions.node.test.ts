@@ -1,6 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { silenceExpectedConsoleWarns } from '#worker/test-support/console-spies.ts'
 import { insertEntitySource } from './entity-sources.ts'
 import {
@@ -50,37 +50,7 @@ function subscriptionRecord(id: string, destinationQueueId = queueId) {
 	}
 }
 
-function createDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE entity_sources (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			entity_kind TEXT NOT NULL,
-			entity_id TEXT NOT NULL,
-			repo_id TEXT NOT NULL,
-			published_commit TEXT,
-			indexed_commit TEXT,
-			manifest_path TEXT NOT NULL DEFAULT 'kody.json',
-			source_root TEXT NOT NULL DEFAULT '/',
-			last_external_check_at TEXT,
-			external_check_until TEXT,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-		CREATE TABLE entity_source_artifacts_push_subscriptions (
-			source_id TEXT PRIMARY KEY NOT NULL,
-			user_id TEXT NOT NULL,
-			repo_id TEXT NOT NULL,
-			subscription_id TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-	`)
-	return createD1FromSqlite(sqlite)
-}
-
-async function seedSource(db: D1Database) {
+async function seedSource(db: SqlDatabase) {
 	await insertEntitySource(db, {
 		id: sourceId,
 		user_id: userId,
@@ -98,7 +68,7 @@ async function seedSource(db: D1Database) {
 	})
 }
 
-function createEnv(db: D1Database) {
+function createEnv(db: SqlDatabase) {
 	return {
 		APP_DB: db,
 		CLOUDFLARE_ACCOUNT_ID: accountId,
@@ -114,7 +84,8 @@ function requestKey(method: string, pathname: string) {
 
 test('ensureArtifactsRepoPushSubscription posts without listing and caches the queue id', async () => {
 	resetArtifactsRepoEventsQueueIdCache()
-	const db = createDb()
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	await seedSource(db)
 	const calls: Array<string> = []
 	const fetchMock = vi
@@ -224,7 +195,8 @@ test('ensureArtifactsRepoPushSubscription posts without listing and caches the q
 
 test('ensureArtifactsRepoPushSubscription reuses an existing subscription on create conflict', async () => {
 	resetArtifactsRepoEventsQueueIdCache()
-	const db = createDb()
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	await seedSource(db)
 	const calls: Array<string> = []
 	const fetchMock = vi
@@ -298,7 +270,8 @@ test('ensureArtifactsRepoPushSubscription reuses an existing subscription on cre
 test('ensureArtifactsRepoPushSubscription skips a name conflict that belongs to a different source', async () => {
 	resetArtifactsRepoEventsQueueIdCache()
 	silenceExpectedConsoleWarns(['artifacts-push-subscription-ensure-failed'])
-	const db = createDb()
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	await seedSource(db)
 	const calls: Array<string> = []
 	const fetchMock = vi
@@ -367,7 +340,8 @@ test('ensureArtifactsRepoPushSubscription skips a name conflict that belongs to 
 
 test('ensureArtifactsRepoPushSubscription does not persist when the source is deleted during create', async () => {
 	resetArtifactsRepoEventsQueueIdCache()
-	const db = createDb()
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	await seedSource(db)
 	const calls: Array<string> = []
 	const fetchMock = vi

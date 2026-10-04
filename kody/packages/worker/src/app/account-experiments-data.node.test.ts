@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import {
 	loadAccountExperimentsData,
@@ -50,7 +51,7 @@ function createUsersDb(initialOptIn = 0) {
 			prepare(query: string) {
 				return createStatement(query)
 			},
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 	}
 }
 

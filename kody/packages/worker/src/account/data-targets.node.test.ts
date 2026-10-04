@@ -18,10 +18,14 @@ import {
 
 /**
  * User columns deliberately outside the D1 inventory: their owners purge and
- * export them (JOBS purgeUser / listJobsForUser, the search-index adapter), and
+ * export them (JOBS purgeUser / listJobsForUser, the search-index adapter);
+ * MCP_CLIENTS purges its Aurora catalog and Identity credentials, with SDK state
+ * explicitly excluded from portable exports, and
  * `isolation_probe` is the P2 RLS fixture.
  */
 const userColumnsOwnedElsewhere = new Set([
+	'mcp_client_hubs.user_id',
+	'mcp_client_values.user_id',
 	'jobs.user_id',
 	'archived_job_artifacts.user_id',
 	'search_vectors.user_id',

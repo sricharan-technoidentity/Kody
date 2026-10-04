@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getSavedPackageByName } from '#worker/package-registry/repo.ts'
 import { resolveShareGrantedPackageImport } from '#worker/package-registry/share-grants.ts'
 import { getPlatformAccountByUsername } from '#worker/package-registry/scope-grants.ts'
@@ -94,7 +95,9 @@ export function packageScopeUsername(packageName: string): string | null {
 }
 
 export async function resolveSavedPackageImport(input: {
-	db: D1Database
+	db: SqlDatabase
+	/** Host factory used only after platform/share authorization. */
+	forUser?: (userId: string) => SqlDatabase
 	userId: string
 	specifier: string | KodyPackageSpecifier
 	/**
@@ -122,10 +125,13 @@ export async function resolveSavedPackageImport(input: {
 		input.nestedShareOwnerUserId &&
 		input.nestedShareOwnerUserId !== input.userId
 	) {
-		const ownerOwned = await getSavedPackageByName(input.db, {
-			userId: input.nestedShareOwnerUserId,
-			name: parsed.packageName,
-		})
+		const ownerOwned = await getSavedPackageByName(
+			input.forUser?.(input.nestedShareOwnerUserId) ?? input.db,
+			{
+				userId: input.nestedShareOwnerUserId,
+				name: parsed.packageName,
+			},
+		)
 		if (ownerOwned) {
 			return {
 				row: ownerOwned,
@@ -164,12 +170,14 @@ export async function resolveSavedPackageImport(input: {
 	if (input.allowPlatformScopes !== true) return null
 	return await resolvePlatformScopedPackageImport({
 		db: input.db,
+		forUser: input.forUser,
 		packageName: parsed.packageName,
 	})
 }
 
 export async function resolvePlatformScopedPackageImport(input: {
-	db: D1Database
+	db: SqlDatabase
+	forUser?: (userId: string) => SqlDatabase
 	packageName: string
 }): Promise<ResolvedPackageImport | null> {
 	const scopeUsername = packageScopeUsername(input.packageName)
@@ -179,10 +187,13 @@ export async function resolvePlatformScopedPackageImport(input: {
 		scopeUsername,
 	)
 	if (!platformAccount) return null
-	const row = await getSavedPackageByName(input.db, {
-		userId: platformAccount.stableUserId,
-		name: input.packageName,
-	})
+	const row = await getSavedPackageByName(
+		input.forUser?.(platformAccount.stableUserId) ?? input.db,
+		{
+			userId: platformAccount.stableUserId,
+			name: input.packageName,
+		},
+	)
 	// Hidden and private platform packages are the operator's "not ready" /
 	// "not for everyone" switches; they stay resolvable only to the owner
 	// (who resolves via the own-copy lane).

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { userMeterRpc } from '#worker/entitlements/user-meter-client.ts'
@@ -47,7 +48,7 @@ test('authenticated delayed mutation holds web lease through handler completion'
 		async batch() {
 			return []
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	let startHandler: () => void = () => undefined
 	let finishHandler: () => void = () => undefined
 	const started = new Promise<void>((resolve) => {

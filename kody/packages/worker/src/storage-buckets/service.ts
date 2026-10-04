@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { listRepoSessionDueOwnersPage } from '#worker/repo/repo-session-due-owners.ts'
 import { repoSessionIndexRpc } from '#worker/repo/repo-session-index-client.ts'
@@ -191,10 +192,10 @@ export function repoSessionIdFromStorageBucketId(storageId: string): string {
  * the whole fleet of index Durable Objects.
  */
 export async function registerMissingRepoSessionStorageBuckets(input: {
-	db: D1Database
+	db: SqlDatabase
 	env?: {
-		REPO_SESSION_INDEX?: DurableObjectNamespace
-		APP_DB: D1Database
+		REPO_SESSION_CATALOG?: Env['REPO_SESSION_CATALOG']
+		APP_DB: SqlDatabase
 	}
 	limit?: number
 	now?: Date
@@ -203,7 +204,7 @@ export async function registerMissingRepoSessionStorageBuckets(input: {
 	const now = input.now ?? new Date()
 	const seenAt = now.toISOString()
 	let inserted = 0
-	if (!input.env?.REPO_SESSION_INDEX || inserted >= limit) return inserted
+	if (!input.env?.REPO_SESSION_CATALOG || inserted >= limit) return inserted
 	const ownerBudget = limit
 	const afterUserId = await readRepoSessionStorageBucketCursor(input.db)
 	const owners = await listRepoSessionDueOwnersPage({
@@ -269,7 +270,7 @@ export async function registerMissingRepoSessionStorageBuckets(input: {
  * cleanup. Unlike estimate persistence, this intentionally deletes the row.
  */
 export async function deleteStorageBucketInventory(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	storageId: string
 }): Promise<boolean> {
@@ -296,7 +297,7 @@ function normalizeEstimatedBytes(estimatedBytes: number) {
  * estimate before calling.
  */
 export async function updateStorageBucketEstimate(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	storageId: string
 	estimatedBytes: number
@@ -323,7 +324,7 @@ export async function updateStorageBucketEstimate(input: {
  * next write.
  */
 export async function listStorageBucketsMissingEstimates(input: {
-	db: D1Database
+	db: SqlDatabase
 	limit: number
 }): Promise<
 	Array<{
@@ -503,7 +504,7 @@ export async function listUserStorageBucketEstimates(input: {
 }
 
 export async function listPlatformStorageBuckets(input: {
-	db: D1Database
+	db: SqlDatabase
 }): Promise<Array<{ userId: string; storageId: string }>> {
 	const result = await input.db
 		.prepare(

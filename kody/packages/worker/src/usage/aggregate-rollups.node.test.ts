@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	aggregateUsageRollups,
@@ -136,11 +137,11 @@ function createFakeDb(
 			batches.push(statements)
 			return []
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	return { db, batches, deletes, selects, rollups }
 }
 
-function createAggregationEnv(db: D1Database) {
+function createAggregationEnv(db: SqlDatabase) {
 	return {
 		USAGE_EVENTS: { writeDataPoint() {} },
 		APP_DB: db,

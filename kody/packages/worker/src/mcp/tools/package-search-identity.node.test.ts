@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const mockModule = vi.hoisted(() => ({
@@ -253,7 +254,7 @@ test('package identity resolution is user-scoped, gates hidden matches, and skip
 		.mockResolvedValueOnce(null)
 
 	const common = {
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		query: packageId,
 		baseUrl: 'https://heykody.dev',
@@ -298,7 +299,7 @@ test('package identity resolution is user-scoped, gates hidden matches, and skip
 
 	await expect(
 		resolvePackageIdentitySearch({
-			db: {} as D1Database,
+			db: {} as SqlDatabase,
 			userId: 'user-1',
 			query: 'daily-notes',
 			baseUrl: 'https://heykody.dev',
@@ -311,7 +312,7 @@ test('package identity resolution is user-scoped, gates hidden matches, and skip
 	})
 	await expect(
 		resolvePackageIdentitySearch({
-			db: {} as D1Database,
+			db: {} as SqlDatabase,
 			userId: 'user-1',
 			query: 'email',
 			baseUrl: 'https://heykody.dev',
@@ -344,7 +345,7 @@ test('package identity resolution is user-scoped, gates hidden matches, and skip
 	]) {
 		await expect(
 			resolvePackageIdentitySearch({
-				db: {} as D1Database,
+				db: {} as SqlDatabase,
 				...input,
 				baseUrl: 'https://heykody.dev',
 				includeHiddenPackages: true,
@@ -368,7 +369,7 @@ test('package identity match includes listingAhead only when the fork is behind'
 		})
 
 	const common = {
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		query: packageId,
 		baseUrl: 'https://heykody.dev',

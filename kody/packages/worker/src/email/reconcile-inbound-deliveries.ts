@@ -30,7 +30,7 @@ export async function sweepStaleInboundDeliveries(input: {
 		| 'BUNDLE_ARTIFACTS_KV'
 		| 'APP_BASE_URL'
 		| 'USAGE_EVENTS'
-		| 'MAILBOX'
+		| 'MAILBOX_STORE'
 		| 'USER_METERS'
 	>
 	now?: Date
@@ -126,7 +126,7 @@ export async function sweepStaleInboundDeliveries(input: {
 					)
 				)
 		)
-		SELECT ? AS user_id, MIN(due_at) AS due_at
+		SELECT ?::text AS user_id, MIN(due_at) AS due_at
 		FROM due_work
 		HAVING COUNT(*) > 0`,
 	)

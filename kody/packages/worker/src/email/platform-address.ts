@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { normalizeEmail } from '#worker/identity/normalize-email.ts'
 import { isPermanentlyReservedUsername } from '#worker/identity/reserved-usernames.ts'
 import { normalizeStableUserId } from '#worker/user-id.ts'
@@ -138,7 +139,7 @@ export function buildPlatformEmailAddress(input: {
 }
 
 async function findUserAccount(input: {
-	db: D1Database
+	db: SqlDatabase
 	accountEmail: string | null | undefined
 	userId: string
 }): Promise<{ email: string; username: string | null } | null> {
@@ -215,7 +216,7 @@ export type ResolvedPlatformSender = {
  * names may be unreserved and claimed; a live account may send.
  */
 export async function resolveUserPlatformSender(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: { APP_BASE_URL?: string | null }
 	accountEmail: string | null | undefined
 	userId: string

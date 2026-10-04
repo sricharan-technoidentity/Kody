@@ -4,7 +4,7 @@
  * lifecycle only adds/removes tags when the email already exists in Kit.
  */
 
-import { waitUntil } from 'cloudflare:workers'
+import { waitUntil } from '#worker/front-door/host-context.ts'
 import { parseStripePlanName } from '#universal/plans.ts'
 
 const KIT_API_BASE_URL = 'https://api.kit.com/v4'

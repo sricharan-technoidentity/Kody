@@ -1,7 +1,6 @@
-import { column as c, Database, sql, table } from 'remix/data-table'
+import { column as c, type Database, sql, table } from 'remix/data-table'
 import { createPostgresDatabase } from 'remix/data-table/postgres'
-import { type PgDatabase } from './aws/pg-database.ts'
-import { createD1DatabaseDriver } from './d1-data-table-adapter.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 
 export const usersTable = table({
 	name: 'users',
@@ -165,27 +164,22 @@ export const oauthConnectionsTable = table({
 	primaryKey: 'id',
 })
 
-export function createDb(db: D1Database | PgDatabase): Database {
-	if ('dialect' in db) {
-		// The native compiler executes through the facade so role/RLS cannot be skipped.
-		// ponytail: use createDb(tx) in facade transactions; bridge native transactions when a caller needs them.
-		const client = {
-			async query(text: string, values: Array<unknown> = []) {
-				const result = await db
-					.prepare(text)
-					.bind(...values)
-					.all()
-				return { rows: result.results, rowCount: result.meta.changes }
-			},
-		}
-		return createPostgresDatabase(
-			client as Parameters<typeof createPostgresDatabase>[0],
-			{ now: () => new Date().toISOString() },
-		)
+export function createDb(db: SqlDatabase): Database {
+	// The native compiler executes through the facade so role/RLS cannot be skipped.
+	// ponytail: use createDb(tx) in facade transactions; bridge native transactions when a caller needs them.
+	const client = {
+		async query(text: string, values: Array<unknown> = []) {
+			const result = await db
+				.prepare(text)
+				.bind(...values)
+				.all()
+			return { rows: result.results, rowCount: result.meta.changes }
+		},
 	}
-	return new Database(createD1DatabaseDriver(db), {
-		now: () => new Date().toISOString(),
-	})
+	return createPostgresDatabase(
+		client as Parameters<typeof createPostgresDatabase>[0],
+		{ now: () => new Date().toISOString() },
+	)
 }
 
 export type AppDatabase = ReturnType<typeof createDb>

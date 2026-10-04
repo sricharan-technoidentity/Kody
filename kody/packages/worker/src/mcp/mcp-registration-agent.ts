@@ -87,7 +87,7 @@ export type McpRegistrationAgent = {
 	getEnv(): Env
 	getCallerContext(): McpCallerContext
 	requireDomain(): string
-	getLoopbackExports(): Cloudflare.Exports
+	getLoopbackExports(): import('#worker/front-door/host-context.ts').HostLoopbackExports
 	/**
 	 * Durable Object `ctx.waitUntil`, when the agent runs inside one. Tool
 	 * handlers hand observability writes (run records, usage) to it so those

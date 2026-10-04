@@ -44,7 +44,7 @@ vi.mock('#worker/repo/repo-sessions.ts', async () =>
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionsMock(),
 )
-vi.mock('#worker/repo/repo-session-do.ts', async () =>
+vi.mock('#worker/repo/repo-session-service.ts', async () =>
 	(
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionDoMock(),
@@ -165,7 +165,7 @@ test('executeJobOnce background execution workflow', async () => {
 		const callerContext = createBaseCallerContext()
 		const env = createJobServiceTestEnv({ APP_DB: createDatabase() })
 		identityMockModule.resolveBackgroundMcpUser.mockRejectedValueOnce(
-			new Error('D1_ERROR: Network connection lost.'),
+			new Error('Connection terminated unexpectedly'),
 		)
 		const job: JobRecord = {
 			version: 1,
@@ -265,7 +265,7 @@ test('executeJobOnce background execution workflow', async () => {
 			BUNDLE_ARTIFACTS_KV: createBundleArtifactsKv(),
 			LOADER: {} as WorkerLoader,
 			REPO_SESSION: {} as DurableObjectNamespace,
-			STORAGE_RUNNER: createStorageRunnerBinding(),
+			STORAGE_CELLS: createStorageRunnerBinding(),
 		})
 		mockRepoPersistence()
 		const callerContext = {
@@ -391,7 +391,7 @@ test('executeJobOnce background execution workflow', async () => {
 			}
 			const repoSessionRpcSpy = vi
 				.spyOn(
-					await import('#worker/repo/repo-session-do.ts'),
+					await import('#worker/repo/repo-session-service.ts'),
 					'repoSessionRpc',
 				)
 				.mockReturnValue(sessionClient as never)
@@ -454,7 +454,7 @@ test('executeJobOnce background execution workflow', async () => {
 			BUNDLE_ARTIFACTS_KV: createBundleArtifactsKv(),
 			LOADER: {} as WorkerLoader,
 			REPO_SESSION: {} as DurableObjectNamespace,
-			STORAGE_RUNNER: createStorageRunnerBinding(),
+			STORAGE_CELLS: createStorageRunnerBinding(),
 		})
 		mockRepoPersistence()
 		const callerContext = createBaseCallerContext()
@@ -668,7 +668,7 @@ test('executeJobOnce background kody semantics and usage workflow', async () => 
 			}
 			const repoSessionRpcSpy = vi
 				.spyOn(
-					await import('#worker/repo/repo-session-do.ts'),
+					await import('#worker/repo/repo-session-service.ts'),
 					'repoSessionRpc',
 				)
 				.mockReturnValue(sessionClient as never)
@@ -719,7 +719,7 @@ test('executeJobOnce background kody semantics and usage workflow', async () => 
 			BUNDLE_ARTIFACTS_KV: createBundleArtifactsKv(),
 			LOADER: {} as WorkerLoader,
 			REPO_SESSION: {} as DurableObjectNamespace,
-			STORAGE_RUNNER: createStorageRunnerBinding(),
+			STORAGE_CELLS: createStorageRunnerBinding(),
 		})
 		mockRepoPersistence()
 		const callerContext = createBaseCallerContext()
@@ -829,7 +829,10 @@ test('executeJobOnce background kody semantics and usage workflow', async () => 
 			discardSession: vi.fn(),
 		}
 		const repoSessionRpcSpy = vi
-			.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+			.spyOn(
+				await import('#worker/repo/repo-session-service.ts'),
+				'repoSessionRpc',
+			)
 			.mockReturnValue(sessionClient as never)
 		const row = await (
 			await import('@kody-internal/shared/jobs/repo.ts')

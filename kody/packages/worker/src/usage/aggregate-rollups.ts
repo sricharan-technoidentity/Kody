@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Derived usage rollup aggregation.
  *
@@ -20,7 +21,7 @@
  */
 
 import { coalescedCountUsageEventTypes } from '#universal/usage-event-types.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { listSystemInboundUsageRows } from '#worker/email/system-inbound-delivery-store.ts'
 
 export const usageAggregationCronGateMinutes = 5
@@ -39,7 +40,7 @@ export function shouldRunUsageAggregationCron(now: Date) {
 
 export type UsageAggregationEnv = {
 	USAGE_EVENTS?: AnalyticsEngineDataset
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 	CLOUDFLARE_ACCOUNT_ID?: string
 	CLOUDFLARE_API_TOKEN?: string
 	CLOUDFLARE_API_BASE_URL?: string
@@ -272,7 +273,7 @@ type AnalyticsEngineSqlRow = {
 }
 
 export async function readIdempotentInboundEmailUsage(input: {
-	db: D1Database
+	db: SqlDatabase
 	months: [string, string]
 }) {
 	return await listSystemInboundUsageRows(input)
@@ -334,7 +335,7 @@ function toCount(value: number | string) {
 }
 
 export async function filterLiveUsageRows<T extends { user_id: string }>(
-	db: D1Database,
+	db: SqlDatabase,
 	rows: Array<T>,
 ) {
 	const systemRows = rows.filter((row) => row.user_id === 'system:email')
@@ -349,7 +350,7 @@ export async function filterLiveUsageRows<T extends { user_id: string }>(
 	for (let index = 0; index < userIds.length; index += 80) {
 		const chunk = userIds.slice(index, index + 80)
 		const placeholders = chunk.map(() => '?').join(', ')
-		const result = await runD1WithRetry(() =>
+		const result = await runSqlWithRetry(() =>
 			db
 				.prepare(
 					`SELECT stable_user_id FROM users
@@ -386,11 +387,11 @@ function previousMonth(month: string) {
  * touched.
  */
 async function deleteStaleCurrentMonthRollups(input: {
-	db: D1Database
+	db: SqlDatabase
 	month: string
 	presentPairs: ReadonlySet<string>
 }) {
-	const { results } = await runD1WithRetry(() =>
+	const { results } = await runSqlWithRetry(() =>
 		input.db
 			.prepare(`SELECT user_id, metric FROM usage_rollups WHERE month = ?`)
 			.bind(input.month)
@@ -409,7 +410,7 @@ async function deleteStaleCurrentMonthRollups(input: {
 		const pairPredicates = chunk
 			.map(() => '(user_id = ? AND metric = ?)')
 			.join(' OR ')
-		const result = await runD1WithRetry(() =>
+		const result = await runSqlWithRetry(() =>
 			input.db
 				.prepare(
 					`DELETE FROM usage_rollups WHERE month = ? AND (${pairPredicates})`,
@@ -426,10 +427,10 @@ async function deleteStaleCurrentMonthRollups(input: {
 }
 
 async function deleteNonLiveUserRollups(input: {
-	db: D1Database
+	db: SqlDatabase
 	months: [string, string]
 }) {
-	const result = await runD1WithRetry(() =>
+	const result = await runSqlWithRetry(() =>
 		input.db
 			.prepare(
 				`DELETE FROM usage_rollups
@@ -563,7 +564,7 @@ export async function aggregateUsageRollups(
 	)
 	const users = new Set(presentRows.map((row) => row.user_id)).size
 	for (let index = 0; index < statements.length; index += upsertBatchSize) {
-		await runD1WithRetry(() =>
+		await runSqlWithRetry(() =>
 			env.APP_DB.batch(statements.slice(index, index + upsertBatchSize)),
 		)
 	}

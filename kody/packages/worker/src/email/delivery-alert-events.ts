@@ -1,7 +1,8 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 export const emailDeliveryAlertEventRetentionDays = 7
 
 export async function recordDeliveryAlertEvent(input: {
-	db: D1Database
+	db: SqlDatabase
 	providerEventId: string
 	provider: string
 	eventType: 'bounced' | 'complained'
@@ -27,7 +28,7 @@ export async function recordDeliveryAlertEvent(input: {
 }
 
 export async function pruneDeliveryAlertEvents(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	limit?: number
 }) {
@@ -52,7 +53,7 @@ export async function pruneDeliveryAlertEvents(input: {
 }
 
 export async function loadDeliveryAlertEventsHealth(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 }): Promise<{
 	retainedEvents: number

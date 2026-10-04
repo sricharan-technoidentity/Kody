@@ -11,7 +11,7 @@
  * session revocation hooks on every auth mutation path.
  */
 
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import {
 	destroyAuthCookie,
 	isAuthSessionExpired,

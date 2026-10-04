@@ -46,7 +46,7 @@ vi.mock('#worker/repo/repo-sessions.ts', async () =>
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionsMock(),
 )
-vi.mock('#worker/repo/repo-session-do.ts', async () =>
+vi.mock('#worker/repo/repo-session-service.ts', async () =>
 	(
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionDoMock(),

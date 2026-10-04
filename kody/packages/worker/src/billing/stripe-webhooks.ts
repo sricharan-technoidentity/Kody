@@ -14,7 +14,7 @@ import {
 	record,
 	string,
 } from 'remix/data-schema'
-import { waitUntil } from 'cloudflare:workers'
+import { waitUntil } from '#worker/front-door/host-context.ts'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { sendPaymentFailedEmail } from '#app/user-account-emails.ts'
 import {
@@ -106,21 +106,13 @@ export async function recordStripeWebhookEvent(input: {
 	now?: Date
 }): Promise<'recorded' | 'duplicate'> {
 	const now = input.now ?? new Date()
-	try {
-		await input.env.APP_DB.prepare(
-			`INSERT INTO stripe_webhook_events (event_id, event_type, processed_at)
-			 VALUES (?, ?, ?)`,
-		)
-			.bind(input.eventId, input.eventType, now.toISOString())
-			.run()
-		return 'recorded'
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error)
-		if (/UNIQUE constraint failed/i.test(message)) {
-			return 'duplicate'
-		}
-		throw error
-	}
+	const result = await input.env.APP_DB.prepare(
+		`INSERT INTO stripe_webhook_events (event_id, event_type, processed_at)
+		 VALUES (?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
+	)
+		.bind(input.eventId, input.eventType, now.toISOString())
+		.run()
+	return result.meta.changes ? 'recorded' : 'duplicate'
 }
 
 async function handleCheckoutSessionCompleted(input: {

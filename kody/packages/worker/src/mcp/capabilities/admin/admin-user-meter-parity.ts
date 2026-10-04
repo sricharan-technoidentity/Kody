@@ -97,7 +97,8 @@ export const adminUserMeterParityCapability = defineDomainCapability(
 				'adminUserMeterParity',
 				async () => ({
 					report: await loadAdminUserMeterParityReport({
-						db: ctx.env.APP_DB,
+						db:
+							ctx.env.APP_DB_FOR_USER?.(args.stable_user_id) ?? ctx.env.APP_DB,
 						env: ctx.env,
 						jobs: jobsData(ctx.env),
 						stableUserId: args.stable_user_id,

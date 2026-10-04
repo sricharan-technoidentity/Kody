@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { type McpServerSettingMetadata } from '#worker/mcp-client/settings-types.ts'
@@ -43,7 +44,7 @@ test('resolveMcpServerSetting resolves by id/name and rejects blank or unknown s
 	mockModule.listMcpServerSettings.mockReset()
 
 	const blank = resolveMcpServerSetting({
-		env: { APP_DB: {} as D1Database },
+		env: { APP_DB: {} as SqlDatabase },
 		userId: 'user-1',
 		server: '   ',
 	})
@@ -55,7 +56,7 @@ test('resolveMcpServerSetting resolves by id/name and rejects blank or unknown s
 	mockModule.getMcpServerSettingById.mockResolvedValueOnce(byId)
 	await expect(
 		resolveMcpServerSetting({
-			env: { APP_DB: {} as D1Database },
+			env: { APP_DB: {} as SqlDatabase },
 			userId: 'user-1',
 			server: 'server-by-id',
 		}),
@@ -67,7 +68,7 @@ test('resolveMcpServerSetting resolves by id/name and rejects blank or unknown s
 	])
 	await expect(
 		resolveMcpServerSetting({
-			env: { APP_DB: {} as D1Database },
+			env: { APP_DB: {} as SqlDatabase },
 			userId: 'user-1',
 			server: 'HA',
 		}),
@@ -76,7 +77,7 @@ test('resolveMcpServerSetting resolves by id/name and rejects blank or unknown s
 	mockModule.getMcpServerSettingById.mockResolvedValueOnce(null)
 	mockModule.listMcpServerSettings.mockResolvedValueOnce([setting()])
 	const missing = resolveMcpServerSetting({
-		env: { APP_DB: {} as D1Database },
+		env: { APP_DB: {} as SqlDatabase },
 		userId: 'user-1',
 		server: 'recipe-keeper',
 	})

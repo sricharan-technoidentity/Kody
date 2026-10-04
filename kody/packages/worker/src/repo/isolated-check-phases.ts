@@ -8,19 +8,19 @@ import { isolatedRunnerResourceLimitAdvice } from './isolated-runner-limit-messa
 
 /**
  * Heavy repo-check phases (esbuild-wasm bundle validation, TypeScript
- * language-service typecheck) run in fresh, throwaway `REPO_SESSION`
- * isolates instead of the session/publish Durable Object. One large package
+ * language-service typecheck) run in fresh, throwaway `RepoSession`
+ * isolates instead of the session/publish interpreter session. One large package
  * could otherwise push the session isolate (workspace + git state + checks)
- * over the Durable Object memory limit and kill every publish attempt
- * (kentcdodds/kody#987). Each phase invocation gets a brand-new DO id, so:
+ * over the interpreter session memory limit and kill every publish attempt
+ * (kentcdodds/kody#987). Each phase invocation gets a brand-new session ID, so:
  *
  * - phases never stack their peak memory on top of the session isolate or
  *   each other (esbuild-wasm memory in particular never shrinks once grown),
  * - callers may overlap typecheck with bundle chunks (and overlap chunks with
- *   each other) without stacking DO heap — `runRepoChecks` does this,
+ *   each other) without stacking interpreter heap — `runRepoChecks` does this,
  * - a package too large for even a single phase surfaces as a failed check
  *   with an actionable message instead of an opaque isolate reset, and
- * - the throwaway instances never touch their own Durable Object storage, so
+ * - the throwaway instances never touch their own interpreter session storage, so
  *   nothing persists for their random ids.
  *
  * The collected source files (bounded by the repo-check source caps) are
@@ -60,7 +60,7 @@ export type IsolatedCheckPhaseRequest =
 
 /**
  * Staged snapshots are user-owned content, so the staging key is namespaced
- * by `userId` and the consuming Durable Object verifies the key belongs to
+ * by `userId` and the consuming interpreter session verifies the key belongs to
  * the requesting user before reading it.
  */
 export function isolatedCheckStagingKeyForUser(userId: string) {
@@ -120,9 +120,7 @@ function phaseLabel(request: IsolatedCheckPhaseRequest) {
 export function createIsolatedCheckPhaseRunner(
 	env: Env | undefined,
 ): IsolatedCheckPhaseRunner | null {
-	const namespace = (
-		env as (Env & { REPO_SESSION?: DurableObjectNamespace }) | undefined
-	)?.REPO_SESSION
+	const namespace = env?.REPO_SESSIONS
 	const stagingKv = (
 		env as (Env & { BUNDLE_ARTIFACTS_KV?: KVNamespace }) | undefined
 	)?.BUNDLE_ARTIFACTS_KV
@@ -143,10 +141,8 @@ export function createIsolatedCheckPhaseRunner(
 			// A fresh, user-namespaced id per phase invocation puts every heavy
 			// phase in its own isolate. The instance never touches its Durable
 			// Object storage, so nothing persists for the random name.
-			const stub = namespace.get(
-				namespace.idFromName(
-					`isolated-check-phase-${request.userId}-${crypto.randomUUID()}`,
-				),
+			const stub = namespace(
+				`isolated-check-phase-${request.userId}-${crypto.randomUUID()}`,
 			) as unknown as IsolatedCheckPhaseStub
 			try {
 				return await stub.runIsolatedCheckPhase(request)

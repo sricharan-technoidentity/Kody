@@ -1,21 +1,11 @@
-import { DatabaseSync } from 'node:sqlite'
-import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { expect } from 'vitest'
+import { test, env } from '#worker/test-support/mail.ts'
 import { type InboundDelivery } from './inbound-delivery.ts'
 import {
 	claimSystemInboundSubscriptionEffect,
 	listDueSystemInboundEffects,
 } from './system-inbound-effect-store.ts'
 import { claimSystemInboundDeliveryStorage } from './system-inbound-delivery-store.ts'
-
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
-function createDatabase() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, migrationsDirectory)
-	return sqlite
-}
 
 function delivery(
 	id: string,
@@ -39,7 +29,7 @@ function delivery(
 }
 
 test('NULL system lease timestamps remain due and reclaimable', async () => {
-	using sqlite = createDatabase()
+	const db = env.APP_DB
 	const createdAt = '2026-08-01T00:00:00.000Z'
 	const now = new Date('2026-08-03T00:00:00.000Z')
 	const usage = {
@@ -57,7 +47,7 @@ test('NULL system lease timestamps remain due and reclaimable', async () => {
 		...delivery('storage-null-at', 'storing'),
 		storageLease: 'storage-lease',
 	}
-	const insertDedicated = sqlite.prepare(
+	const insertDedicated = db.prepare(
 		`INSERT INTO system_email_delivery_events (
 			id, event_type, provider, detail_json, created_at,
 			needs_effect_reconcile, state, fingerprint,
@@ -115,9 +105,8 @@ test('NULL system lease timestamps remain due and reclaimable', async () => {
 			row.storageLease,
 			createdAt,
 		] as const
-		insertDedicated.run(...bindings)
+		await insertDedicated.bind(...bindings).run()
 	}
-	const db = createD1FromSqlite(sqlite)
 
 	expect(await listDueSystemInboundEffects({ db, now, limit: 10 })).toEqual([
 		{ id: subscription.deliveryId },

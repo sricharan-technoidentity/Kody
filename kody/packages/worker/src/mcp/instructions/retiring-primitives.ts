@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Per-affected-user MCP notices for primitives in active retirement.
  *
@@ -26,7 +27,7 @@ export const retiringPrimitiveNotices: ReadonlyArray<RetiringPrimitiveNotice> =
 export type RetiringPrimitiveNoticeId = string
 
 export async function loadActiveRetiringNoticeIds(
-	_db: D1Database,
+	_db: SqlDatabase,
 	_userId: string | null,
 ): Promise<ReadonlySet<RetiringPrimitiveNoticeId>> {
 	return new Set()

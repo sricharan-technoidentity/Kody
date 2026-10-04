@@ -1,5 +1,13 @@
 # OAuth integrations (apps and connections)
 
+Owner-scoped PostgreSQL stores registrations and integration metadata. Secret
+envelopes use KMS context; connector token lookup uses the Identity/vault port.
+Local tokens and external providers are simulated. Host-side token resolution
+remains in the restricted egress proxy.
+
+See [current POC architecture](../../poc/architecture.md). Legacy platform names
+in domain details refer to preserved contracts or historical topology.
+
 Saved third-party OAuth config is a first-class primitive: an **OAuth app**
 (shared client credentials and provider endpoints) plus one or more
 **connections** (connected accounts that share that app). An app lives in one of
@@ -161,7 +169,7 @@ capability use it within the import boundaries.
 
 Operators may attach a logo per platform app (`adminPlatformOauthAppSave`
 `logoBase64`; `null` clears). Uploads accept SVG, PNG, JPEG, or WebP. The shared
-community-icon pipeline sanitizes SVG, then Cloudflare Images fits every
+community-icon pipeline sanitizes SVG, then the raster adapter fits every
 accepted source to a 256-pixel WebP (`fit: scale-down`, quality 90), so a newly
 ingested asset is stored and served as WebP. GET paths whose stored object
 predates ingest fitting (`iconFitVersion` other than `2`) rewrite the hashed key
@@ -348,7 +356,8 @@ not a deletion target; removing a user's connections is what releases their
 
 ## Related docs
 
-- [Data storage](./data-storage.md) — D1 inventory and JSON shadow schemas
+- [Data storage](./data-storage.md) — PostgreSQL inventory and frozen
+  compatibility shapes
 - [OAuth guide](../../guides/oauth.md) — agent-facing `/connect/oauth` workflow
 - [Primitives map](./primitives.yaml) — `integrations` primitive and
   `integration-host-allowlist` invariant

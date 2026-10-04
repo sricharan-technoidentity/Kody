@@ -59,28 +59,11 @@ export default mergeConfig(
 					),
 				},
 				{
-					find: '@sentry/cloudflare',
+					find: '#worker/front-door/telemetry.ts',
 					replacement: resolve(
 						rootDir,
-						'packages/worker/src/test-support/sentry-cloudflare-stub.ts',
+						'packages/worker/src/test-support/sentry-node-stub.ts',
 					),
-				},
-				{
-					find: 'cloudflare:workers',
-					replacement: resolve(
-						rootDir,
-						'packages/worker/src/test-support/cloudflare-workers-stub.ts',
-					),
-				},
-
-				// The generated deferred module lives under a `node_modules/`
-				// path, which vite-node would externalize (so the
-				// `cloudflare:workers` alias above would not reach it). Point node
-				// tests at the installed package instead; `ssr.noExternal` inlines
-				// it so the alias applies.
-				{
-					find: './node_modules/.kody-generated/oauth-provider.mjs',
-					replacement: '@cloudflare/workers-oauth-provider',
 				},
 			],
 		},
@@ -96,10 +79,6 @@ export default mergeConfig(
 			// audit-log sink through a shared spy; see test-support/audit-log-spy.ts.
 			setupFiles: [
 				resolve(rootDir, 'packages/worker/src/test-support/audit-log-spy.ts'),
-				resolve(
-					rootDir,
-					'packages/worker/src/test-support/cloudflare-global-stub.ts',
-				),
 			],
 		},
 	}),

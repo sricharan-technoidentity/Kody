@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { dispatchAdminPackageSubscriptionEvent } from '#worker/package-invocations/admin-package-subscriptions.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
@@ -113,7 +114,7 @@ function createManifest(packageId: string, subscribed = true) {
 
 function createDispatchEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 		APP_BASE_URL: 'https://heykody.dev',
 	}
@@ -245,7 +246,7 @@ test('platform feedback dispatch isolates terminal handler failures and rejects 
 		'admin-stable-2',
 	])
 	mocks.listSavedPackagesByUserId.mockImplementation(
-		async (_db: D1Database, input: { userId: string }) =>
+		async (_db: SqlDatabase, input: { userId: string }) =>
 			input.userId === 'admin-stable-1' ? [first, second] : [broken, unrelated],
 	)
 	mocks.loadPackageManifestBySourceId.mockImplementation(
@@ -460,7 +461,7 @@ test('generic admin fan-out defaults to skipping manifest and invocation failure
 	await expect(
 		dispatchAdminPackageSubscriptionEvent({
 			env: {
-				APP_DB: {} as D1Database,
+				APP_DB: {} as SqlDatabase,
 				BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 			},
 			baseUrl: 'https://heykody.dev',

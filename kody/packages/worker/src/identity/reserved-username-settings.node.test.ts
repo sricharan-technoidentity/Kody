@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
@@ -42,7 +43,7 @@ function createMemoryKv(initial?: Record<string, string>) {
 function createEnv(kv?: KVNamespace) {
 	return {
 		BUNDLE_ARTIFACTS_KV: kv,
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as unknown as Env
 }
 

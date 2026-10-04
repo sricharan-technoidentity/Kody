@@ -11,12 +11,12 @@ type RateLimitResult = {
 }
 
 type AuthRateLimitEnv = {
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 	AUTH_RATE_LIMITER?: RateLimit
 }
 
 type SentryTunnelRateLimitEnv = {
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 	SENTRY_TUNNEL_RATE_LIMITER?: RateLimit
 }
 
@@ -151,7 +151,7 @@ export const sentryTunnelRateLimitConfig: RateLimitConfig = {
  */
 async function checkBoundRateLimit(
 	limiter: RateLimit | undefined,
-	db: D1Database,
+	db: SqlDatabase,
 	key: string,
 	config: RateLimitConfig,
 ): Promise<RateLimitResult> {

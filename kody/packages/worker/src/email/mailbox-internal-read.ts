@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { isSystemEmailOwner } from './email-owner.ts'
 import { mailboxRpc, type MailboxEnv } from './mailbox-client.ts'
 import {
@@ -25,7 +26,7 @@ import { type EmailAttachmentRecord, type EmailMessageRecord } from './types.ts'
  * D1-only. There is deliberately no feature flag or D1 fallback here.
  */
 export type MailboxInternalReadEnv = MailboxEnv & {
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 }
 
 function assertUserOwner(ownerId: string) {
@@ -97,7 +98,7 @@ export async function countInternalUserEmailMessages(input: {
 }
 
 export async function countInternalSystemEmailMessages(input: {
-	env: { APP_DB: D1Database }
+	env: { APP_DB: SqlDatabase }
 }): Promise<number> {
 	return await countSystemEmailMessages({
 		db: input.env.APP_DB,

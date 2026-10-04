@@ -17,7 +17,7 @@ import {
 	type VectorReindexSweepResult,
 } from '#worker/search-index/reindex-sweep.ts'
 import { userVectorNamespace } from '#worker/search-index/vector-namespaces.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { buildSavedPackageEmbedText } from './embed.ts'
 import { listSavedPackagesPage, savedPackageVectorId } from './repo.ts'
@@ -112,7 +112,7 @@ export async function reindexSavedPackageVectors(
 				{ complete: false, afterId },
 			)
 		}
-		const rows = await runD1WithRetry(() =>
+		const rows = await runSqlWithRetry(() =>
 			listSavedPackagesPage(env.APP_DB, {
 				afterId,
 				limit: reindexPageSize,

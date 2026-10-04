@@ -1,8 +1,5 @@
 import { expect, test, vi } from 'vitest'
-import {
-	d1LockRetryBaseDelayMs,
-	d1LockRetryMaxAttempts,
-} from '#worker/d1-retry.ts'
+import { sqlRetryBaseDelayMs, sqlRetryMaxAttempts } from '#worker/sql-retry.ts'
 import { consoleError } from '#worker/test-support/console-spies.ts'
 
 const mockModule = vi.hoisted(() => ({
@@ -288,7 +285,7 @@ test('saved package reindex retries a transient D1 export error on page listing'
 	mockModule.embedTextsForVectorize.mockResolvedValue([[0.1]])
 	mockModule.listSavedPackagesPage
 		.mockRejectedValueOnce(
-			new Error('D1_ERROR: Currently processing a long-running export.'),
+			new Error('could not serialize access due to concurrent update.'),
 		)
 		.mockResolvedValueOnce([pkg])
 
@@ -297,7 +294,7 @@ test('saved package reindex retries a transient D1 export error on page listing'
 		const resultPromise = reindexSavedPackageVectors(env, {
 			baseUrl: 'https://kody.example.com',
 		})
-		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
+		await vi.advanceTimersByTimeAsync(sqlRetryBaseDelayMs)
 		await expect(resultPromise).resolves.toEqual({
 			upserted: 1,
 			complete: true,
@@ -316,7 +313,7 @@ test('saved package reindex surfaces page listing failures after the retry budge
 	mockModule.getCapabilityVectorIndex.mockReturnValue({ upsert: vi.fn() })
 	mockModule.isCapabilitySearchOffline.mockReturnValue(false)
 	mockModule.listSavedPackagesPage.mockRejectedValue(
-		new Error('D1_ERROR: Currently processing a long-running export.'),
+		new Error('could not serialize access due to concurrent update.'),
 	)
 
 	vi.useFakeTimers()
@@ -327,11 +324,11 @@ test('saved package reindex surfaces page listing failures after the retry budge
 		// Attach before advancing timers so the rejection is not unhandled.
 		// oxlint-disable-next-line vitest/valid-expect
 		const expectation = expect(resultPromise).rejects.toThrow(
-			'Currently processing a long-running export',
+			'could not serialize access due to concurrent update',
 		)
-		for (let attempt = 1; attempt < d1LockRetryMaxAttempts; attempt++) {
+		for (let attempt = 1; attempt < sqlRetryMaxAttempts; attempt++) {
 			await vi.advanceTimersByTimeAsync(
-				d1LockRetryBaseDelayMs * 2 ** (attempt - 1),
+				sqlRetryBaseDelayMs * 2 ** (attempt - 1),
 			)
 		}
 		await expectation
@@ -340,7 +337,7 @@ test('saved package reindex surfaces page listing failures after the retry budge
 	}
 
 	expect(mockModule.listSavedPackagesPage).toHaveBeenCalledTimes(
-		d1LockRetryMaxAttempts,
+		sqlRetryMaxAttempts,
 	)
 	expect(mockModule.loadPackageManifestBySourceId).not.toHaveBeenCalled()
 })

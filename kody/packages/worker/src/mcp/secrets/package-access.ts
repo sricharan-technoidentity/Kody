@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import {
@@ -72,7 +73,7 @@ export function isPackageSecretAccessUnavailableError(error: unknown) {
  * owner's stamp. Shared code never receives the guest's other user secrets.
  */
 async function resolvePackageRecordForSecretAccess(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 }): Promise<SavedPackageRecord | null> {
@@ -94,7 +95,7 @@ async function resolvePackageRecordForSecretAccess(input: {
 }
 
 async function resolveSecretStampUserId(input: {
-	db: D1Database
+	db: SqlDatabase
 	callerUserId: string
 	packageId: string
 }) {
@@ -135,7 +136,7 @@ export async function packageHasImplicitUserSecretReadAccess(input: {
 }
 
 async function savedPackageHasImplicitUserSecretReadAccess(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	savedPackage: SavedPackageRecord
 }): Promise<boolean> {

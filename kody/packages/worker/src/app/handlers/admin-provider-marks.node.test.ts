@@ -1,11 +1,10 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { type PermissionString, type RoleName } from '#universal/permissions.ts'
 import type * as AuditLog from '#worker/audit-log.ts'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import {
 	createFakeImagesBinding,
 	tinyPngBytes,
@@ -34,8 +33,6 @@ vi.mock('#worker/audit-log.ts', async (importOriginal) => {
 const { createAdminProviderMarksApiHandler } =
 	await import('./admin-provider-marks.ts')
 
-const migrationsDirectory = new URL('../../../migrations/', import.meta.url)
-
 function createActor(roles: Array<RoleName>) {
 	const permissions: Array<PermissionString> = roles.includes('admin')
 		? ['read:user:any', 'update:user:any']
@@ -58,11 +55,11 @@ function createActor(roles: Array<RoleName>) {
 	}
 }
 
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
+async function createHarness() {
+	const sqlite = await createTestPg()
+
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
+		APP_DB: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
 		SECRET_KMS: testSecretKms,
 		COMMUNITY_ASSETS: {
 			async put() {},
@@ -85,7 +82,7 @@ function postRequest(body: Record<string, unknown>) {
 }
 
 test('admin provider marks API saves and lists operator marks', async () => {
-	const { env } = createHarness()
+	const { env } = await createHarness()
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(createActor(['admin']))
 	const handler = createAdminProviderMarksApiHandler(env)
 
@@ -134,7 +131,7 @@ test('admin provider marks API saves and lists operator marks', async () => {
 })
 
 test('admin provider marks API rejects a logo write when storage is missing without creating the mark', async () => {
-	const { env } = createHarness()
+	const { env } = await createHarness()
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(createActor(['admin']))
 	const handler = createAdminProviderMarksApiHandler({
 		...env,
@@ -166,7 +163,7 @@ test('admin provider marks API rejects a logo write when storage is missing with
 })
 
 test('admin provider marks API rejects delete when logo storage is missing', async () => {
-	const { env } = createHarness()
+	const { env } = await createHarness()
 	mockModule.readAuthenticatedAppUser.mockResolvedValue(createActor(['admin']))
 	const handler = createAdminProviderMarksApiHandler(env)
 	const saved = await handler.handler({

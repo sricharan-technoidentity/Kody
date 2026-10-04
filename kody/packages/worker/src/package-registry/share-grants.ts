@@ -79,7 +79,7 @@ async function readSharePeerRow(db: SqlDatabase, userId: string) {
 }
 
 export async function findSharePeer(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<
 	(Omit<PublicUserIdentity, 'email'> & { email: string | null }) | null
@@ -100,7 +100,7 @@ export async function findSharePeer(
 
 /** Exact-match invitee lookup; on Postgres through `kody_share_find_invitee`. */
 async function findShareInvitee(
-	db: D1Database,
+	db: SqlDatabase,
 	lookup: { username: string } | { email: string },
 ): Promise<{ identity: PublicUserIdentity; emailVerified: boolean } | null> {
 	if (isPostgres(db)) {
@@ -209,7 +209,7 @@ export class PackageShareAccessError extends Error {
 }
 
 async function assertShareGrantsFlagEnabled(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId?: string | null,
 ) {
 	if (!(await isPackageShareGrantsEnabled({ db, stableUserId }))) {
@@ -301,7 +301,7 @@ export function isPaidPlanForPackageShare(plan: PlanName) {
 }
 
 export async function assertPaidPlanForPackageShare(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; email: string | null | undefined; who: string },
 ) {
 	const peerRow = isPostgres(db)
@@ -321,7 +321,7 @@ export async function assertPaidPlanForPackageShare(
 }
 
 export async function findPersonUserByEmail(
-	db: D1Database,
+	db: SqlDatabase,
 	email: string,
 ): Promise<PublicUserIdentity | null> {
 	const normalized = normalizeEmailAddress(email)
@@ -403,7 +403,7 @@ function pinAheadMessage(input: {
 }
 
 export async function getPackageShareGrantById(
-	db: D1Database,
+	db: SqlDatabase,
 	grantId: string,
 ): Promise<PackageShareGrantRow | null> {
 	const row = await db
@@ -418,7 +418,7 @@ export async function getPackageShareGrantById(
 }
 
 export async function listPackageShareGrantsByPackageId(
-	db: D1Database,
+	db: SqlDatabase,
 	packageId: string,
 ): Promise<Array<PackageShareGrantRow>> {
 	const rows = await db
@@ -434,7 +434,7 @@ export async function listPackageShareGrantsByPackageId(
 }
 
 export async function listOutboundPackageShareGrants(
-	db: D1Database,
+	db: SqlDatabase,
 	ownerUserId: string,
 ): Promise<Array<PackageShareGrantRow>> {
 	if (!(await isPackageShareGrantsEnabled({ db, stableUserId: ownerUserId }))) {
@@ -453,7 +453,7 @@ export async function listOutboundPackageShareGrants(
 }
 
 export async function listInboundPackageShareGrants(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		email?: string | null
@@ -500,7 +500,7 @@ export async function listInboundPackageShareGrants(
 }
 
 export async function findActivePackageShareGrant(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 	granteeUserId?: string | null
 	inviteeEmail?: string | null
@@ -539,7 +539,7 @@ export async function findActivePackageShareGrant(input: {
 }
 
 export async function findConflictingPackageShareGrant(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 	granteeUserId?: string | null
 	inviteeEmail?: string | null
@@ -569,7 +569,7 @@ export async function findConflictingPackageShareGrant(input: {
 }
 
 export async function findAcceptedPackageShareGrant(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 	granteeUserId: string
 }): Promise<PackageShareGrantRow | null> {
@@ -599,7 +599,7 @@ export async function findAcceptedPackageShareGrant(input: {
 }
 
 export async function findAcceptedPackageShareGrantByName(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageName: string
 	granteeUserId: string
 }): Promise<{
@@ -633,7 +633,7 @@ export async function findAcceptedPackageShareGrantByName(input: {
 }
 
 export async function getPublishedCommitForPackage(
-	db: D1Database,
+	db: SqlDatabase,
 	savedPackage: Pick<SavedPackageRecord, 'sourceId'>,
 ) {
 	const source = await getEntitySourceById(db, savedPackage.sourceId)
@@ -651,7 +651,7 @@ function grantAllowsPermission(
 }
 
 export async function hydratePackageShareGrantView(input: {
-	db: D1Database
+	db: SqlDatabase
 	grant: PackageShareGrantRow
 }): Promise<PackageShareGrantView | null> {
 	const savedPackage = await getSavedPackageById(input.db, {
@@ -692,7 +692,7 @@ export async function hydratePackageShareGrantView(input: {
 }
 
 export async function hydratePackageShareGrantViews(
-	db: D1Database,
+	db: SqlDatabase,
 	grants: Array<PackageShareGrantRow>,
 ): Promise<Array<PackageShareGrantView>> {
 	const views = await Promise.all(
@@ -702,7 +702,7 @@ export async function hydratePackageShareGrantViews(
 }
 
 export async function requireHydratedPackageShareGrantView(input: {
-	db: D1Database
+	db: SqlDatabase
 	grant: PackageShareGrantRow
 }): Promise<PackageShareGrantView> {
 	const view = await hydratePackageShareGrantView(input)
@@ -733,7 +733,7 @@ export function grantIsAddressedToGuest(
 }
 
 export async function assertPackageShareUseAllowed(input: {
-	db: D1Database
+	db: SqlDatabase
 	grant: PackageShareGrantRow
 	savedPackage: SavedPackageRecord
 	guest: { userId: string; email?: string | null }
@@ -790,7 +790,7 @@ export async function assertPackageShareUseAllowed(input: {
 }
 
 export async function resolveShareGrantedPackageImport(input: {
-	db: D1Database
+	db: SqlDatabase
 	granteeUserId: string
 	granteeEmail?: string | null
 	packageName: string
@@ -827,7 +827,7 @@ export async function resolveShareGrantedPackageImport(input: {
 }
 
 export async function authorizeSharedPackagePermission(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 	granteeUserId: string
 	granteeEmail?: string | null
@@ -879,7 +879,7 @@ export async function authorizeSharedPackagePermission(input: {
 }
 
 export async function isShareGrantedForeignPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	callerUserId: string
 	packageId: string
 }) {
@@ -892,7 +892,7 @@ export async function isShareGrantedForeignPackage(input: {
 }
 
 export async function resolvePackageStorageOwnerUserId(input: {
-	db: D1Database
+	db: SqlDatabase
 	callerUserId: string
 	packageId: string
 }) {
@@ -912,7 +912,7 @@ export async function resolvePackageStorageOwnerUserId(input: {
 }
 
 export async function collectShareStorageOwners(input: {
-	db: D1Database
+	db: SqlDatabase
 	callerUserId: string
 	packageIds: Iterable<string>
 }): Promise<Map<string, string>> {
@@ -954,7 +954,7 @@ export async function collectShareStorageOwners(input: {
 }
 
 export async function retainAuthorizedPackageStorageGrantIds(input: {
-	db: D1Database
+	db: SqlDatabase
 	callerUserId: string
 	packageIds: Iterable<string>
 	storageOwnerByPackageId: ReadonlyMap<string, string>
@@ -985,7 +985,7 @@ export async function retainAuthorizedPackageStorageGrantIds(input: {
 }
 
 export async function invitePackageShare(input: {
-	db: D1Database
+	db: SqlDatabase
 	owner: McpUserContext
 	packageId: string
 	invitee: { username?: string; email?: string }
@@ -1107,7 +1107,7 @@ export async function invitePackageShare(input: {
 }
 
 export async function acceptPackageShare(input: {
-	db: D1Database
+	db: SqlDatabase
 	guest: McpUserContext
 	grantId?: string
 	packageId?: string
@@ -1204,7 +1204,7 @@ export async function acceptPackageShare(input: {
 }
 
 export async function revokePackageShare(input: {
-	db: D1Database
+	db: SqlDatabase
 	ownerUserId: string
 	grantId: string
 }): Promise<PackageShareGrantRow> {
@@ -1233,7 +1233,7 @@ export async function revokePackageShare(input: {
 }
 
 export async function leavePackageShare(input: {
-	db: D1Database
+	db: SqlDatabase
 	granteeUserId: string
 	grantId: string
 }): Promise<PackageShareGrantRow> {
@@ -1262,7 +1262,7 @@ export async function leavePackageShare(input: {
 }
 
 export async function acknowledgePackageShareUpdate(input: {
-	db: D1Database
+	db: SqlDatabase
 	granteeUserId: string
 	grantId: string
 	switchToFollow?: boolean
@@ -1387,7 +1387,7 @@ export async function attachPendingPackageShareInvitesSafely(input: {
 }
 
 export async function resolveOwnedOrSharedPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	caller: { userId: string; email?: string | null }
 	packageId: string
 	permission: PackageSharePermission
@@ -1426,7 +1426,7 @@ export function packageShareAccessErrorMessage(error: unknown) {
 }
 
 export async function loadViewerPackageShare(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 	viewer?: {
 		userId?: string | null
@@ -1464,7 +1464,7 @@ export async function loadViewerPackageShare(input: {
 }
 
 export async function listAcceptedInboundSharedPackages(input: {
-	db: D1Database
+	db: SqlDatabase
 	granteeUserId: string
 }): Promise<Array<SavedPackageRecord>> {
 	if (

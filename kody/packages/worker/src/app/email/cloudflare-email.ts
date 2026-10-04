@@ -8,6 +8,7 @@ import { resolveTransactionalSenderReplyTo } from '@kody-internal/shared/transac
 import { redactEmailRecipient } from '#worker/audit-log.ts'
 
 type CloudflareEmailClientConfig = {
+	ses?: import('#worker/email/ses.ts').SesMail
 	accountId?: string
 	apiBaseUrl?: string
 	apiToken?: string
@@ -147,6 +148,10 @@ export async function sendCloudflareEmail(
 		headers: message.headers,
 		attachments: message.attachments,
 	})
+	if (config.ses) {
+		const sent = await config.ses.send(normalized)
+		return { ok: true, messageId: sent.messageId }
+	}
 	const apiBaseUrl =
 		typeof config.apiBaseUrl === 'string' && config.apiBaseUrl.trim().length > 0
 			? config.apiBaseUrl.trim()

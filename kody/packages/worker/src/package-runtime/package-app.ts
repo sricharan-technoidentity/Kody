@@ -1,9 +1,4 @@
-import {
-	WorkerEntrypoint,
-	exports as workerExports,
-	waitUntil as scheduleWorkerWaitUntil,
-} from 'cloudflare:workers'
-import { requireLocalPackageAppRuntimeBridge } from '#worker/runtime-worker-service.ts'
+import { packageAppRuntimeMethods } from '#worker/runner/loader.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import {
 	getPackageAppEntryPath,
@@ -13,7 +8,6 @@ import { assertPersonOwnedPackageMayNotRunPlatformDependencies } from '#worker/p
 import { type AuthoredPackageJson } from '#worker/package-registry/types.ts'
 import { type EntitySourceRow } from '#worker/repo/types.ts'
 import {
-	buildKodyFns,
 	collectPackageStorageGrantIds,
 	type PackageEventTools,
 	type PackageInvokeInput,
@@ -22,7 +16,7 @@ import {
 import { getCapabilityRegistryForContext } from '#mcp/capabilities/registry.ts'
 import { createRemovedValueWriteError } from '#mcp/capabilities/values/shared.ts'
 import { listVisibleEnabledMcpServerRefsCached } from '#worker/mcp-client/settings-service.ts'
-import { createAuthenticatedFetch } from '#mcp/execute-modules/kody-runtime-utils.ts'
+import { createExecuteHelperPrelude } from '#mcp/execute-modules/kody-runtime-utils.ts'
 import {
 	buildKodyAppBundle,
 	createPublishedPackageAppBundleCacheKey,
@@ -98,11 +92,11 @@ import { recordUniqueDynamicWorkerDay } from '#worker/usage/dynamic-worker-day.t
 const packageAppEntrypointName = 'PackageAppWorker'
 const packageAppRuntimeBindingName = 'KODY_RUNTIME'
 
-function createPackageAppWorkerSource(input: { mainModule: string }) {
+export function createPackageAppWorkerSource(input: { mainModule: string }) {
 	return `
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { __kodyGetSecretAuthority } from ${JSON.stringify(`./${runtimeModulePath}`)};
+let __kodyGetSecretAuthority;
 
 const __kodyRuntimeStorageSymbol = Symbol.for('kody.runtimeStorage');
 // Resolve the AsyncLocalStorage instance synchronously at module load,
@@ -462,33 +456,10 @@ function createEventsProxy(runtimeBridge) {
 }
 
 function createAuthenticatedFetchHelper(runtimeBridge) {
-	return async function createAuthenticatedFetch(providerName) {
-		return async (input, init) =>
-			await runtimeBridge.authenticatedFetch({
-				providerName,
-				request: {
-					url:
-						typeof input === 'string'
-							? input
-							: input instanceof URL
-								? input.toString()
-								: input.url,
-					method:
-						input instanceof Request
-							? input.method
-							: init?.method ?? 'GET',
-					headers: Object.fromEntries(
-						new Headers(input instanceof Request ? input.headers : init?.headers).entries(),
-					),
-					body:
-						input instanceof Request
-							? await input.text()
-							: typeof init?.body === 'string'
-								? init.body
-								: undefined,
-				},
-			});
-	}
+	const kody = createKodyProxy(runtimeBridge);
+	const __kodyCallDispatcher = (name, args) => kody[name](args);
+	${createExecuteHelperPrelude()}
+	return createAuthenticatedFetch;
 }
 
 function createInternalDurableObjectState(runtimeBridge, storageId) {
@@ -795,6 +766,7 @@ export class ${packageAppEntrypointName} extends WorkerEntrypoint {
 		try {
 			consoleCapture.install();
 			const response = await __kodyRuntimeStorage.run(runtime, async () => {
+				__kodyGetSecretAuthority = (await import(${JSON.stringify(`./${runtimeModulePath}`)})).__kodyGetSecretAuthority;
 				const userModule = await import(${JSON.stringify(`./${input.mainModule}`)});
 				const runtimeEnv = createPackageAppEnv(this.env, userModule);
 				const candidate = userModule.default ?? userModule;
@@ -852,6 +824,7 @@ export class ${packageAppEntrypointName} extends WorkerEntrypoint {
 		try {
 			consoleCapture.install();
 			const result = await __kodyRuntimeStorage.run(runtime, async () => {
+				__kodyGetSecretAuthority = (await import(${JSON.stringify(`./${runtimeModulePath}`)})).__kodyGetSecretAuthority;
 				const userModule = await import(${JSON.stringify(`./${input.mainModule}`)});
 				const runtimeEnv = createPackageAppEnv(this.env, userModule);
 				const resolved = resolveRealtimeHandler(userModule, payload?.facet);
@@ -934,10 +907,22 @@ function redactRunRecordError(
 	return secretRedactor.redactUnknown(error)
 }
 
-export class PackageAppRuntimeBridge extends WorkerEntrypoint<
-	Env,
-	PackageAppRuntimeBridgeProps
-> {
+export class PackageAppRuntimeBridge {
+	protected readonly ctx: {
+		props: PackageAppRuntimeBridgeProps
+		waitUntil?(promise: Promise<unknown>): void
+	}
+	protected readonly env: Env
+	constructor(
+		ctx: {
+			props: PackageAppRuntimeBridgeProps
+			waitUntil?(promise: Promise<unknown>): void
+		},
+		env: Env,
+	) {
+		this.ctx = ctx
+		this.env = env
+	}
 	private packageRuntimeInvokeTools: Promise<PackageInvokeTools> | null = null
 	private packageEventTools: Promise<PackageEventTools> | null = null
 	private readonly secretRedactor: ExecutionSecretRedactor =
@@ -1076,7 +1061,9 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 				metadata: input.metadata,
 			},
 			waitUntil: (promise) => {
-				this.ctx.waitUntil(promise)
+				this.ctx.waitUntil
+					? this.ctx.waitUntil(promise)
+					: void promise.catch(() => {})
 			},
 		})
 	}
@@ -1112,7 +1099,8 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 		}).catch((finishError: unknown) => {
 			console.warn('package-app-run-record-finish-failed', finishError)
 		})
-		this.ctx.waitUntil(finishPromise)
+		if (this.ctx.waitUntil) this.ctx.waitUntil(finishPromise)
+		else await finishPromise
 		return { ok: true }
 	}
 
@@ -1339,30 +1327,6 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 		).clearStorage()
 	}
 
-	async authenticatedFetch(input: {
-		providerName: string
-		request: {
-			url: string
-			method?: string
-			headers?: Record<string, string>
-			body?: string
-		}
-	}) {
-		const kody = await buildKodyFns(
-			this.env,
-			await this.createCallerContext(this.ctx.props.packageId),
-		)
-		const authenticatedFetch = await createAuthenticatedFetch(
-			kody,
-			input.providerName,
-		)
-		return await authenticatedFetch(input.request.url, {
-			method: input.request.method,
-			headers: input.request.headers,
-			body: input.request.body,
-		})
-	}
-
 	async packageSecretGet(input: { alias: string; packageId?: string }) {
 		const packageId = this.resolvePackageSecretAuthorityPackageId(input)
 		const callerContext = await this.createCallerContext(
@@ -1518,7 +1482,10 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 	}
 }
 
-type PackageAppWorkerOptions = Parameters<Env['APP_LOADER']['load']>[0]
+type PackageAppWorkerOptions = Parameters<Env['APP_LOADER']['load']>[0] & {
+	compatibilityFlags: Array<string>
+	runtimeMethods?: Record<string, Array<string>>
+}
 
 type PackageAppWorkerBuild = {
 	workerId: string | null
@@ -1931,9 +1898,12 @@ async function buildPackageAppWorkerOptionsUncached(input: {
 		...createDynamicWorkerCompatibilityOptions(),
 		mainModule,
 		modules,
+		runtimeMethods: {
+			[packageAppRuntimeBindingName]: packageAppRuntimeMethods,
+		},
 		env: {
-			[packageAppRuntimeBindingName]: requireLocalPackageAppRuntimeBridge()({
-				props: {
+			[packageAppRuntimeBindingName]: (() => {
+				const props = {
 					baseUrl: input.baseUrl,
 					userId: input.userId,
 					email: input.runtime.callerContext.user?.email ?? '',
@@ -1945,8 +1915,9 @@ async function buildPackageAppWorkerOptionsUncached(input: {
 					sourceId: input.savedPackage.sourceId,
 					publishedCommit: input.savedPackage.publishedCommit,
 					packageStorageGrantIds,
-				},
-			}),
+				}
+				return new PackageAppRuntimeBridge({ props }, input.env)
+			})(),
 			__kodyPackageContext: {
 				packageId: input.savedPackage.id,
 				kodyId: input.savedPackage.kodyId,
@@ -1956,22 +1927,7 @@ async function buildPackageAppWorkerOptionsUncached(input: {
 				...assetContext,
 			},
 		},
-		globalOutbound: workerExports?.KodyFetchGateway
-			? workerExports.KodyFetchGateway({
-					props: {
-						baseUrl: input.baseUrl,
-						userId: input.userId,
-						email: input.runtime.callerContext.user?.email ?? null,
-						storageContext: {
-							sessionId: null,
-							appId: input.savedPackage.id,
-							packageId: input.savedPackage.id,
-							storageId: null,
-						},
-						grantedSecretAuthorityPackageIds: packageStorageGrantIds,
-					},
-				})
-			: null,
+		globalOutbound: null,
 	}
 }
 
@@ -2027,11 +1983,23 @@ export async function buildPackageAppWorker(input: {
 			`package:${input.savedPackage.id}`,
 	})
 	const surface = input.surface ?? 'app_fetch'
+	if (!input.env.RUNNER_LOADER)
+		throw new Error('RUNNER_LOADER is required for package apps.')
+	const loader = input.env.RUNNER_LOADER.forContext({
+		baseUrl: input.baseUrl,
+		userId: input.userId,
+		email: input.runtime.callerContext.user?.email ?? null,
+		storageContext: {
+			sessionId: null,
+			appId: input.savedPackage.id,
+			packageId: input.savedPackage.id,
+			storageId: null,
+		},
+		grantedSecretAuthorityPackageIds: [input.savedPackage.id],
+	})
 	if (!cacheKey) {
 		return {
-			stub: input.env.APP_LOADER.load(
-				await buildPackageAppWorkerOptionsUncached(input),
-			),
+			stub: loader.load(await buildPackageAppWorkerOptionsUncached(input)),
 			entrypointName: packageAppEntrypointName,
 		}
 	}
@@ -2049,8 +2017,8 @@ export async function buildPackageAppWorker(input: {
 	// `APP_LOADER.get()` must not persist a (day, workerId) that a retry
 	// would then skip without a `dynamic_worker_day` event.
 	const stub = build.workerId
-		? input.env.APP_LOADER.get(build.workerId, () => build.workerOptions)
-		: input.env.APP_LOADER.load(build.workerOptions)
+		? loader.get(build.workerId, () => build.workerOptions)
+		: loader.load(build.workerOptions)
 	if (build.workerId) {
 		schedulePackageAppUniqueWorkerDay({
 			env: input.env,
@@ -2084,7 +2052,11 @@ function schedulePackageAppUniqueWorkerDay(input: {
 	}).catch((error: unknown) => {
 		console.warn('package-app-dynamic-worker-day-record-failed', error)
 	})
-	const sink = input.waitUntil ?? scheduleWorkerWaitUntil
+	const sink =
+		input.waitUntil ??
+		((promise: Promise<unknown>) => {
+			void promise.catch(() => {})
+		})
 	sink(tracked)
 }
 

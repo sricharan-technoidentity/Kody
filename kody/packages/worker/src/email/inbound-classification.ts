@@ -1,10 +1,11 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { normalizeEmailAddress } from './address.ts'
 import { resolveInboundEmailAuthVerdict } from './auth-verdict.ts'
 import { evaluateEmailSenderRules } from './sender-rules.ts'
 import { type EmailClassification } from './types.ts'
 
 export async function resolveInboundEmailClassification(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	envelopeFrom: string
 	authResults: string | null

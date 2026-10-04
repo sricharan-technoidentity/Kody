@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { jsonResponse } from '#worker/json-response.ts'
 import {
 	generateAuthenticationOptions,
@@ -271,7 +272,7 @@ export function createWebauthnAuthenticationHandler(env: Env) {
 			const credentialId = body.response.id
 			const accountDb =
 				typeof credentialId === 'string'
-					? await resolveTokenOwnerDb<D1Database | PgDatabase>({
+					? await resolveTokenOwnerDb<SqlDatabase | PgDatabase>({
 							db: env.APP_DB,
 							forUser: getAccountWriterFactory(env),
 							kind: 'passkey',

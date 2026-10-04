@@ -1,14 +1,18 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
-import { createSuccessfulDeletionEnv } from '#worker/test-support/account-deletion.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import {
+	createSuccessfulDeletionEnv,
+	createJobsBindingStub,
+} from '#worker/test-support/account-deletion.ts'
 import {
 	auditEventSummaries,
 	logAuditEventSpy,
 } from '#worker/test-support/audit-log-spy.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { adminUnverifiedAccountPurgeRunCapability } from './admin-unverified-account-purge-run.ts'
 
@@ -18,45 +22,47 @@ function daysAgo(days: number) {
 	return new Date(Date.now() - days * millisecondsPerDay).toISOString()
 }
 
-function createAppDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(
+async function createAppDb() {
+	const sqlite = await createTestPg()
+
+	return {
 		sqlite,
-		new URL('../../../../migrations/', import.meta.url),
-	)
-	applyAllMigrations(
-		sqlite,
-		new URL('../../../../../worker/migrations-jobs/', import.meta.url),
-	)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+		db: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	}
 }
 
-function seedUnverifiedUser(
-	sqlite: DatabaseSync,
+async function seedUnverifiedUser(
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
 	input: { username: string; email: string; createdAt: string },
 ) {
 	const stableUserId = testStableUserIdFromEmail(input.email)
-	sqlite
-		.prepare(
-			`INSERT INTO users (
+	await pgQuery(sqlite).run(
+		`INSERT INTO users (
 				username, email, password_hash, stable_user_id, account_type, created_at
 			) VALUES (?, ?, 'hash', ?, 'person', ?)`,
-		)
-		.run(input.username, input.email, stableUserId, input.createdAt)
+		input.username,
+		input.email,
+		stableUserId,
+		input.createdAt,
+	)
 	return { stableUserId, ...input }
 }
 
-function userRow(sqlite: DatabaseSync, username: string) {
-	return sqlite
-		.prepare(`SELECT deleting_at FROM users WHERE username = ?`)
-		.get(username) as { deleting_at: string | null } | undefined
+async function userRow(
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
+	username: string,
+) {
+	return (await pgQuery(sqlite).get(
+		`SELECT deleting_at FROM users WHERE username = ?`,
+		username,
+	)) as { deleting_at: string | null } | undefined
 }
 
 /**
  * Fails the memory inventory select so `deleteUserAccount` throws an
  * `AccountDeletionInventoryError` after the purge has claimed the row.
  */
-function withFailingMemoryInventory(db: D1Database): D1Database {
+function withFailingMemoryInventory(db: SqlDatabase): SqlDatabase {
 	const originalPrepare = db.prepare.bind(db)
 	return {
 		...db,
@@ -66,7 +72,7 @@ function withFailingMemoryInventory(db: D1Database): D1Database {
 			}
 			return originalPrepare(query)
 		},
-	} as D1Database
+	} as SqlDatabase
 }
 
 function createContext(roles: Array<string>, env: Env) {
@@ -85,8 +91,8 @@ function createContext(roles: Array<string>, env: Env) {
 }
 
 test('adminUnverifiedAccountPurgeRun is admin-only and validates batchSize', async () => {
-	const { db } = createAppDb()
-	const env = createSuccessfulDeletionEnv(db) as Env
+	const { db, sqlite } = await createAppDb()
+	const env = createDeletionEnv(db, sqlite) as Env
 	await expect(
 		adminUnverifiedAccountPurgeRunCapability.handler(
 			{ dryRun: true },
@@ -117,23 +123,23 @@ test('adminUnverifiedAccountPurgeRun is admin-only and validates batchSize', asy
 })
 
 test('adminUnverifiedAccountPurgeRun dryRun lists the claim page without claiming or deleting', async () => {
-	const { sqlite, db } = createAppDb()
-	const stale = seedUnverifiedUser(sqlite, {
+	const { sqlite, db } = await createAppDb()
+	const stale = await seedUnverifiedUser(sqlite, {
 		username: 'stale',
 		email: 'stale@example.com',
 		createdAt: daysAgo(12),
 	})
-	const older = seedUnverifiedUser(sqlite, {
+	const older = await seedUnverifiedUser(sqlite, {
 		username: 'older',
 		email: 'older@example.com',
 		createdAt: daysAgo(9),
 	})
-	seedUnverifiedUser(sqlite, {
+	await seedUnverifiedUser(sqlite, {
 		username: 'young',
 		email: 'young@example.com',
 		createdAt: daysAgo(2),
 	})
-	const ctx = createContext(['admin'], createSuccessfulDeletionEnv(db) as Env)
+	const ctx = createContext(['admin'], createDeletionEnv(db, sqlite) as Env)
 
 	const result = await adminUnverifiedAccountPurgeRunCapability.handler(
 		{ dryRun: true },
@@ -152,8 +158,8 @@ test('adminUnverifiedAccountPurgeRun dryRun lists the claim page without claimin
 		],
 	})
 	expect(JSON.stringify(result)).not.toMatch(/@example\.com|stale|older/)
-	expect(userRow(sqlite, 'stale')).toEqual({ deleting_at: null })
-	expect(userRow(sqlite, 'older')).toEqual({ deleting_at: null })
+	expect(await userRow(sqlite, 'stale')).toEqual({ deleting_at: null })
+	expect(await userRow(sqlite, 'older')).toEqual({ deleting_at: null })
 	expect(auditEventSummaries()).toEqual([
 		'adminUnverifiedAccountPurgeRun:success',
 	])
@@ -177,13 +183,13 @@ test('adminUnverifiedAccountPurgeRun dryRun lists the claim page without claimin
 
 test('adminUnverifiedAccountPurgeRun surfaces a failing delete per account and releases the claim', async () => {
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createAppDb()
-	const failing = seedUnverifiedUser(sqlite, {
+	const { sqlite, db } = await createAppDb()
+	const failing = await seedUnverifiedUser(sqlite, {
 		username: 'failing',
 		email: 'failing@example.com',
 		createdAt: daysAgo(10),
 	})
-	const env = createSuccessfulDeletionEnv(withFailingMemoryInventory(db)) as Env
+	const env = createDeletionEnv(db, sqlite, true) as Env
 	const ctx = createContext(['admin'], env)
 
 	const result = await adminUnverifiedAccountPurgeRunCapability.handler({}, ctx)
@@ -211,7 +217,7 @@ test('adminUnverifiedAccountPurgeRun surfaces a failing delete per account and r
 		],
 	})
 	expect(JSON.stringify(result)).not.toMatch(/@example\.com|failing/)
-	expect(userRow(sqlite, 'failing')).toEqual({ deleting_at: null })
+	expect(await userRow(sqlite, 'failing')).toEqual({ deleting_at: null })
 	expect(consoleWarn).toHaveBeenCalledWith(
 		'unverified_account_purge_failed',
 		expect.objectContaining({ userId: failing.stableUserId }),
@@ -238,18 +244,18 @@ test('adminUnverifiedAccountPurgeRun surfaces a failing delete per account and r
 })
 
 test('adminUnverifiedAccountPurgeRun purges eligible accounts and reports them by stable id', async () => {
-	const { sqlite, db } = createAppDb()
-	const stale = seedUnverifiedUser(sqlite, {
+	const { sqlite, db } = await createAppDb()
+	const stale = await seedUnverifiedUser(sqlite, {
 		username: 'stale',
 		email: 'stale@example.com',
 		createdAt: daysAgo(8),
 	})
-	seedUnverifiedUser(sqlite, {
+	await seedUnverifiedUser(sqlite, {
 		username: 'young',
 		email: 'young@example.com',
 		createdAt: daysAgo(1),
 	})
-	const ctx = createContext(['admin'], createSuccessfulDeletionEnv(db) as Env)
+	const ctx = createContext(['admin'], createDeletionEnv(db, sqlite) as Env)
 
 	const result = await adminUnverifiedAccountPurgeRunCapability.handler(
 		{ batchSize: 5 },
@@ -266,10 +272,47 @@ test('adminUnverifiedAccountPurgeRun purges eligible accounts and reports them b
 			{ stableUserId: stale.stableUserId, ageDays: 8, outcome: 'purged' },
 		],
 	})
-	expect(userRow(sqlite, 'stale')).toBeUndefined()
-	expect(userRow(sqlite, 'young')).toEqual({ deleting_at: null })
+	expect(await userRow(sqlite, 'stale')).toBeUndefined()
+	expect(await userRow(sqlite, 'young')).toEqual({ deleting_at: null })
 	expect(auditEventSummaries()).toEqual([
 		'unverified_account_purged:success',
 		'adminUnverifiedAccountPurgeRun:success',
 	])
 })
+
+function createDeletionEnv(
+	db: SqlDatabase,
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
+	failInventory = false,
+) {
+	const env = createSuccessfulDeletionEnv(db) as Env
+	env.ACCOUNT_SUBJECT_PURGER = (userId) => {
+		const purger = createPgDatabase({
+			connection: sqlite,
+			role: 'kody_subject_purger',
+			userId,
+		})
+		return (
+			failInventory ? withFailingMemoryInventory(purger) : purger
+		) as ReturnType<NonNullable<Env['ACCOUNT_SUBJECT_PURGER']>>
+	}
+	env.APP_DB_FOR_USER = (userId) =>
+		createPgDatabase({ connection: sqlite, role: 'kody_writer', userId })
+
+	const jobsFor = (userId: string) =>
+		createJobsBindingStub(
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
+		)
+	env.JOBS = {
+		listJobIdsForUser: (input: { userId: string }) =>
+			jobsFor(input.userId).listJobIdsForUser(input),
+		listJobStorageIdsForUser: (input: { userId: string }) =>
+			jobsFor(input.userId).listJobStorageIdsForUser(input),
+		purgeUser: (input: { userId: string }) =>
+			jobsFor(input.userId).purgeUser(input),
+		purgeUserJobsData: (input: { userId: string }) =>
+			jobsFor(input.userId).purgeUserJobsData(input),
+	} as unknown as Env['JOBS']
+
+	return env
+}

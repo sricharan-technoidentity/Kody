@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import type * as Destinations from '#worker/email/destinations.ts'
@@ -45,7 +46,7 @@ function createUsersDb() {
 				first: async () => ({ email_verified_at: '2026-01-01T00:00:00.000Z' }),
 			}),
 		}),
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function createEnv() {

@@ -11,7 +11,7 @@ const sharedGraphTables = new Set([
 
 const mailboxSqlFiles = new Set([
 	'packages/worker/src/email/mailbox-delivery-events.ts',
-	'packages/worker/src/email/mailbox-do.ts',
+	'packages/worker/src/email/mailbox-service.ts',
 	'packages/worker/src/email/mailbox-export.ts',
 	'packages/worker/src/email/mailbox-inbound-bootstrap.ts',
 	'packages/worker/src/email/mailbox-inbound-cleanup-ledger.ts',
@@ -28,6 +28,7 @@ const mailboxSqlFiles = new Set([
 const allowedSharedGraphSqlFiles = mailboxSqlFiles
 const sharedGraphD1SqlFiles = new Set<string>()
 const dynamicD1SqlFiles = new Set([
+	'packages/worker/src/email/mailbox-sql.ts',
 	'packages/worker/src/email/system-email-authority.ts',
 	'packages/worker/src/email/system-email-graph-store.ts',
 	'packages/worker/src/email/system-email.ts',

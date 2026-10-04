@@ -1,89 +1,72 @@
-import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { startCloudflareMock } from '#worker/test-support/cloudflare-mock-server.ts'
-import {
-	e2eCloudflareMockAccountId,
-	writeE2eCloudflareMockState,
-} from './e2e-cloudflare-mock-state.ts'
-import { isExecutedDirectly, resolveNpmCommand } from './node-runtime.ts'
-import { spawnChildProcess, stopChildProcessTree } from './dev-process-utils.ts'
-
-function runSetup(command: string, args: Array<string>) {
-	const result = spawnSync(command, args, {
-		stdio: 'inherit',
-		env: process.env,
-	})
-	const status = result.status ?? 1
-	if (status !== 0) process.exit(status)
-}
+import { startLocalPoc } from './demo/bootstrap.ts'
+import { writeE2ePocState } from './e2e-poc-state.ts'
+import { isExecutedDirectly } from './node-runtime.ts'
 
 async function startE2eWebServer() {
-	runSetup(process.execPath, ['tools/prepare-e2e-env.ts'])
-	runSetup(resolveNpmCommand(), ['run', 'migrate:e2e'])
-
-	const mock = await startCloudflareMock(`e2e-cloudflare-${randomUUID()}`)
-	try {
-		await writeE2eCloudflareMockState({
-			origin: mock.origin,
-			token: mock.token,
-			accountId: e2eCloudflareMockAccountId,
-		})
-	} catch (error) {
-		await mock[Symbol.asyncDispose]()
-		throw error
-	}
-
-	const extraArgs = process.argv.slice(2)
-	const wrangler = spawnChildProcess(
-		process.execPath,
-		[
-			'--env-file=packages/worker/.env',
-			'node_modules/vite/bin/vite.js',
-			'--host',
-			'127.0.0.1',
-			...extraArgs,
-		],
-		{
-			stdio: 'inherit',
-			env: {
-				...process.env,
-				CLOUDFLARE_API_BASE_URL: mock.origin,
-				CLOUDFLARE_API_TOKEN: mock.token,
-				CLOUDFLARE_ACCOUNT_ID: e2eCloudflareMockAccountId,
-				CLOUDFLARE_API_SOURCE_SNAPSHOTS: 'true',
-				WRANGLER_IS_LOCAL_DEV: 'true',
-				WRANGLER_PERSIST_TO: '.wrangler/state/e2e',
-				X_LOCAL_EXPLORER: 'false',
-			},
+	const args = process.argv.slice(2)
+	const portIndex = args.indexOf('--port')
+	const port = portIndex < 0 ? 3847 : Number(args[portIndex + 1])
+	const token = randomUUID()
+	let env: Awaited<ReturnType<typeof startLocalPoc>>['env']
+	const runtime = await startLocalPoc({
+		port,
+		async beforeServe(created) {
+			env = created
+			await env.seedUser({
+				email: 'jane@example.com',
+				username: 'jane',
+				password: 'ilikecode',
+			})
+			await env.seedUser({
+				email: 'kody@example.com',
+				username: 'kody',
+				password: 'ilikecode',
+				admin: true,
+			})
 		},
-	)
-
-	let shuttingDown = false
-	async function shutdown(exitCode: number) {
-		if (shuttingDown) return
-		shuttingDown = true
-		await stopChildProcessTree(wrangler)
-		await mock[Symbol.asyncDispose]()
-		process.exit(exitCode)
+		async control(request) {
+			const url = new URL(request.url)
+			if (url.pathname.startsWith('/__poc/')) {
+				if (request.headers.get('Authorization') !== `Bearer ${token}`)
+					return new Response(null, { status: 403 })
+				if (url.pathname === '/__poc/messages')
+					return Response.json({
+						count: env.outbox.length,
+						messages: env.outbox.map((mail) => ({
+							...mail,
+							from_email: mail.from,
+							to_json: JSON.stringify(mail.to),
+						})),
+					})
+				const body = (await request.json()) as {
+					sql?: string
+					user?: Parameters<typeof env.seedUser>[0]
+				}
+				if (url.pathname === '/__poc/seed' && body.user)
+					await env.seedUser(body.user)
+				else if (url.pathname === '/__poc/sql' && body.sql)
+					await env.pg.exec(body.sql)
+				else return new Response(null, { status: 404 })
+				return Response.json({ ok: true })
+			}
+			return undefined
+		},
+	})
+	await writeE2ePocState({ origin: runtime.origin, token })
+	console.info(`Node POC front door: ${runtime.origin}`)
+	let closing = false
+	async function close() {
+		if (closing) return
+		closing = true
+		await runtime.close()
+		process.exit(0)
 	}
-
-	wrangler.once('exit', (code) => {
-		void shutdown(code ?? 1)
-	})
-	wrangler.once('error', () => {
-		void shutdown(1)
-	})
-	process.once('SIGINT', () => {
-		void shutdown(0)
-	})
-	process.once('SIGTERM', () => {
-		void shutdown(0)
-	})
+	process.once('SIGINT', () => void close())
+	process.once('SIGTERM', () => void close())
 }
-
-if (isExecutedDirectly(import.meta.url)) {
-	void startE2eWebServer().catch((error) => {
-		console.error(error instanceof Error ? error.message : error)
-		process.exit(1)
+if (isExecutedDirectly(import.meta.url))
+	void startE2eWebServer().catch((error: unknown) => {
+		console.error(error)
+		process.exitCode = 1
 	})
-}

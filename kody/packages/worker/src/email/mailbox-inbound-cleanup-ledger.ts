@@ -1,3 +1,4 @@
+import { type MailboxSql } from './mailbox-sql.ts'
 import {
 	assertMailboxCanonicalIsoTimestamp,
 	assertMailboxInboundDeliveryState,
@@ -18,8 +19,8 @@ import {
 } from './mailbox-inbound-ledger.ts'
 import { mailboxInboundOrphanVerificationMs } from './mailbox-inbound-ledger-shared.ts'
 
-export function claimMailboxInboundDeliveryCleanup(
-	sql: SqlStorage,
+export async function claimMailboxInboundDeliveryCleanup(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		expectedState: MailboxInboundDeliveryState
@@ -27,7 +28,7 @@ export function claimMailboxInboundDeliveryCleanup(
 		staleBefore: string
 		now?: string
 	},
-): MailboxClaimInboundDeliveryCleanupResult {
+): Promise<MailboxClaimInboundDeliveryCleanupResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const expectedState = assertMailboxInboundDeliveryState(input.expectedState)
@@ -39,7 +40,7 @@ export function claimMailboxInboundDeliveryCleanup(
 		input.staleBefore,
 		'staleBefore',
 	)
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current) return { status: 'not-claimed', delivery: null }
 	const leaseExpiredBefore = new Date(
 		Date.parse(now) - mailboxInboundStorageLeaseMs,
@@ -69,7 +70,7 @@ export function claimMailboxInboundDeliveryCleanup(
 		cleanupLeaseAt: now,
 		updatedAt: now,
 	}
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			state = 'cleaning',
@@ -102,7 +103,7 @@ export function claimMailboxInboundDeliveryCleanup(
 		leaseExpiredBefore,
 		now,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (
 		cursor.rowsWritten > 0 &&
 		after?.state === 'cleaning' &&
@@ -113,21 +114,21 @@ export function claimMailboxInboundDeliveryCleanup(
 	return { status: 'not-claimed', delivery: after }
 }
 
-export function releaseMailboxInboundDeliveryCleanup(
-	sql: SqlStorage,
+export async function releaseMailboxInboundDeliveryCleanup(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		cleanupLease: string
 		now?: string
 	},
-): MailboxReleaseInboundDeliveryCleanupResult {
+): Promise<MailboxReleaseInboundDeliveryCleanupResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const cleanupLease = assertMailboxNonEmptyString(
 		input.cleanupLease,
 		'cleanupLease',
 	)
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (
 		!current ||
 		current.state !== 'cleaning' ||
@@ -142,7 +143,7 @@ export function releaseMailboxInboundDeliveryCleanup(
 	}
 	delete next.cleanupLease
 	delete next.cleanupLeaseAt
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			state = 'pending',
@@ -160,28 +161,28 @@ export function releaseMailboxInboundDeliveryCleanup(
 		cleanupLease,
 	)
 	if (cursor.rowsWritten < 1) return { status: 'not-held' }
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	return after
 		? { status: 'released', delivery: after }
 		: { status: 'not-held' }
 }
 
-export function markMailboxInboundDeliveryOrphanCleaned(
-	sql: SqlStorage,
+export async function markMailboxInboundDeliveryOrphanCleaned(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		cleanupLease: string
 		outcome: 'deleted' | 'delete-failed'
 		now?: string
 	},
-): MailboxMarkInboundDeliveryOrphanCleanedResult {
+): Promise<MailboxMarkInboundDeliveryOrphanCleanedResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const cleanupLease = assertMailboxNonEmptyString(
 		input.cleanupLease,
 		'cleanupLease',
 	)
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (
 		!current ||
 		current.state !== 'cleaning' ||
@@ -201,7 +202,7 @@ export function markMailboxInboundDeliveryOrphanCleaned(
 	}
 	delete next.cleanupLease
 	delete next.cleanupLeaseAt
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			state = 'orphan-cleaned',
@@ -214,14 +215,14 @@ export function markMailboxInboundDeliveryOrphanCleaned(
 			AND state = 'cleaning'
 			AND cleanup_lease = ?`,
 		detailJsonFromMailboxInboundSnapshot(next),
-		next.cleanupRetryAt,
+		next.cleanupRetryAt ?? null,
 		now,
 		deliveryId,
 		mailboxInboundProvider,
 		cleanupLease,
 	)
 	if (cursor.rowsWritten < 1) return { status: 'lease-lost' }
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	return after
 		? { status: 'orphan-cleaned', delivery: after }
 		: { status: 'lease-lost' }

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
@@ -51,7 +52,7 @@ function createWaitingTestDb(input: {
 					},
 				}
 			},
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 	}
 }
 

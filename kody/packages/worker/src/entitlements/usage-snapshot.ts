@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcDayKey, utcWeekStart } from '@kody-internal/shared/date-keys.ts'
 import {
 	entitlementResourceLabels,
@@ -54,7 +55,7 @@ export type EntitlementUsageSnapshot = {
 }
 
 async function readVisibleEntitlementUsage(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Env
 	userId: string
 	resource: EntitlementResource
@@ -82,7 +83,7 @@ async function readVisibleEntitlementUsage(input: {
 }
 
 export async function readEntitlementUsageSnapshot(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Env
 	usageUserId: string
 	plan: PlanName

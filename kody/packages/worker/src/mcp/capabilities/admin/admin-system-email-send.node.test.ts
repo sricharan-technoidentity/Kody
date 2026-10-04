@@ -1,7 +1,10 @@
-import { DatabaseSync } from 'node:sqlite'
+import {
+	createTestPg,
+	createTestAuditPg,
+} from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as AuditLog from '#worker/audit-log.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 
@@ -27,24 +30,16 @@ vi.mock('#worker/email/system-outbound.ts', () => ({
 const { adminSystemEmailSendCapability } =
 	await import('./admin-system-email-send.ts')
 
-function createAdminCtx() {
-	const auditSqlite = new DatabaseSync(':memory:')
-	auditSqlite.exec(`
-		CREATE TABLE audit_events (
-			id INTEGER PRIMARY KEY,
-			category TEXT NOT NULL,
-			action TEXT NOT NULL,
-			result TEXT NOT NULL,
-			email_hash TEXT,
-			ip_hash TEXT,
-			client_id TEXT,
-			path TEXT,
-			reason TEXT,
-			timestamp TEXT NOT NULL
-		);
-	`)
+async function createAdminCtx() {
+	const auditSqlite = await createTestAuditPg()
+
 	return {
-		env: { AUDIT_DB: createD1FromSqlite(auditSqlite) } as Env,
+		env: {
+			AUDIT_DB: createPgDatabase({
+				connection: auditSqlite,
+				role: 'kody_audit_writer',
+			}),
+		} as Env,
 		callerContext: createMcpCallerContext({
 			baseUrl: 'https://heykody.dev',
 			user: {
@@ -60,7 +55,7 @@ function createAdminCtx() {
 test('adminSystemEmailSend is admin-gated, validates input, and audits a redacted send', async () => {
 	expect(adminSystemEmailSendCapability.requiredRole).toBe('admin')
 	expect(adminSystemEmailSendCapability.readOnly).toBe(false)
-	const ctx = createAdminCtx()
+	const ctx = await createAdminCtx()
 	mockModule.sendSystemEmail.mockClear()
 
 	await expect(

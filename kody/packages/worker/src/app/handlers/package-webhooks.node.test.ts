@@ -1,9 +1,9 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { createCommunityPackageWebhooksApiHandler } from '#app/handlers/package-webhooks.ts'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import {
 	type PackageWebhooksActionPayload,
@@ -85,26 +85,14 @@ vi.mock('#worker/package-registry/source.ts', () => ({
 	})),
 }))
 
-function createEnv() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE webhook_endpoints (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			package_id TEXT NOT NULL,
-			webhook_name TEXT NOT NULL,
-			url_secret_hash TEXT NOT NULL,
-			url_secret_encrypted TEXT,
-			previous_url_secret_hash TEXT,
-			previous_url_secret_expires_at TEXT,
-			enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-			created_at TEXT NOT NULL,
-			rotated_at TEXT NOT NULL
-		);
-		CREATE UNIQUE INDEX idx_webhook_endpoints_user_package_name
-		ON webhook_endpoints(user_id, package_id, webhook_name);
-	`)
-	const db = createD1FromSqlite(sqlite)
+async function createEnv() {
+	const sqlite = await createTestPg()
+
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: await createStableUserIdFromEmail('owner@example.com'),
+	})
 	return {
 		env: {
 			APP_DB: db,
@@ -162,7 +150,7 @@ test('package webhooks API mints, reveals, rotates, and toggles a declared webho
 		username: 'owner',
 		mcpUser: { userId },
 	})
-	const { env, db } = createEnv()
+	const { env, db } = await createEnv()
 	const handler = createCommunityPackageWebhooksApiHandler(env)
 
 	const listed = await runHandler(handler, getRequest())
@@ -356,7 +344,7 @@ test('package webhooks API is owner-only: another username or an unknown package
 		username: 'Owner',
 		mcpUser: { userId },
 	})
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	const handler = createCommunityPackageWebhooksApiHandler(env)
 
 	// Username matching is case-insensitive, like the `/@username` pages.
@@ -399,7 +387,7 @@ test('package webhooks API rejects unknown webhooks, bad bodies, and anonymous c
 		username: 'owner',
 		mcpUser: { userId },
 	})
-	const { env, db } = createEnv()
+	const { env, db } = await createEnv()
 	const handler = createCommunityPackageWebhooksApiHandler(env)
 
 	const undeclared = await runHandler(
@@ -447,7 +435,12 @@ test('package webhooks API rejects unknown webhooks, bad bodies, and anonymous c
 
 	// Infrastructure failures are audited with their detail but reach the
 	// browser only as the generic per-intent message.
-	await db.prepare('DROP TABLE webhook_endpoints').run()
+	const originalPrepare = db.prepare.bind(db)
+	db.prepare = (query) => {
+		if (/webhook_endpoints/.test(query))
+			throw new Error('simulated endpoint database outage')
+		return originalPrepare(query)
+	}
 	const consoleError = vi
 		.spyOn(console, 'error')
 		.mockImplementation(() => undefined)
@@ -467,7 +460,7 @@ test('package webhooks API rejects unknown webhooks, bad bodies, and anonymous c
 		expect.objectContaining({
 			action: 'webhook_url_mint',
 			result: 'failure',
-			reason: expect.stringContaining('no such table'),
+			reason: expect.stringContaining('simulated endpoint database outage'),
 		}),
 	)
 

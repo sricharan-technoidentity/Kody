@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { communityIndexOverviewCandidateLimitPerCategory } from '#universal/community-categories.ts'
 import { durableObjectIsolateMemoryResetMessage } from '#worker/sentry-options.ts'
@@ -258,7 +259,7 @@ const testCommunityAssets = {
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: testBundleArtifactsKv,
 		COMMUNITY_ASSETS: testCommunityAssets,
 	} as Env
@@ -273,7 +274,7 @@ function createEnvWithUsername(username: string) {
 					first: async () => ({ username }),
 				}),
 			}),
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 	} as Env
 }
 

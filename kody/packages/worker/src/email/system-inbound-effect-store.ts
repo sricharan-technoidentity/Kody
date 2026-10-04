@@ -1,3 +1,5 @@
+import { type SqlStatement } from '@kody-internal/shared/sql-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 import { type InboundDelivery } from './inbound-delivery.ts'
 import {
@@ -10,7 +12,7 @@ import { commitSystemInboundEventMutation } from './system-inbound-delivery-tran
 const systemInboundProvider = 'cloudflare-email-routing'
 
 export async function listDueSystemInboundEffects(input: {
-	db: D1Database
+	db: SqlDatabase
 	now: Date
 	limit: number
 }) {
@@ -65,7 +67,7 @@ export async function listDueSystemInboundEffects(input: {
 }
 
 export async function claimSystemInboundSubscriptionEffect(input: {
-	db: D1Database
+	db: SqlDatabase
 	deliveryId: string
 	finalizationToken: string | undefined
 	now: Date
@@ -83,13 +85,9 @@ export async function claimSystemInboundSubscriptionEffect(input: {
 				`UPDATE system_email_delivery_events
 				SET subscription_effect_state = 'processing',
 					subscription_effect_lease = ?, subscription_effect_lease_at = ?,
-					detail_json = json_set(
-						detail_json, '$.subscriptionEffectState', 'processing',
-						'$.subscriptionEffectLease', ?,
-						'$.subscriptionEffectLeaseAt', ?
-					), updated_at = ?
+					detail_json = (jsonb_set(jsonb_set(jsonb_set((detail_json)::jsonb, '{subscriptionEffectState}', COALESCE(to_jsonb(('processing')::text), 'null'::jsonb)), '{subscriptionEffectLease}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{subscriptionEffectLeaseAt}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)))::text, updated_at = ?
 				WHERE id = ? AND event_type = 'received'
-					AND (? IS NULL OR finalization_token = ?)
+					AND (?::text IS NULL OR finalization_token = ?)
 					AND (
 						subscription_effect_retry_at IS NULL
 						OR subscription_effect_retry_at <= ?
@@ -123,7 +121,7 @@ export async function claimSystemInboundSubscriptionEffect(input: {
 }
 
 export async function completeSystemInboundSubscriptionEffect(input: {
-	db: D1Database
+	db: SqlDatabase
 	deliveryId: string
 	lease: string
 	now: Date
@@ -141,16 +139,7 @@ export async function completeSystemInboundSubscriptionEffect(input: {
 					subscription_effect_lease = NULL,
 					subscription_effect_lease_at = NULL,
 					subscription_effect_retry_at = NULL,
-					detail_json = json_remove(
-						json_remove(
-							json_remove(
-								json_set(
-									detail_json, '$.subscriptionEffectState', 'complete',
-									?, ?
-								), '$.subscriptionEffectLease'
-							), '$.subscriptionEffectLeaseAt'
-						), '$.subscriptionEffectRetryAt'
-					),
+					detail_json = ((detail_json::jsonb || jsonb_build_object('subscriptionEffectState', 'complete', SUBSTRING(?::text FROM 3), ?::text)) - ARRAY['subscriptionEffectLease','subscriptionEffectLeaseAt','subscriptionEffectRetryAt'])::text,
 					needs_effect_reconcile = CASE
 						WHEN usage_effect_recorded_at IS NOT NULL
 							OR usage_effect_suppressed_at IS NOT NULL THEN 0
@@ -171,7 +160,7 @@ export async function completeSystemInboundSubscriptionEffect(input: {
 }
 
 export async function failSystemInboundSubscriptionEffect(input: {
-	db: D1Database
+	db: SqlDatabase
 	deliveryId: string
 	lease: string
 	error: string
@@ -196,17 +185,7 @@ export async function failSystemInboundSubscriptionEffect(input: {
 					subscription_effect_attempt_count = ?,
 					subscription_effect_dead_letter_at = ?,
 					subscription_effect_last_error = ?,
-					detail_json = json_remove(
-						json_remove(
-							json_set(
-								detail_json, '$.subscriptionEffectState', ?,
-								'$.subscriptionEffectRetryAt', ?,
-								'$.subscriptionEffectAttemptCount', ?,
-								'$.subscriptionEffectDeadLetterAt', ?,
-								'$.subscriptionEffectLastError', ?
-							), '$.subscriptionEffectLease'
-						), '$.subscriptionEffectLeaseAt'
-					),
+					detail_json = (((((((jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set((detail_json)::jsonb, '{subscriptionEffectState}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{subscriptionEffectRetryAt}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{subscriptionEffectAttemptCount}', COALESCE(to_jsonb((?)::numeric), 'null'::jsonb)), '{subscriptionEffectDeadLetterAt}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{subscriptionEffectLastError}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)))::text)::jsonb - 'subscriptionEffectLease'))::text)::jsonb - 'subscriptionEffectLeaseAt'))::text,
 					needs_effect_reconcile = CASE
 						WHEN ? AND (
 							usage_effect_recorded_at IS NOT NULL
@@ -236,7 +215,7 @@ export async function failSystemInboundSubscriptionEffect(input: {
 }
 
 export async function recordSystemInboundUsageEffect(input: {
-	db: D1Database
+	db: SqlDatabase
 	delivery: InboundDelivery
 	usageMonth: string
 	usageBytes: number
@@ -245,7 +224,7 @@ export async function recordSystemInboundUsageEffect(input: {
 	includeRollup: boolean
 }) {
 	await assertSystemEmailGraphAuthority(input.db)
-	const before: Array<D1PreparedStatement> = []
+	const before: Array<SqlStatement> = []
 	if (input.includeRollup) {
 		before.push(
 			input.db
@@ -260,13 +239,13 @@ export async function recordSystemInboundUsageEffect(input: {
 						WHERE id = ? AND event_type = 'received'
 							AND usage_effect_recorded_at IS NULL
 							AND usage_effect_suppressed_at IS NULL
-							AND (? IS NULL OR finalization_token = ?)
+							AND (?::text IS NULL OR finalization_token = ?)
 					)
 					ON CONFLICT(user_id, metric, month) DO UPDATE SET
-						event_count = event_count + 1,
+						event_count = usage_rollups.event_count + 1,
 						total_duration_ms =
-							total_duration_ms + excluded.total_duration_ms,
-						total_bytes = total_bytes + excluded.total_bytes,
+							usage_rollups.total_duration_ms + excluded.total_duration_ms,
+						total_bytes = usage_rollups.total_bytes + excluded.total_bytes,
 						updated_at = excluded.updated_at`,
 				)
 				.bind(
@@ -290,13 +269,7 @@ export async function recordSystemInboundUsageEffect(input: {
 				`UPDATE system_email_delivery_events
 				SET usage_effect_recorded_at = ?, usage_month = ?, usage_bytes = ?,
 					usage_duration_ms = ?, usage_effect_retry_at = NULL,
-					detail_json = json_remove(
-						json_set(
-							detail_json, '$.usageEffectRecordedAt', ?,
-							'$.usageMonth', ?, '$.usageBytes', ?,
-							'$.usageDurationMs', ?
-						), '$.usageEffectRetryAt'
-					),
+					detail_json = ((((jsonb_set(jsonb_set(jsonb_set(jsonb_set((detail_json)::jsonb, '{usageEffectRecordedAt}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{usageMonth}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{usageBytes}', COALESCE(to_jsonb((?)::numeric), 'null'::jsonb)), '{usageDurationMs}', COALESCE(to_jsonb((?)::numeric), 'null'::jsonb)))::text)::jsonb - 'usageEffectRetryAt'))::text,
 					needs_effect_reconcile = CASE
 						WHEN subscription_effect_state IN ('complete', 'dead-letter')
 						THEN 0 ELSE 1 END,
@@ -304,7 +277,7 @@ export async function recordSystemInboundUsageEffect(input: {
 				WHERE id = ? AND event_type = 'received'
 					AND usage_effect_recorded_at IS NULL
 					AND usage_effect_suppressed_at IS NULL
-					AND (? IS NULL OR finalization_token = ?)`,
+					AND (?::text IS NULL OR finalization_token = ?)`,
 			)
 			.bind(
 				input.now.toISOString(),
@@ -324,7 +297,7 @@ export async function recordSystemInboundUsageEffect(input: {
 }
 
 export async function listSystemInboundUsageRows(input: {
-	db: D1Database
+	db: SqlDatabase
 	months: [string, string]
 }) {
 	await assertSystemEmailGraphAuthority(input.db)

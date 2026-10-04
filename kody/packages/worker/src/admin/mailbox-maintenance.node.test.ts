@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { systemEmailOwnerId } from '#worker/email/email-owner.ts'
@@ -96,7 +97,7 @@ async function createUsersDb(userIds: ReadonlyArray<string>) {
 		)
 	// Operator maintenance selects the account-administration role after authorization.
 	const db = createPgDatabase({ connection: database.pg, role: 'kody_admin' })
-	return { ...database, db: db as unknown as D1Database }
+	return { ...database, db: db as unknown as SqlDatabase }
 }
 
 test('maintenance status reports authority and coordination health', async () => {

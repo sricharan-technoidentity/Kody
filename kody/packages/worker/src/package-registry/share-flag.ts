@@ -35,7 +35,7 @@ export async function isPackageShareGrantsEnabled(input: {
 }
 
 async function setPackageShareGrantsEnabledForTests(
-	db: D1Database,
+	db: SqlDatabase,
 	enabled: boolean,
 ) {
 	await db
@@ -48,10 +48,10 @@ async function setPackageShareGrantsEnabledForTests(
 		.run()
 }
 
-export async function enablePackageShareGrantsForTests(db: D1Database) {
+export async function enablePackageShareGrantsForTests(db: SqlDatabase) {
 	await setPackageShareGrantsEnabledForTests(db, true)
 }
 
-export async function disablePackageShareGrantsForTests(db: D1Database) {
+export async function disablePackageShareGrantsForTests(db: SqlDatabase) {
 	await setPackageShareGrantsEnabledForTests(db, false)
 }

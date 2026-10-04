@@ -40,9 +40,8 @@ function createEnv() {
 		getSnapshot: mocks.getSnapshot,
 	}
 	return {
-		MCP_CLIENT_HUB: {
-			idFromName: (name: string) => name,
-			get: () => stub,
+		MCP_CLIENTS: {
+			forUser: () => stub,
 		},
 	} as unknown as Env
 }

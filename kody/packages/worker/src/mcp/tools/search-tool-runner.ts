@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { getPackageAppBaseUrl } from '#worker/app-base-url.ts'
 import { stampFirstSearch } from '#worker/identity/activation-stamps.ts'
 import { resolvePublicUsername } from '#worker/identity/user-lookup.ts'

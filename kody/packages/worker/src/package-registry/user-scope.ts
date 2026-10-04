@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type McpUserContext } from '@kody-internal/shared/chat.ts'
 import {
 	getUsernameFormatValidationError,
@@ -19,7 +20,7 @@ function normalizePackageScopeUsername(value: unknown) {
 	return username
 }
 
-export async function getPackageScopeByUserId(db: D1Database, userId: string) {
+export async function getPackageScopeByUserId(db: SqlDatabase, userId: string) {
 	const row = await db
 		.prepare(
 			`SELECT username
@@ -49,7 +50,7 @@ export async function getPackageScopeByUserId(db: D1Database, userId: string) {
  * it — that snapshot is refreshed from D1 on every MCP/request auth path.
  */
 export async function getMcpUserPackageScope(
-	db: D1Database,
+	db: SqlDatabase,
 	user: McpUserContext,
 ) {
 	const contextUsername = user.username?.trim()

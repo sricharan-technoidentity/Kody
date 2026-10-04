@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	parseMissingSecretMessage,
@@ -26,7 +27,7 @@ vi.mock('#worker/package-registry/repo.ts', () => ({
 const { createUnresolvedSecretMessage } = await import('./unresolved-secret.ts')
 
 test('unresolved secret errors distinguish inaccessible scopes from a true miss', async () => {
-	const env = { APP_DB: {} as D1Database }
+	const env = { APP_DB: {} as SqlDatabase }
 	const userId = 'user-1'
 	const baseUrl = 'https://example.com'
 	const secretName = 'discordBotToken'

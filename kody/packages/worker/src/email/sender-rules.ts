@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	type EmailSenderRuleEffect,
 	type EmailSenderRuleKind,
@@ -76,7 +77,7 @@ function mapSenderRuleRow(row: Record<string, unknown>): EmailSenderRuleRecord {
 }
 
 export async function listEmailSenderRules(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<Array<EmailSenderRuleRecord>> {
 	const result = await input.db
@@ -92,7 +93,7 @@ export async function listEmailSenderRules(input: {
 }
 
 export async function upsertEmailSenderRule(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	kind: EmailSenderRuleKind
 	value: string
@@ -181,7 +182,7 @@ export async function upsertEmailSenderRule(input: {
 }
 
 export async function deleteEmailSenderRule(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	ruleId: string
 }): Promise<boolean> {
@@ -197,7 +198,7 @@ export async function deleteEmailSenderRule(input: {
 }
 
 export async function evaluateEmailSenderRules(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	senderAddress: string
 }): Promise<{

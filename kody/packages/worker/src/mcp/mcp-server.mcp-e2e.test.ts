@@ -71,11 +71,8 @@ test('authenticated MCP search shows admin capabilities only to admin users', as
 		{ persistDir: database.persistDir },
 	)
 
-	// Role writes go through a separate `wrangler d1 execute --persist-to`
-	// process. Auth and the capability registry load roles per request
-	// (`request-auth-cache` is a WeakMap; registry cache is not keyed by
-	// role), so this is local D1 snapshot lag, not a production stale-role
-	// cache. Poll until the running worker observes the grant.
+	// Auth and the capability registry load roles per request. Confirm that
+	// the Node server observes the newly granted administrator role.
 	await expect
 		.poll(
 			async () => {

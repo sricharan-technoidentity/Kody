@@ -1,61 +1,195 @@
+import { env } from '#worker/test-support/runner-suite.ts'
 import { expect, test, vi } from 'vitest'
+import { McpCallerError } from '#mcp/caller-error.ts'
+import { getStaticRegistry } from '#mcp/capabilities/registry.ts'
+import { createMcpCallerContext } from '#mcp/context.ts'
+import {
+	callerContextFields,
+	errorFields,
+	logMcpEvent,
+} from '#mcp/observability.ts'
+import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 
-const sentryMock = vi.hoisted(() => ({
-	isInitialized: vi.fn(() => true),
-	getClient: vi.fn(() => ({ getOptions: () => ({ dsn: 'https://example' }) })),
-	withScope: vi.fn((callback: (scope: ScopeStub) => void) => {
-		callback(sentryMock.scope)
-	}),
-	captureException: vi.fn(),
-	captureMessage: vi.fn(),
-	scope: {
-		setLevel: vi.fn(),
-		setTag: vi.fn(),
-		setContext: vi.fn(),
-		setUser: vi.fn(),
-	},
+const repoMockModule = vi.hoisted(() => ({
+	ensureEntitySource: vi.fn(),
+	syncArtifactSourceSnapshot: vi.fn(),
 }))
 
-type ScopeStub = typeof sentryMock.scope
-
-vi.mock('@sentry/cloudflare', () => ({
-	isInitialized: (...args: Array<unknown>) => sentryMock.isInitialized(...args),
-	getClient: (...args: Array<unknown>) => sentryMock.getClient(...args),
-	withScope: (...args: Array<unknown>) => sentryMock.withScope(...args),
-	captureException: (...args: Array<unknown>) =>
-		sentryMock.captureException(...args),
-	captureMessage: (...args: Array<unknown>) =>
-		sentryMock.captureMessage(...args),
-	instrumentDurableObjectWithSentry: (
-		_getOptions: unknown,
-		durableObjectClass: unknown,
-	) => durableObjectClass,
+vi.mock('#worker/repo/source-service.ts', () => ({
+	ensureEntitySource: (...args: Array<unknown>) =>
+		repoMockModule.ensureEntitySource(...args),
 }))
 
-const { logMcpEvent } = await import('./observability.ts')
-const { assertKodyDescriptionLength, KODY_DESCRIPTION_MAX_LENGTH } =
-	await import('#worker/package-registry/types.ts')
-const { McpCallerError } = await import('./caller-error.ts')
-const { executeInvokeMissingInputMessage } = await import('./execute-invoke.ts')
-const { PackageSecretAccessDeniedError } =
-	await import('./secrets/package-access.ts')
-const { CommunityActionError } = await import('#worker/community/errors.ts')
-const { EntitlementLimitError } = await import('#worker/entitlements/errors.ts')
-const { PackageNameInputError, normalizePackageNameInput } =
-	await import('#worker/package-registry/package-name.ts')
-const { PackageScopeAccessError } =
-	await import('#worker/package-registry/package-owner.ts')
-const { SavedPackageNotFoundError } =
-	await import('#worker/package-runtime/package-import-resolution.ts')
-const { UserCodeError } = await import('#worker/user-code-error.ts')
+vi.mock('#worker/repo/source-sync.ts', () => ({
+	syncArtifactSourceSnapshot: (...args: Array<unknown>) =>
+		repoMockModule.syncArtifactSourceSnapshot(...args),
+}))
 
-function captureMcpEvents(run: () => void) {
-	sentryMock.captureException.mockClear()
-	sentryMock.captureMessage.mockClear()
-	sentryMock.withScope.mockClear()
-	sentryMock.scope.setLevel.mockClear()
-	sentryMock.scope.setUser.mockClear()
+function createTestEnv(overrides: Record<string, unknown> = {}) {
+	return {
+		USER_METERS: env.USER_METERS,
+		RUNNER_BUNDLER: env.RUNNER_BUNDLER,
+		RUNNER_LOADER: env.RUNNER_LOADER,
+		...overrides,
+	} as unknown as Env
+}
 
+function resetRepoPersistenceMocks() {
+	repoMockModule.ensureEntitySource.mockReset()
+	repoMockModule.syncArtifactSourceSnapshot.mockReset()
+	repoMockModule.ensureEntitySource.mockImplementation(
+		async ({ id, userId, entityKind, entityId, sourceRoot }) => ({
+			id:
+				typeof id === 'string' && id.length > 0
+					? id
+					: `${entityKind}-${entityId}`,
+			user_id: userId,
+			entity_kind: entityKind,
+			entity_id: entityId,
+			repo_id: `${entityKind}-${entityId}`,
+			published_commit: null,
+			indexed_commit: null,
+			manifest_path: entityKind === 'package' ? 'package.json' : 'kody.json',
+			source_root: sourceRoot ?? '/',
+			created_at: '2026-04-18T00:00:00.000Z',
+			updated_at: '2026-04-18T00:00:00.000Z',
+			bootstrapAccess: null,
+		}),
+	)
+	repoMockModule.syncArtifactSourceSnapshot.mockResolvedValue(
+		'published-commit-1',
+	)
+}
+
+test('observability helpers normalize errors and emit resilient mcp-event logs', () => {
+	expect(errorFields(new TypeError('bad'))).toEqual({
+		errorName: 'TypeError',
+		errorMessage: 'bad',
+	})
+	expect(errorFields('plain')).toEqual({
+		errorName: 'Unknown',
+		errorMessage: 'plain',
+	})
+
+	const originalInfo = console.info
+	const originalWarn = console.warn
+	let tagArg: unknown
+	let jsonArg: unknown
+	console.info = ((tag: unknown, json?: unknown) => {
+		tagArg = tag
+		jsonArg = json
+	}) as typeof console.info
+	try {
+		logMcpEvent({
+			category: 'mcp',
+			tool: 'search',
+			toolName: 'search',
+			outcome: 'success',
+			durationMs: 42,
+			baseUrl: 'https://example.com',
+			hasUser: false,
+		})
+	} finally {
+		console.info = originalInfo
+	}
+
+	expect(tagArg).toBe('mcp-event')
+	const parsed = JSON.parse(jsonArg as string) as Record<string, unknown>
+	expect(parsed.category).toBe('mcp')
+	expect(parsed.tool).toBe('search')
+	expect(parsed.outcome).toBe('success')
+	expect(parsed.durationMs).toBe(42)
+	expect(parsed.timestamp).toEqual(expect.any(String))
+
+	console.info = (() => {
+		throw new Error('console boom')
+	}) as typeof console.info
+	let warnArgs: unknown
+	console.warn = ((...args: unknown[]) => {
+		warnArgs = args
+	}) as typeof console.warn
+	try {
+		expect(() =>
+			logMcpEvent({
+				category: 'mcp',
+				tool: 'search',
+				toolName: 'search',
+				outcome: 'success',
+				durationMs: 1,
+				baseUrl: 'https://example.com',
+				hasUser: false,
+			}),
+		).not.toThrow()
+		expect(Array.isArray(warnArgs) && warnArgs[0]).toBe('mcp-event-failed')
+
+		console.info = () => {}
+		expect(() =>
+			logMcpEvent({
+				category: 'mcp',
+				tool: 'search',
+				toolName: 'search',
+				outcome: 'failure',
+				durationMs: 1,
+				baseUrl: 'https://example.com',
+				hasUser: false,
+				sandboxError: true,
+				errorName: 'Error',
+				errorMessage: 'user code failed',
+				cause: new Error('user code failed'),
+			}),
+		).not.toThrow()
+	} finally {
+		console.info = originalInfo
+		console.warn = originalWarn
+	}
+})
+
+test('callerContextFields exposes the caller user id and logMcpEvent serializes it', () => {
+	expect(
+		callerContextFields({
+			baseUrl: 'https://example.com',
+			user: {
+				userId: 'user-1',
+				email: 'user@example.com',
+				displayName: 'User One',
+			},
+		}),
+	).toMatchObject({
+		baseUrl: 'https://example.com',
+		hasUser: true,
+		userId: 'user-1',
+	})
+	expect(
+		callerContextFields({ baseUrl: 'https://example.com', user: null }),
+	).toMatchObject({ hasUser: false, userId: undefined })
+
+	const originalInfo = console.info
+	let jsonArg: unknown
+	console.info = ((_tag: unknown, json?: unknown) => {
+		jsonArg = json
+	}) as typeof console.info
+	try {
+		logMcpEvent({
+			category: 'mcp',
+			tool: 'capability',
+			capabilityName: 'valueGet',
+			outcome: 'success',
+			durationMs: 5,
+			baseUrl: 'https://example.com',
+			hasUser: true,
+			userId: 'user-1',
+		})
+	} finally {
+		console.info = originalInfo
+	}
+	const parsed = JSON.parse(jsonArg as string) as Record<string, unknown>
+	expect(parsed.userId).toBe('user-1')
+})
+
+test('packageSave logs parse failures, rejects invalid manifests, and logs successful saves', async () => {
+	// The worker bundler emits an incidental experimental warning during the
+	// successful save's artifact rebuild.
+	silenceIncidentalRuntimeWarnings()
 	const originalInfo = console.info
 	const payloads: Array<string> = []
 	console.info = ((tag: unknown, json?: unknown) => {
@@ -64,536 +198,364 @@ function captureMcpEvents(run: () => void) {
 		}
 	}) as typeof console.info
 	try {
-		run()
+		const handler = (await getStaticRegistry()).capabilityMap['packageSave']
+			.handler
+		await expect(
+			handler(
+				{},
+				{
+					env: createTestEnv(),
+					callerContext: createMcpCallerContext({
+						baseUrl: 'https://example.com',
+					}),
+				},
+			),
+		).rejects.toThrow('Invalid input for capability "packageSave"')
 	} finally {
 		console.info = originalInfo
 	}
-	return payloads
-}
 
-const callerFailureBase = {
-	category: 'mcp',
-	tool: 'capability',
-	outcome: 'failure',
-	durationMs: 3,
-	baseUrl: 'https://example.com',
-	hasUser: true,
-	userId: 'user-1',
-} as const
+	expect(payloads).toHaveLength(1)
+	const parseFailureEvent = JSON.parse(payloads[0]!) as Record<string, unknown>
+	expect(parseFailureEvent).toMatchObject({
+		tool: 'capability',
+		capabilityName: 'packageSave',
+		capabilitySource: 'builtin',
+		outcome: 'failure',
+		failurePhase: 'parse_input',
+	})
 
-test('logMcpEvent keeps sandbox and caller failures off Sentry and still reports platform bugs', () => {
-	const payloads = captureMcpEvents(() => {
-		logMcpEvent({
-			category: 'mcp',
-			tool: 'execute',
-			toolName: 'execute',
-			outcome: 'failure',
-			durationMs: 12,
+	resetRepoPersistenceMocks()
+	const handler = (await getStaticRegistry()).capabilityMap['packageSave']
+		.handler
+	const signedInContext = {
+		env: createTestEnv({
+			APP_DB: {
+				prepare() {
+					return {
+						bind() {
+							return {
+								first: async () => ({ username: 'user' }),
+							}
+						},
+					}
+				},
+			},
+		}),
+		callerContext: createMcpCallerContext({
 			baseUrl: 'https://example.com',
-			hasUser: true,
-			userId: 'user-1',
-			sandboxError: true,
-			errorName: 'Unknown',
-			errorMessage:
-				'Notion API /data_sources/39977ef0-f2db-81c6-9147-000bd579e312/query failed: validation_error',
-			cause: 'Notion API /data_sources/.../query failed: validation_error',
-		})
+			user: {
+				userId: 'user-1',
+				email: 'user@example.com',
+				displayName: 'user',
+			},
+		}),
+	}
 
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'search',
-			failurePhase: 'handler',
-			errorName: 'McpCallerError',
-			errorMessage: 'Provide "query" or "domain".',
-			cause: new McpCallerError('Provide "query" or "domain".'),
-		})
+	const invalidManifest = handler(
+		{
+			files: [
+				{
+					path: 'package.json',
+					content: JSON.stringify({
+						name: 'pkg',
+						kody: {
+							id: 'pkg',
+							description: 'missing exports',
+						},
+					}),
+				},
+			],
+		},
+		signedInContext,
+	)
+	await expect(invalidManifest).rejects.toThrow(McpCallerError)
+	await expect(invalidManifest).rejects.toThrow('Invalid package.json')
 
-		logMcpEvent({
-			...callerFailureBase,
-			tool: 'search',
-			toolName: 'search',
-			errorName: 'McpCallerError',
-			errorMessage:
-				'Unknown domain "skills". Available domains: account, packages.',
-			cause: new McpCallerError(
-				'Unknown domain "skills". Available domains: account, packages.',
-			),
-		})
+	const wrongScope = handler(
+		{
+			files: [
+				{
+					path: 'package.json',
+					content: JSON.stringify({
+						name: '@other/observed-package',
+						exports: {
+							'.': './src/index.ts',
+						},
+						kody: {
+							id: 'observed-package',
+							description: 'Observation test package.',
+						},
+					}),
+				},
+				{
+					path: 'src/index.ts',
+					content:
+						'export default async function main() { return { ok: true } }\n',
+				},
+			],
+		},
+		signedInContext,
+	)
+	await expect(wrongScope).rejects.toThrow(McpCallerError)
+	await expect(wrongScope).rejects.toThrow(
+		'package.json name "@other/observed-package" must use the authenticated user\'s package scope "@user/*".',
+	)
+	expect(repoMockModule.ensureEntitySource).not.toHaveBeenCalled()
 
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'repoOpenSession',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'Opening the session failed.',
-			cause: new Error('Opening the session failed.', {
-				cause: new McpCallerError('Discard the current session first.'),
-			}),
-		})
-
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'valueGet',
-			failurePhase: 'parse_input',
-			errorName: 'ZodError',
-			errorMessage: 'name: Required',
-			cause: new Error('name: Required'),
-		})
-
-		logMcpEvent({
-			...callerFailureBase,
-			tool: 'search',
-			toolName: 'search',
-			callerError: true,
-			errorName: 'EntityBatchError',
-			errorMessage: 'All entity lookups failed.',
-		})
-
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'user_module_run',
-			failurePhase: 'handler',
-			errorName: 'UserCodeError',
-			errorMessage: 'boom from user code',
-			cause: new UserCodeError('boom from user code'),
-		})
-
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'secretSet',
-			domain: 'secrets',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'PackageSecretAccessDeniedError',
-			errorMessage:
-				'Secret "x-kodykoalaAccessToken" is not allowed for package "x".',
-			cause: new PackageSecretAccessDeniedError(
-				'Secret "x-kodykoalaAccessToken" is not allowed for package "x".',
-			),
-		})
-
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'communityRate',
-			domain: 'community',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'CommunityActionError',
-			errorMessage: 'Fork this community listing before rating it.',
-			cause: new CommunityActionError(
-				'Fork this community listing before rating it.',
-			),
-		})
-
-		// Missing package scope grant (KODY-CLOUDFLARE-5N).
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageList',
-			domain: 'packages',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'PackageScopeAccessError',
-			errorMessage:
-				'You do not have a package scope grant for "@kody". Omit package_scope to use your personal scope, or ask an admin to grant access to that platform account.',
-			cause: new PackageScopeAccessError(
-				'You do not have a package scope grant for "@kody". Omit package_scope to use your personal scope, or ask an admin to grant access to that platform account.',
-			),
-		})
-
-		const entitlementLimitError = new EntitlementLimitError({
-			resource: 'storage_bytes',
-			plan: 'free',
-			limit: 67_108_864,
-			current: 449_966_219,
-			upgradeHint:
-				'Remove or finish existing storage bytes you no longer need, or upgrade your plan at /account/billing.',
-		})
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'storageQuery',
-			domain: 'storage',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'EntitlementLimitError',
-			errorMessage: entitlementLimitError.message,
-			cause: entitlementLimitError,
-		})
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'jobUpdate',
-			domain: 'jobs',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'Job update failed.',
-			cause: new Error('Job update failed.', {
-				cause: new EntitlementLimitError({
-					resource: 'scheduled_jobs',
-					plan: 'free',
-					limit: 10,
-					current: 46,
-					upgradeHint:
-						'Remove or finish existing scheduled jobs you no longer need, or upgrade your plan at /account/billing.',
+	payloads.length = 0
+	resetRepoPersistenceMocks()
+	repoMockModule.ensureEntitySource.mockResolvedValue({
+		id: 'package-package-1',
+		user_id: 'user-1',
+		entity_kind: 'package',
+		entity_id: 'package-1',
+		repo_id: 'package-package-1',
+		published_commit: null,
+		indexed_commit: null,
+		manifest_path: 'package.json',
+		source_root: '/',
+		created_at: '2026-04-13T00:00:00.000Z',
+		updated_at: '2026-04-13T00:00:00.000Z',
+		bootstrapAccess: {
+			defaultBranch: 'main',
+			remote: 'https://example.com/artifacts/package-package-1.git',
+			token: 'art_v1_bootstrap?expires=1760000000',
+			expiresAt: '2026-06-06T00:00:00.000Z',
+		},
+	})
+	console.info = ((tag: unknown, json?: unknown) => {
+		if (tag === 'mcp-event' && typeof json === 'string') {
+			payloads.push(json)
+		}
+	}) as typeof console.info
+	const bundleArtifactsKvStore = new Map<string, string>()
+	try {
+		const result = await handler(
+			{
+				confirm_destructive_overwrite: true,
+				files: [
+					{
+						path: 'package.json',
+						content: JSON.stringify({
+							name: '@user/observed-package',
+							exports: {
+								'.': './src/index.ts',
+							},
+							kody: {
+								id: 'observed-package',
+								description: 'Observation test package.',
+								app: {
+									entry: './src/app.ts',
+								},
+							},
+						}),
+					},
+					{
+						path: 'src/index.ts',
+						content:
+							'export default async function main() { return { ok: true } }\n',
+					},
+					{
+						path: 'src/app.ts',
+						content:
+							'export default { async fetch() { return new Response("ok") } }\n',
+					},
+				],
+			},
+			{
+				env: createTestEnv({
+					APP_DB: {
+						prepare(query: string) {
+							return {
+								bind() {
+									return {
+										first: async () =>
+											query.includes('SELECT id, user_id') &&
+											query.includes('FROM saved_packages')
+												? {
+														id: 'package-1',
+														user_id: 'user-1',
+														name: '@user/observed-package',
+														kody_id: 'observed-package',
+														description: 'Observation test package.',
+														tags_json: '[]',
+														search_text: null,
+														source_id: 'package-package-1',
+														has_app: 1,
+														created_at: '2026-04-13T00:00:00.000Z',
+														updated_at: '2026-04-13T00:00:00.000Z',
+													}
+												: query.includes('FROM users')
+													? {
+															username: 'user',
+															email_verified_at: '2026-01-01T00:00:00.000Z',
+															stable_user_id: 'user-1',
+															email: 'user@example.com',
+														}
+													: query.includes('SELECT * FROM entity_sources')
+														? {
+																id: 'package-package-1',
+																user_id: 'user-1',
+																entity_kind: 'package',
+																entity_id: 'package-1',
+																repo_id: 'package-package-1',
+																published_commit: 'published-commit-1',
+																indexed_commit: 'published-commit-1',
+																manifest_path: 'package.json',
+																source_root: '/',
+																created_at: '2026-04-13T00:00:00.000Z',
+																updated_at: '2026-04-13T00:00:00.000Z',
+															}
+														: null,
+										all: async () => ({
+											results: [],
+										}),
+										run: async () => ({
+											meta: { changes: 1 },
+										}),
+									}
+								},
+							}
+						},
+					},
+					BUNDLE_ARTIFACTS_KV: {
+						get: async (_key: string, type?: 'text' | 'json') => {
+							if (type === 'json') {
+								return {
+									version: 1,
+									sourceId: 'package-package-1',
+									repoId: 'package-package-1',
+									entityKind: 'package',
+									entityId: 'package-1',
+									publishedCommit: 'published-commit-1',
+									manifestPath: 'package.json',
+									sourceRoot: '/',
+									files: {
+										'package.json': JSON.stringify({
+											name: '@user/observed-package',
+											exports: { '.': './src/index.ts' },
+											kody: {
+												id: 'observed-package',
+												description: 'Observation test package.',
+												app: { entry: './src/app.ts' },
+											},
+										}),
+										'src/index.ts':
+											'export default async function main() { return { ok: true } }\n',
+										'src/app.ts':
+											'export default { async fetch() { return new Response("ok") } }\n',
+									},
+									createdAt: '2026-04-13T00:00:00.000Z',
+								}
+							}
+							return null
+						},
+						put: async (key: string, value: string) => {
+							bundleArtifactsKvStore.set(key, value)
+						},
+						delete: async (key: string) => {
+							bundleArtifactsKvStore.delete(key)
+						},
+						list: async (options?: { prefix?: string; cursor?: string }) => ({
+							keys: Array.from(bundleArtifactsKvStore.keys())
+								.filter((key) => key.startsWith(options?.prefix ?? ''))
+								.sort()
+								.map((name) => ({ name })),
+							list_complete: true,
+							cursor: undefined,
+						}),
+					},
+					CLOUDFLARE_ACCOUNT_ID: 'acct',
+					CLOUDFLARE_API_TOKEN: 'token',
+					CLOUDFLARE_API_BASE_URL: 'https://example.com',
+					REPO_SESSION: {
+						idFromName(name: string) {
+							return name as unknown as DurableObjectId
+						},
+						get() {
+							return {
+								openSession: async () => ({
+									id: 'session-1',
+									source_id: 'source-package-1',
+									base_commit: 'published-commit-1',
+									source_root: '/',
+									conversation_id: null,
+									status: 'active',
+									expires_at: null,
+									last_checkpoint_at: null,
+									last_checkpoint_commit: null,
+									last_check_run_id: null,
+									last_check_tree_hash: null,
+									created_at: '2026-04-13T00:00:00.000Z',
+									updated_at: '2026-04-13T00:00:00.000Z',
+									published_commit: 'published-commit-1',
+									manifest_path: 'package.json',
+									entity_type: 'package',
+								}),
+								readFile: async ({ path }: { path: string }) => ({
+									path,
+									content:
+										path === 'package.json'
+											? JSON.stringify({
+													name: '@user/observed-package',
+													exports: { '.': './src/index.ts' },
+													kody: {
+														id: 'observed-package',
+														description: 'Observation test package.',
+														app: { entry: './src/app.ts' },
+													},
+												})
+											: null,
+								}),
+								tree: async () => ({
+									path: '/',
+									name: '',
+									type: 'directory',
+									size: 0,
+									children: [],
+								}),
+								discardSession: async () => ({
+									ok: true,
+									sessionId: 'session-1',
+									deleted: true,
+								}),
+							}
+						},
+					},
+					AI: {
+						run: async () => ({
+							data: [Array.from({ length: 384 }, () => 0)],
+						}),
+					},
+				}),
+				callerContext: createMcpCallerContext({
+					baseUrl: 'https://example.com',
+					user: {
+						userId: 'user-1',
+						email: 'user@example.com',
+						displayName: 'user',
+					},
+				}),
+			},
+		)
+		expect((result as { package_id: string }).package_id).toBeTruthy()
+		expect((result as { has_app: boolean }).has_app).toBe(true)
+		expect(repoMockModule.syncArtifactSourceSnapshot).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sourceId: 'package-package-1',
+				destructiveOverwriteConfirmed: true,
+				bootstrapAccess: expect.objectContaining({
+					remote: 'https://example.com/artifacts/package-package-1.git',
 				}),
 			}),
-		})
-
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'mcp:home:bond_shade_set_position',
-			domain: 'mcp:home',
-			capabilitySource: 'mcp-server',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'MCP server "home" is not connected.',
-			cause: new McpCallerError('MCP server "home" is not connected.'),
-		})
-
-		// User SQL against a storage bucket (KODY-CLOUDFLARE-44). Plain Error
-		// form — Durable Object RPC loses subclass identity.
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'storageQuery',
-			domain: 'storage',
-			capabilitySource: 'builtin',
-			conversationId: 'conv-storage-1',
-			storageId: 'storage-notes-1',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'no such table: notes: SQLITE_ERROR',
-			context: {
-				sqlPreview: 'SELECT * FROM notes LIMIT 1',
-			},
-			cause: new Error('no such table: notes: SQLITE_ERROR'),
-		})
-
-		// Published repo session (KODY-CLOUDFLARE-4A). Plain Error from DO RPC.
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'repoStatus',
-			domain: 'repo',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage:
-				'Repo session "de72ddd6-e277-4f69-a5db-3d6ece06ca6b" is published; open a new session before continuing.',
-			cause: new Error(
-				'Repo session "de72ddd6-e277-4f69-a5db-3d6ece06ca6b" is published; open a new session before continuing.',
-			),
-		})
-
-		// Missing / placeholder repo session id (KODY-CLOUDFLARE-5V).
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'repoReadFile',
-			domain: 'repo',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'Repo session "none" was not found.',
-			cause: new Error('Repo session "none" was not found.'),
-		})
-
-		// Invalid repoSearch regex (KODY-CLOUDFLARE-49). Plain Error from DO RPC.
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'repoSearch',
-			domain: 'repo',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage:
-				'repoSearch received an invalid regex: Invalid regular expression: /(?s).|^$/gi: Invalid group. mode=regex uses JavaScript RegExp syntax (no inline flags like (?s) or (?i); for dotall matching use [\\s\\S] instead of `.` with (?s)).',
-			cause: new Error(
-				'repoSearch received an invalid regex: Invalid regular expression: /(?s).|^$/gi: Invalid group. mode=regex uses JavaScript RegExp syntax (no inline flags like (?s) or (?i); for dotall matching use [\\s\\S] instead of `.` with (?s)).',
-			),
-		})
-
-		// Non-fast-forward publish push (KODY-CLOUDFLARE-5M). Plain Error from DO.
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'repoPublishSession',
-			domain: 'repo',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'PushRejectedError',
-			errorMessage:
-				'Push rejected because it was not a simple fast-forward. Use "force: true" to override.',
-			cause: new Error(
-				'Push rejected because it was not a simple fast-forward. Use "force: true" to override.',
-			),
-		})
-
-		// packageSave destructive overwrite confirmation (issue 7661329778).
-		// Plain Error from shared source-safety-policy helpers.
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageSave',
-			domain: 'packages',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage:
-				'packageSave would overwrite existing package source "aa2d1349-5ac2-4b32-8c53-df1ce0a60b37". Set confirm_destructive_overwrite: true only after the user explicitly approves destructive overwrite; Kody will also verify a restorable backup snapshot first.',
-			cause: new Error(
-				'packageSave would overwrite existing package source "aa2d1349-5ac2-4b32-8c53-df1ce0a60b37". Set confirm_destructive_overwrite: true only after the user explicitly approves destructive overwrite; Kody will also verify a restorable backup snapshot first.',
-			),
-		})
-
-		// Downstream user-connected MCP server tool failure (KODY-CLOUDFLARE-4B).
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'mcp:supermemory:listMemories',
-			domain: 'mcp:supermemory',
-			capabilitySource: 'mcp-server',
-			failurePhase: 'handler',
-			errorName: 'McpCallerError',
-			errorMessage:
-				'MCP server capability "supermemory:listMemories" failed: ProtocolError: Structured content does not match the tool\'s output schema',
-			cause: new McpCallerError(
-				'MCP server capability "supermemory:listMemories" failed: ProtocolError: Structured content does not match the tool\'s output schema',
-			),
-		})
-
-		// OAuth token refresh caller state (KODY-CLOUDFLARE-4J): marker match.
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'integrationTokenRefresh',
-			domain: 'integrations',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage:
-				'Token refresh was rejected. (integrationTokenRefresh caller state)',
-			cause: new Error(
-				'Token refresh was rejected. (integrationTokenRefresh caller state)',
-			),
-		})
-
-		// Disallowed repo path (KODY-6P). Plain Error from DO RPC, including
-		// the pre-normalization wording still in flight.
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'repoEditFiles',
-			domain: 'repo',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage:
-				'Repo path "src/../exports/self-test.ts" is not allowed: paths cannot contain ".." or ".git" segments.',
-			cause: new Error(
-				'Repo path "src/../exports/self-test.ts" is not allowed: paths cannot contain ".." or ".git" segments.',
-			),
-		})
-	})
-
-	expect(payloads).toHaveLength(22)
-	expect(JSON.parse(payloads[0]!)).toMatchObject({
-		tool: 'execute',
-		outcome: 'failure',
-		sandboxError: true,
-	})
-	expect(sentryMock.captureException).not.toHaveBeenCalled()
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-
-	captureMcpEvents(() => {
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'valueGet',
-			capabilitySource: 'builtin',
-			sandboxError: false,
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'platform handler blew up',
-			cause: new Error('platform handler blew up'),
-		})
-
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageGet',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'D1 write failed.',
-			cause: new Error('D1 write failed.', {
-				cause: new Error('storage unavailable'),
-			}),
-		})
-
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'mcp:home:bond_shade_set_position',
-			domain: 'mcp:home',
-			capabilitySource: 'mcp-server',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'MCP tool "home:bond_shade_set_position" failed: timeout',
-			cause: new Error(
-				'MCP tool "home:bond_shade_set_position" failed: timeout',
-			),
-		})
-	})
-
-	expect(sentryMock.captureException).toHaveBeenCalledTimes(3)
-	expect(sentryMock.captureException).toHaveBeenNthCalledWith(
-		1,
-		expect.objectContaining({ message: 'platform handler blew up' }),
-	)
-	expect(sentryMock.captureException).toHaveBeenNthCalledWith(
-		2,
-		expect.objectContaining({ message: 'D1 write failed.' }),
-	)
-	expect(sentryMock.captureException).toHaveBeenNthCalledWith(
-		3,
-		expect.objectContaining({
-			message: 'MCP tool "home:bond_shade_set_position" failed: timeout',
-		}),
-	)
-	expect(sentryMock.scope.setLevel).toHaveBeenCalledWith('error')
-	expect(sentryMock.scope.setUser).toHaveBeenCalledWith({ id: 'user-1' })
-	expect(sentryMock.scope.setContext).toHaveBeenCalledWith(
-		'mcp',
-		expect.objectContaining({
-			baseUrl: 'https://example.com',
-			hasUser: true,
-			errorMessage: 'platform handler blew up',
-			detail: undefined,
-		}),
-	)
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-})
-
-test('package name and missing-import caller errors stay off Sentry', () => {
-	let thrown: unknown
-	try {
-		normalizePackageNameInput({
-			value: '@kody/google',
-			ownerScope: 'grant',
-			action: 'resolve',
-		})
-	} catch (error) {
-		thrown = error
+		)
+	} finally {
+		console.info = originalInfo
 	}
-	expect(thrown).toBeInstanceOf(PackageNameInputError)
 
-	captureMcpEvents(() => {
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageGetGitRemote',
-			domain: 'packages',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'PackageNameInputError',
-			errorMessage: (thrown as PackageNameInputError).message,
-			cause: thrown,
-		})
-	})
-	expect(sentryMock.captureException).not.toHaveBeenCalled()
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-
-	captureMcpEvents(() => {
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageGetGitRemote',
-			domain: 'packages',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'package lookup failed',
-			cause: new Error('package lookup failed', { cause: thrown }),
-		})
-	})
-	expect(sentryMock.captureException).not.toHaveBeenCalled()
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-
-	const missingPackage = new SavedPackageNotFoundError('@distilledtom/google')
-	captureMcpEvents(() => {
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageSave',
-			domain: 'packages',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'SavedPackageNotFoundError',
-			errorMessage: missingPackage.message,
-			cause: missingPackage,
-		})
-	})
-	expect(sentryMock.captureException).not.toHaveBeenCalled()
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-
-	captureMcpEvents(() => {
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageSave',
-			domain: 'packages',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'package graph rewrite failed',
-			cause: new Error('package graph rewrite failed', {
-				cause: missingPackage,
-			}),
-		})
-	})
-	expect(sentryMock.captureException).not.toHaveBeenCalled()
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-})
-
-test('execute missing code/invoke caller errors stay off Sentry', () => {
-	const cause = new McpCallerError(executeInvokeMissingInputMessage)
-
-	captureMcpEvents(() => {
-		logMcpEvent({
-			category: 'mcp',
-			tool: 'execute',
-			toolName: 'execute',
-			outcome: 'failure',
-			durationMs: 3,
-			baseUrl: 'https://example.com',
-			hasUser: true,
-			userId: 'user-1',
-			errorName: 'McpCallerError',
-			errorMessage: cause.message,
-			cause,
-		})
-	})
-	expect(sentryMock.captureException).not.toHaveBeenCalled()
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-})
-
-test('oversized kody.description handler errors stay off Sentry', () => {
-	let thrown: unknown
-	try {
-		assertKodyDescriptionLength('a'.repeat(KODY_DESCRIPTION_MAX_LENGTH + 1))
-	} catch (error) {
-		thrown = error
-	}
-	expect(thrown).toBeInstanceOf(Error)
-
-	captureMcpEvents(() => {
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageGetGitRemote',
-			domain: 'packages',
-			capabilitySource: 'builtin',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: (thrown as Error).message,
-			cause: thrown,
-		})
-	})
-	expect(sentryMock.captureException).not.toHaveBeenCalled()
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-
-	captureMcpEvents(() => {
-		logMcpEvent({
-			...callerFailureBase,
-			capabilityName: 'packageGetGitRemote',
-			failurePhase: 'handler',
-			errorName: 'Error',
-			errorMessage: 'kody.description is missing',
-			cause: new Error('kody.description is missing'),
-		})
-	})
-	expect(sentryMock.captureException).toHaveBeenCalledTimes(1)
-})
+	expect(payloads).toHaveLength(1)
+	const successEvent = JSON.parse(payloads[0]!) as Record<string, unknown>
+	expect(successEvent.outcome).toBe('success')
+	expect(successEvent.failurePhase).toBeUndefined()
+}, 60_000)

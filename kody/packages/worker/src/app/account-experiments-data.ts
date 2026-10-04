@@ -1,7 +1,8 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type AccountExperimentsLoaderData } from '#universal/loader-data.ts'
 
 export async function readExperimentsOptIn(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<boolean> {
 	const row = await db
@@ -12,7 +13,7 @@ export async function readExperimentsOptIn(
 }
 
 export async function setExperimentsOptIn(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: number; enabled: boolean },
 ): Promise<void> {
 	await db
@@ -26,7 +27,7 @@ export async function setExperimentsOptIn(
 }
 
 export async function loadAccountExperimentsData(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 }): Promise<AccountExperimentsLoaderData> {
 	return {

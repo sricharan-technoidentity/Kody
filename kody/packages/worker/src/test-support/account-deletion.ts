@@ -1,7 +1,8 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type deleteUserAccount } from '#worker/app/account-deletion.ts'
 import { createTestRunRecords } from '#worker/test-support/run-records.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
-import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-catalog.ts'
 
 export type RowMap = Record<string, Array<Record<string, unknown>>>
 
@@ -13,7 +14,7 @@ export function createTestDb(
 		onSelect?: (query: string) => Promise<void>
 	},
 ): {
-	db: D1Database
+	db: SqlDatabase
 	rows: RowMap
 } {
 	const rows: RowMap = {}
@@ -471,7 +472,7 @@ export function createTestDb(
 				throw error
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	return { db, rows }
 }
@@ -480,7 +481,7 @@ export function createTestDb(
 // storage-id listing and purgeUser all operate on the fixture's jobs tables
 // (which stand in for the jobs worker's own D1; production APP_DB has none).
 export function createJobsBindingStub(
-	db: D1Database,
+	db: SqlDatabase,
 	overrides: Record<string, unknown> = {},
 ) {
 	async function listStorageIds(table: string, userId: string) {
@@ -526,7 +527,7 @@ export function createJobsBindingStub(
 }
 
 export function createSuccessfulDeletionEnv(
-	db: D1Database,
+	db: SqlDatabase,
 	overrides: Partial<Env> & {
 		OAUTH_PROVIDER?: {
 			listUserGrants: (
@@ -549,9 +550,11 @@ export function createSuccessfulDeletionEnv(
 		CAPABILITY_VECTOR_INDEX: {
 			deleteByIds: async () => undefined,
 		},
-		STORAGE_RUNNER: {
-			idFromName: durableObjectId,
-			get: () => ({ clearStorage: async () => ({ ok: true as const }) }),
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				(() => ({ clearStorage: async () => ({ ok: true as const }) }))(
+					JSON.stringify([bucket.userId, bucket.storageId]),
+				),
 		},
 		RUN_STATE: { forUser: () => ({ clear: async () => undefined }) },
 		RUN_RECORDS: createTestRunRecords().records,
@@ -568,9 +571,8 @@ export function createSuccessfulDeletionEnv(
 				},
 			}),
 		},
-		MAILBOX: {
-			idFromName: durableObjectId,
-			get: () => ({
+		MAILBOX_STORE: {
+			forUser: (_userId: string) => ({
 				listBlobReferences: async () => ({
 					references: [],
 					nextStartAfter: null,
@@ -580,18 +582,17 @@ export function createSuccessfulDeletionEnv(
 			}),
 		},
 		JOBS: createJobsBindingStub(db),
-		REPO_SESSION: {
-			idFromName: durableObjectId,
-			get: () => ({ purgeSession: async () => ({ ok: true as const }) }),
+		REPO_SESSIONS: () => ({
+			purgeSession: async () => ({ ok: true as const }),
+		}),
+		REPO_SESSION_CATALOG: repoSessionIndex.REPO_SESSION_CATALOG,
+		MCP_CLIENTS: {
+			forUser: (_userId: string) => ({
+				purgeForAccountDeletion: async () => undefined,
+			}),
 		},
-		REPO_SESSION_INDEX: repoSessionIndex.REPO_SESSION_INDEX,
-		MCP_CLIENT_HUB: {
-			idFromName: durableObjectId,
-			get: () => ({ purgeForAccountDeletion: async () => undefined }),
-		},
-		PACKAGE_REALTIME_SESSION: {
-			idFromName: durableObjectId,
-			get: () => ({ fetch: fetchOk }),
+		REALTIME_SESSIONS: {
+			purge: async () => {},
 		},
 		COMMUNITY_ASSETS: {
 			async list() {

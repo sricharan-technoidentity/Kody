@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 export type ArchivedJobArtifactRecord = {
 	id: string
 	jobId: string
@@ -11,7 +12,7 @@ export type ArchivedJobArtifactRecord = {
 }
 
 export async function upsertArchivedJobArtifact(input: {
-	db: D1Database
+	db: SqlDatabase
 	jobId: string
 	userId: string
 	sourceId: string
@@ -67,7 +68,7 @@ export async function upsertArchivedJobArtifact(input: {
 }
 
 export async function listArchivedJobArtifactsDueBefore(
-	db: D1Database,
+	db: SqlDatabase,
 	retainUntil: string,
 	limit = 100,
 ): Promise<Array<ArchivedJobArtifactRecord>> {
@@ -94,7 +95,7 @@ export async function listArchivedJobArtifactsDueBefore(
 	}))
 }
 
-export async function deleteArchivedJobArtifact(db: D1Database, id: string) {
+export async function deleteArchivedJobArtifact(db: SqlDatabase, id: string) {
 	await db
 		.prepare(`DELETE FROM archived_job_artifacts WHERE id = ?`)
 		.bind(id)
@@ -102,7 +103,7 @@ export async function deleteArchivedJobArtifact(db: D1Database, id: string) {
 }
 
 export async function listArchivedJobArtifactsForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<Array<ArchivedJobArtifactRecord>> {
 	const { results } = await db
@@ -132,7 +133,7 @@ export async function listArchivedJobArtifactsForUser(
  * Operator-level DR inventory only — not for user-facing paths.
  */
 export async function listAllArchivedJobArtifactStorageOwnerRows(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<Array<{ userId: string; storageId: string }>> {
 	const { results } = await db
 		.prepare(

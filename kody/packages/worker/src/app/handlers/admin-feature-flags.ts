@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { jsonResponse } from '#worker/json-response.ts'
 import { type Action } from 'remix/router'
 import { loadAdminFeatureFlagsData } from '#app/admin-feature-flags-data.ts'
@@ -346,7 +347,7 @@ type ResolveOverrideUserIdResult =
 	| { status: 'not_found' }
 
 async function resolveOverrideUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	body: object,
 ): Promise<ResolveOverrideUserIdResult> {
 	const record = body as Record<string, unknown>

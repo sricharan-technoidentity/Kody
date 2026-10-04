@@ -1,13 +1,16 @@
+import {
+	createTestPg,
+	createTestAuditPg,
+} from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 
 vi.unmock('#worker/audit-log.ts')
 import { type CapabilityContext } from '#mcp/capabilities/types.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import {
 	createFakeImagesBinding,
 	tinyPngBytes,
@@ -17,21 +20,18 @@ import { adminPlatformProviderMarkDeleteCapability } from './admin-platform-prov
 import { adminPlatformProviderMarkListCapability } from './admin-platform-provider-mark-list.ts'
 import { adminPlatformProviderMarkSaveCapability } from './admin-platform-provider-mark-save.ts'
 
-const migrationsDirectory = new URL('../../../../migrations/', import.meta.url)
-const auditMigrationsDirectory = new URL(
-	'../../../../audit-migrations/',
-	import.meta.url,
-)
+async function createHarness() {
+	const sqlite = await createTestPg()
 
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const auditSqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(auditSqlite, auditMigrationsDirectory)
+	const auditSqlite = await createTestAuditPg()
+
 	const objects = new Map<string, Uint8Array>()
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
-		AUDIT_DB: createD1FromSqlite(auditSqlite),
+		APP_DB: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+		AUDIT_DB: createPgDatabase({
+			connection: auditSqlite,
+			role: 'kody_audit_writer',
+		}),
 		SECRET_KMS: testSecretKms,
 		COMMUNITY_ASSETS: {
 			async put(key: string, bytes: Uint8Array) {
@@ -62,7 +62,7 @@ function createHarness() {
 }
 
 test('save/list/delete provider marks store a fitted logo and write audit rows', async () => {
-	const { ctx, auditSqlite } = createHarness()
+	const { ctx, auditSqlite } = await createHarness()
 
 	const saved = await adminPlatformProviderMarkSaveCapability.handler(
 		{
@@ -92,9 +92,9 @@ test('save/list/delete provider marks store a fitted logo and write audit rows',
 	expect(
 		(await adminPlatformProviderMarkListCapability.handler({}, ctx)).marks,
 	).toEqual([])
-	const auditActions = auditSqlite
-		.prepare('SELECT action, result FROM audit_events ORDER BY id ASC')
-		.all() as Array<{ action: string; result: string }>
+	const auditActions = (await pgQuery(auditSqlite).all(
+		'SELECT action, result FROM audit_events ORDER BY id ASC',
+	)) as Array<{ action: string; result: string }>
 	expect(auditActions).toEqual([
 		{ action: 'adminPlatformProviderMarkSave', result: 'success' },
 		{ action: 'adminPlatformProviderMarkList', result: 'success' },
@@ -104,7 +104,7 @@ test('save/list/delete provider marks store a fitted logo and write audit rows',
 })
 
 test('delete provider mark fails when logo storage is missing', async () => {
-	const { ctx, env } = createHarness()
+	const { ctx, env } = await createHarness()
 	await adminPlatformProviderMarkSaveCapability.handler(
 		{
 			slug: 'google',

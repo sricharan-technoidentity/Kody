@@ -1,3 +1,4 @@
+import { type MailboxSqlValue, type MailboxSql } from './mailbox-sql.ts'
 import {
 	assertMailboxCanonicalIsoTimestamp,
 	assertMailboxDeliveryEventType,
@@ -13,35 +14,36 @@ import { type EmailDeliveryEventType } from './types.ts'
 import { mapMailboxDeliveryEventRow } from './mailbox-mappers.ts'
 import { isMailboxMessageTombstoned } from './mailbox-message-deletion-tombstones.ts'
 
-export function findDeliveryEventByProviderEventId(
-	sql: SqlStorage,
+export async function findDeliveryEventByProviderEventId(
+	sql: MailboxSql,
 	providerEventId: string,
-): MailboxDeliveryEventRecord | null {
-	const row = sql
-		.exec<Record<string, SqlStorageValue>>(
+): Promise<MailboxDeliveryEventRecord | null> {
+	const row = (
+		await sql.exec<Record<string, MailboxSqlValue>>(
 			`SELECT * FROM email_delivery_events
 			WHERE provider_event_id = ?
 			LIMIT 1`,
 			providerEventId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	return row ? mapMailboxDeliveryEventRow(row) : null
 }
 
-export function writeMailboxDeliveryEventRow(
-	sql: SqlStorage,
+export async function writeMailboxDeliveryEventRow(
+	sql: MailboxSql,
 	event: MailboxDeliveryEventInput,
-): { inserted: boolean; accepted: boolean } {
+): Promise<{ inserted: boolean; accepted: boolean }> {
 	const id = assertMailboxNonEmptyString(event.id, 'event.id')
 	const messageId =
-		event.messageId != null && isMailboxMessageTombstoned(sql, event.messageId)
+		event.messageId != null &&
+		(await isMailboxMessageTombstoned(sql, event.messageId))
 			? null
 			: event.messageId
 	const eventType = assertMailboxDeliveryEventType(event.eventType)
 	const provider = assertMailboxNonEmptyString(event.provider, 'event.provider')
 	const providerEventId = event.providerEventId
 	if (providerEventId) {
-		const existingByProvider = findDeliveryEventByProviderEventId(
+		const existingByProvider = await findDeliveryEventByProviderEventId(
 			sql,
 			providerEventId,
 		)
@@ -49,12 +51,12 @@ export function writeMailboxDeliveryEventRow(
 			return { inserted: false, accepted: false }
 		}
 	}
-	const existing = sql
-		.exec<{ updated_at: string }>(
+	const existing = (
+		await sql.exec<{ updated_at: string }>(
 			`SELECT updated_at FROM email_delivery_events WHERE id = ? LIMIT 1`,
 			id,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	const createdAt = assertMailboxCanonicalIsoTimestamp(
 		event.createdAt,
 		'event.createdAt',
@@ -80,7 +82,7 @@ export function writeMailboxDeliveryEventRow(
 			? null
 			: assertMailboxSubscriptionEffectState(event.subscriptionEffectState)
 
-	sql.exec(
+	await sql.exec(
 		`INSERT INTO email_delivery_events (
 			id, message_id, inbox_id, event_type, provider,
 			provider_message_id, provider_event_id, detail_json,
@@ -218,35 +220,35 @@ export function writeMailboxDeliveryEventRow(
 	return { inserted: existing == null, accepted: true }
 }
 
-export function deliveryEventOwnsMessage(
-	sql: SqlStorage,
+export async function deliveryEventOwnsMessage(
+	sql: MailboxSql,
 	eventId: string,
 	messageId: string,
 ) {
 	return (
-		sql
-			.exec<{ ok: number }>(
+		(
+			await sql.exec<{ ok: number }>(
 				`SELECT 1 AS ok FROM email_delivery_events
 				WHERE id = ? AND message_id = ?
 				LIMIT 1`,
 				eventId,
 				messageId,
 			)
-			.toArray()[0] != null
+		).toArray()[0] != null
 	)
 }
 
-export function listMailboxDeliveryEvents(
-	sql: SqlStorage,
+export async function listMailboxDeliveryEvents(
+	sql: MailboxSql,
 	input: {
 		messageId?: string | null
 		eventType?: EmailDeliveryEventType | null
 		limit?: number
 	},
-): Array<MailboxDeliveryEventRecord> {
+): Promise<Array<MailboxDeliveryEventRecord>> {
 	const limit = normalizeMailboxPageSize(input.limit)
 	const clauses: Array<string> = ['1 = 1']
-	const params: Array<SqlStorageValue> = []
+	const params: Array<MailboxSqlValue> = []
 	if (input.messageId) {
 		clauses.push('message_id = ?')
 		params.push(input.messageId)
@@ -256,36 +258,37 @@ export function listMailboxDeliveryEvents(
 		params.push(assertMailboxDeliveryEventType(input.eventType))
 	}
 	params.push(limit)
-	return sql
-		.exec<Record<string, SqlStorageValue>>(
+	return (
+		await sql.exec<Record<string, MailboxSqlValue>>(
 			`SELECT * FROM email_delivery_events
 			WHERE ${clauses.join(' AND ')}
 			ORDER BY created_at DESC, id DESC
 			LIMIT ?`,
 			...params,
 		)
+	)
 		.toArray()
 		.map(mapMailboxDeliveryEventRow)
 }
 
-export function oldestMailboxDeliveryEventCreatedAt(
-	sql: SqlStorage,
-): string | null {
-	const row = sql
-		.exec<{ created_at: string }>(
+export async function oldestMailboxDeliveryEventCreatedAt(
+	sql: MailboxSql,
+): Promise<string | null> {
+	const row = (
+		await sql.exec<{ created_at: string }>(
 			`SELECT created_at FROM email_delivery_events
 			ORDER BY created_at ASC, id ASC
 			LIMIT 1`,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	return row?.created_at ?? null
 }
 
-export function pruneExpiredMailboxDeliveryEvents(
-	sql: SqlStorage,
+export async function pruneExpiredMailboxDeliveryEvents(
+	sql: MailboxSql,
 	input: { cutoff: string; limit: number },
 ) {
-	sql.exec(
+	await sql.exec(
 		`DELETE FROM email_delivery_events
 		WHERE id IN (
 			SELECT id FROM email_delivery_events
@@ -298,18 +301,18 @@ export function pruneExpiredMailboxDeliveryEvents(
 	)
 }
 
-export function hasExpiredMailboxDeliveryEvents(
-	sql: SqlStorage,
+export async function hasExpiredMailboxDeliveryEvents(
+	sql: MailboxSql,
 	cutoff: string,
-): boolean {
+): Promise<boolean> {
 	return (
-		sql
-			.exec<{ ok: number }>(
+		(
+			await sql.exec<{ ok: number }>(
 				`SELECT 1 AS ok FROM email_delivery_events
 				WHERE created_at < ?
 				LIMIT 1`,
 				cutoff,
 			)
-			.toArray()[0] != null
+		).toArray()[0] != null
 	)
 }

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import {
 	userMeterRpc,
@@ -294,7 +295,7 @@ export function parseStrictInboundDeliveryDetailJson(
 }
 
 async function readSystemEmailDailyCounter(input: {
-	db: D1Database
+	db: SqlDatabase
 	localPart: SystemEmailLocal
 	day: string
 }) {
@@ -316,7 +317,7 @@ async function readSystemEmailDailyCounter(input: {
  * `db` remains for call-site stability.
  */
 export async function readUserInboundReceiveCount(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: UserMeterEnv
 	userId: string
 	day: string
@@ -353,7 +354,7 @@ export async function readUserInboundReceiveCount(input: {
 }
 
 export async function readSystemInboundReceiveCount(input: {
-	db: D1Database
+	db: SqlDatabase
 	localPart: SystemEmailLocal
 	day: string
 }) {

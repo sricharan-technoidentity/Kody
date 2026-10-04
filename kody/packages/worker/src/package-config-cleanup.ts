@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 import { type PgDatabase } from '#worker/aws/pg-database.ts'
 
@@ -20,7 +21,7 @@ export async function removeAllSecretApprovalsForPackage(input: {
 	userId: string
 	packageId: string
 }) {
-	const db = input.env.APP_DB as D1Database | PgDatabase
+	const db = input.env.APP_DB as SqlDatabase | PgDatabase
 	if ('dialect' in db && db.dialect === 'postgres') {
 		// Rows whose stored list is not valid JSON are left untouched, as on SQLite.
 		const result = await db

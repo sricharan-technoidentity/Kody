@@ -4,7 +4,11 @@ import { createTargetTestEnv } from '../test-support/aws/target-test-env.ts'
 import { deliverWebhook } from './webhook-delivery.ts'
 
 test('webhook verifies HMAC and replay before one ack or sync workflow', async () => {
-	const { env, close } = await createTargetTestEnv({ userId: 'alice' })
+	const admissionTime = Date.now()
+	const { env, close } = await createTargetTestEnv({
+		userId: 'alice',
+		now: () => admissionTime,
+	})
 	try {
 		env.runner.respondWith({ output: 'handled' })
 		const body = '{"value":1}'
@@ -66,4 +70,4 @@ test('webhook verifies HMAC and replay before one ack or sync workflow', async (
 	} finally {
 		await close()
 	}
-})
+}, 60_000)

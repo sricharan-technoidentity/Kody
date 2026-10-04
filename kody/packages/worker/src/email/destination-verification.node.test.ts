@@ -1,9 +1,9 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { hashVerificationToken } from '#worker/identity/email-verification-tokens.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import {
@@ -16,18 +16,22 @@ import {
 	verifyEmailDestinationToken,
 } from './destination-verification.ts'
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
+async function createMigratedDb() {
+	const sqlite = await createTestPg()
+
 	return {
 		sqlite,
-		db: createD1FromSqlite(sqlite),
+		db: createPgDatabase({
+			connection: sqlite,
+			role: 'kody_writer',
+			userId: await createStableUserIdFromEmail('owner@example.com'),
+		}),
 	}
 }
 
-async function seedUser(sqlite: DatabaseSync) {
+async function seedUser(sqlite: Awaited<ReturnType<typeof createTestPg>>) {
 	const stableUserId = await createStableUserIdFromEmail('owner@example.com')
-	sqlite.exec(`
+	await sqlite.exec(`
 		INSERT INTO users (
 			id, username, email, stable_user_id, password_hash, email_verified_at
 		) VALUES (
@@ -42,7 +46,7 @@ async function seedUser(sqlite: DatabaseSync) {
 }
 
 test('destination verification tokens mark one extra address verified and reject missing/expired links', async () => {
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	await seedUser(sqlite)
 	const added = await addEmailNotificationDestination({
 		db,
@@ -61,13 +65,14 @@ test('destination verification tokens mark one extra address verified and reject
 
 	const token = 'a'.repeat(64)
 	const tokenHash = await hashVerificationToken(token)
-	sqlite
-		.prepare(
-			`INSERT INTO pending_email_destination_verifications
+	await pgQuery(sqlite).run(
+		`INSERT INTO pending_email_destination_verifications
 			 (user_id, destination_id, token_hash, expires_at)
 			 VALUES (1, ?, ?, ?)`,
-		)
-		.run(added.destination.id, tokenHash, Date.now() - 1)
+		added.destination.id,
+		tokenHash,
+		Date.now() - 1,
+	)
 	expect(await verifyEmailDestinationToken({ db, token })).toEqual({
 		ok: false,
 		reason: 'expired_token',
@@ -75,13 +80,14 @@ test('destination verification tokens mark one extra address verified and reject
 
 	const liveToken = 'b'.repeat(64)
 	const liveHash = await hashVerificationToken(liveToken)
-	sqlite
-		.prepare(
-			`INSERT INTO pending_email_destination_verifications
+	await pgQuery(sqlite).run(
+		`INSERT INTO pending_email_destination_verifications
 			 (user_id, destination_id, token_hash, expires_at)
 			 VALUES (1, ?, ?, ?)`,
-		)
-		.run(added.destination.id, liveHash, Date.now() + 60_000)
+		added.destination.id,
+		liveHash,
+		Date.now() + 60_000,
+	)
 
 	expect(
 		await verifyEmailDestinationToken({
@@ -95,14 +101,13 @@ test('destination verification tokens mark one extra address verified and reject
 		email: 'phone@example.com',
 	})
 	expect(
-		sqlite
-			.prepare(
-				`SELECT verified_at IS NOT NULL AS verified
+		(await pgQuery(sqlite).get(
+			`SELECT verified_at IS NOT NULL AS verified
 				 FROM email_notification_destinations
 				 WHERE id = ?`,
-			)
-			.get(added.destination.id) as { verified: number },
-	).toEqual({ verified: 0 })
+			added.destination.id,
+		)) as { verified: boolean },
+	).toEqual({ verified: false })
 
 	expect(await verifyEmailDestinationToken({ db, token: liveToken })).toEqual({
 		ok: true,
@@ -110,31 +115,28 @@ test('destination verification tokens mark one extra address verified and reject
 		email: 'phone@example.com',
 	})
 	expect(
-		sqlite
-			.prepare(
-				`SELECT verified_at IS NOT NULL AS verified
+		(await pgQuery(sqlite).get(
+			`SELECT verified_at IS NOT NULL AS verified
 				 FROM email_notification_destinations
 				 WHERE id = ?`,
-			)
-			.get(added.destination.id) as { verified: number },
-	).toEqual({ verified: 1 })
+			added.destination.id,
+		)) as { verified: boolean },
+	).toEqual({ verified: true })
 	expect(await verifyEmailDestinationToken({ db, token: liveToken })).toEqual({
 		ok: true,
 		userId: 1,
 		email: 'phone@example.com',
 	})
 	expect(
-		sqlite
-			.prepare(
-				`SELECT COUNT(*) AS count FROM pending_email_destination_verifications`,
-			)
-			.get() as { count: number },
+		(await pgQuery(sqlite).get(
+			`SELECT COUNT(*) AS count FROM pending_email_destination_verifications`,
+		)) as { count: number },
 	).toEqual({ count: 1 })
 })
 
 test('createEmailDestinationVerification rate-limits add and resend for UI and MCP', async () => {
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	await seedUser(sqlite)
 	const env = {
 		APP_DB: db,
@@ -171,7 +173,7 @@ test('createEmailDestinationVerification rate-limits add and resend for UI and M
 
 test('createEmailDestinationVerification resends for a pending address and leaves unused links valid', async () => {
 	consoleWarn.mockImplementation(() => {})
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	await seedUser(sqlite)
 	const env = {
 		APP_DB: db,
@@ -186,13 +188,12 @@ test('createEmailDestinationVerification resends for a pending address and leave
 		requestUrl: 'http://example.com',
 	})
 	expect(first.created).toBe(true)
-	const firstToken = sqlite
-		.prepare(
-			`SELECT token_hash AS tokenHash
+	const firstToken = (await pgQuery(sqlite).get(
+		`SELECT token_hash AS "tokenHash"
 			 FROM pending_email_destination_verifications
 			 WHERE destination_id = ?`,
-		)
-		.get(first.destination.id) as { tokenHash: string }
+		first.destination.id,
+	)) as { tokenHash: string }
 
 	const second = await createEmailDestinationVerification({
 		env,
@@ -204,14 +205,13 @@ test('createEmailDestinationVerification resends for a pending address and leave
 		created: false,
 		destination: { id: first.destination.id, email: 'pager@example.com' },
 	})
-	const pending = sqlite
-		.prepare(
-			`SELECT token_hash AS tokenHash
+	const pending = (await pgQuery(sqlite).all(
+		`SELECT token_hash AS "tokenHash"
 			 FROM pending_email_destination_verifications
 			 WHERE destination_id = ?
 			 ORDER BY id ASC`,
-		)
-		.all(first.destination.id) as Array<{ tokenHash: string }>
+		first.destination.id,
+	)) as Array<{ tokenHash: string }>
 	expect(pending).toHaveLength(2)
 	expect(pending[0]?.tokenHash).toBe(firstToken.tokenHash)
 	expect(pending[1]?.tokenHash).not.toBe(firstToken.tokenHash)

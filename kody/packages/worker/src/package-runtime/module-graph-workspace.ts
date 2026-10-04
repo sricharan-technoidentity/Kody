@@ -1,3 +1,4 @@
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 import {
 	loadPackageSourceBySourceId,
 	type LoadedPackageSource,
@@ -209,6 +210,7 @@ export async function resolveDirectKodyDependenciesForEntryPoint(input: {
 						storageOwnerUserId: cached.storageOwnerUserId,
 					}
 				: await resolveSavedPackageImport({
+						forUser: getAccountWriterFactory(input.env),
 						db: input.env.APP_DB,
 						userId: input.userId,
 						specifier: parsed,

@@ -449,10 +449,12 @@ export async function resolveTrustedMigrationBase(
 export async function readTrustedMigrationHistory(
 	ref: string,
 ): Promise<TrustedMigrationHistory> {
-	const migrationRoot = defaultMigrationsDir.replaceAll(path.sep, '/')
+	const prefix = (await gitOutput(['rev-parse', '--show-prefix'])) ?? ''
+	const migrationRoot = prefix + defaultMigrationsDir.replaceAll(path.sep, '/')
 	const filenamesOutput = await gitOutput([
 		'ls-tree',
 		'-r',
+		'--full-tree',
 		'--name-only',
 		ref,
 		'--',
@@ -482,7 +484,10 @@ export async function readTrustedMigrationHistory(
 	)
 
 	const ledgerJson = await gitOutput(
-		['show', `${ref}:${defaultMigrationLedgerPath.replaceAll(path.sep, '/')}`],
+		[
+			'show',
+			`${ref}:${prefix}${defaultMigrationLedgerPath.replaceAll(path.sep, '/')}`,
+		],
 		{ trim: false },
 	)
 	let ledgerEntries = files

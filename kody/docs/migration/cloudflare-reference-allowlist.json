@@ -1,0 +1,1026 @@
+[
+	{
+		"file": "e2e/playwright-utils.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "e2e/social-login.spec.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "e2e/web-server-liveness.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/shared/src/backup-full-manifest.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/shared/src/backup-staging.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/shared/src/jobs/scheduled-lanes.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/shared/src/sql-literals.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/client/routes/admin-users-detail.tsx",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/client/routes/onboarding.tsx",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/client/routes/pricing.tsx",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/client/sentry-browser-filters.ts",
+		"reason": "Historical platform telemetry and workerd sandbox reset classification; PostgreSQL query retries use the separate SQLSTATE classifier."
+	},
+	{
+		"file": "packages/worker/client/sentry-init.ts",
+		"reason": "Historical platform telemetry and workerd sandbox reset classification; PostgreSQL query retries use the separate SQLSTATE classifier."
+	},
+	{
+		"file": "packages/worker/src/account/deletion-state.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data."
+	},
+	{
+		"file": "packages/worker/src/account/export-paging.node.test.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data."
+	},
+	{
+		"file": "packages/worker/src/account/export.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data."
+	},
+	{
+		"file": "packages/worker/src/account/unverified-account-purge.node.test.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data."
+	},
+	{
+		"file": "packages/worker/src/account/user-owned-surfaces.node.test.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data."
+	},
+	{
+		"file": "packages/worker/src/account/user-owned-surfaces.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data."
+	},
+	{
+		"file": "packages/worker/src/admin/insights-runlog-snapshot.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/admin/insights-runlog-snapshot.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/admin/mailbox-maintenance.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/admin/system-email-data.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/admin/user-usage-data.node.test.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/admin/user-usage-data.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/app/account-deletion-cleanup.node.test.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data."
+	},
+	{
+		"file": "packages/worker/src/app/account-deletion.node.test.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/account-deletion.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/account-r2-prefix-cleanup.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/account-usage-story.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/app/admin-insights-data.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/anonymous-html-edge-cache.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/app/auth-denial-alerts.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/auth-denial-alerts.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/client-entry-assets.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/app/deployment-env.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/app/email-delivery-alerts.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/email-delivery-alerts.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/email-verification-stall-alerts.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/email-verification-stall-alerts.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/env.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/app/fleet-package-error-rate-alerts.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/fleet-package-error-rate-alerts.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/account-avatar.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/account-profile.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/admin-platform-integrations.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/admin-provider-marks.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/auth-handler.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/auth-provider.node.test.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/auth-provider.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/community-install.node.test.ts",
+		"reason": "Import validation, authored package fixture, or third-party provider metadata preserves the literal Cloudflare identifier; no host Cloudflare binding is created."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/health-components-handler.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/health-components.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/package-app.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/app/handlers/profile-avatar.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/package-app-origin.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/app/usage-entitlement-alerts.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/usage-entitlement-alerts.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/user-account-emails.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/user-account-emails.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/user-entitlement-warning-emails.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/user-entitlement-warning-emails.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/app/user-error-rate-emails.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/aws/dynamo-kv.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/billing/compute-overage-account.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/billing/credit-debits.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/billing/credit-wallet.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/community/activity-package-subscriptions.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/community/avatar.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/community/community-flow.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/community/community-icon.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/community/community-icon.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/community/community-scoring.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/community/community-service.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/community/fork-resource-limit.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/community/listing-published-package-subscriptions.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/community/og-image.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/community/snapshot.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/deploy-info.node.test.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/dr/do-pitr-maintenance.node.test.ts",
+		"reason": "Legacy authenticated Cloudflare PITR operator surface and its regression coverage; not exercised or provisioned by the POC. Retirement was rejected by automatic approval review, so retained within the explicit POC scope boundary."
+	},
+	{
+		"file": "packages/worker/src/dr/do-pitr-maintenance.ts",
+		"reason": "Legacy authenticated Cloudflare PITR operator surface and its regression coverage; not exercised or provisioned by the POC. Retirement was rejected by automatic approval review, so retained within the explicit POC scope boundary."
+	},
+	{
+		"file": "packages/worker/src/dr/do-pitr.ts",
+		"reason": "Legacy authenticated Cloudflare PITR operator surface and its regression coverage; not exercised or provisioned by the POC. Retirement was rejected by automatic approval review, so retained within the explicit POC scope boundary."
+	},
+	{
+		"file": "packages/worker/src/durable-object-reset-retry.node.test.ts",
+		"reason": "Historical platform telemetry and workerd sandbox reset classification; PostgreSQL query retries use the separate SQLSTATE classifier."
+	},
+	{
+		"file": "packages/worker/src/durable-object-reset-retry.ts",
+		"reason": "Historical platform telemetry and workerd sandbox reset classification; PostgreSQL query retries use the separate SQLSTATE classifier."
+	},
+	{
+		"file": "packages/worker/src/dynamic-worker-compatibility.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/email/email-raw-mime-store.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/inbound-delivery-reconciliation-authority.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/inbound-due-owners.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/inbound-entitlements.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/inbound.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-do.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-inbound-effect-ledger.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-inbound-graph-commit.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-inbound-ledger.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-internal-read.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-mutations.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-provider-index-repair.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-retention.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/mailbox-retention.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/outbound.node.test.ts",
+		"reason": "Historical test-local name for runMailbox: the imported test-support/mail.ts factory exercises the PostgreSQL/S3-backed mailbox service."
+	},
+	{
+		"file": "packages/worker/src/email/outbound.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/owner-email-reader.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/service.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/system-email-graph-store.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/system-email-sent-package-subscriptions.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/system-email-service.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/system-email.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/system-inbound-delivery-store.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/email/system-inbound-transition-parity.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/env-schema.ts",
+		"reason": "Portable KV/object contract types plus optional legacy operator ports used by retained PITR/analytics/MCP cleanup code. Target environment builder supplies DynamoDB/S3 services, not those legacy namespaces. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/execute-health-heartbeat.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/feature-flags/success-metric-readout.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/front-door/host-context.ts",
+		"reason": "Explicit Node bridge for the existing OAuth SDK import surface; the host compatibility class is not a provisioned Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/identity/reserved-username-settings.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/identity/user-lifecycle-package-subscriptions.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/integrations/default-provider-mark-aliases.ts",
+		"reason": "Import validation, authored package fixture, or third-party provider metadata preserves the literal Cloudflare identifier; no host Cloudflare binding is created."
+	},
+	{
+		"file": "packages/worker/src/jobs/execution-safety.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/jobs/service-execute-failures.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/jobs/service-execute-repo.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/jobs/service-execute.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/kv-cachified.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/mcp-client/client-id-metadata.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp-client/client-id-metadata.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp-client/hub-client.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp-client/hub-oauth-recovery.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp-client/hub.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp-client/mcp-server-logo.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/mcp/capabilities/admin/admin-capabilities.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/mcp/capabilities/admin/admin-platform-provider-mark-capabilities.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/mcp/capabilities/admin/admin-reserved-username-capabilities.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/mcp/capabilities/durable-escalation.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp/capabilities/email/email-attachment-get.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/mcp/capabilities/packages/publish-external-push.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp/capabilities/repo/package-artifact-rebuild.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp/execute-interpretable.node.test.ts",
+		"reason": "Import validation, authored package fixture, or third-party provider metadata preserves the literal Cloudflare identifier; no host Cloudflare binding is created."
+	},
+	{
+		"file": "packages/worker/src/mcp/execute-interpretable.ts",
+		"reason": "Import validation, authored package fixture, or third-party provider metadata preserves the literal Cloudflare identifier; no host Cloudflare binding is created."
+	},
+	{
+		"file": "packages/worker/src/mcp/executor.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/mcp/kody-remote-proxy-source.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/mcp/observability.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp/run-kody-registry.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp/run-kody-registry.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/mcp/test-process.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/oauth-handlers.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/oauth-helpers.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/oauth-helpers.ts",
+		"reason": "Import validation, authored package fixture, or third-party provider metadata preserves the literal Cloudflare identifier; no host Cloudflare binding is created."
+	},
+	{
+		"file": "packages/worker/src/oauth-pkce.ts",
+		"reason": "Import validation, authored package fixture, or third-party provider metadata preserves the literal Cloudflare identifier; no host Cloudflare binding is created."
+	},
+	{
+		"file": "packages/worker/src/oauth-provider-options.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/oauth-purge.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/oauth-purge.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/oauth-refresh-family.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/origin-handler.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/package-app-remix-modules.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/package-codemods/engine.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/package-invocations/http.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/package-invocations/invoke-contract-cache.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/package-invocations/responses.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/package-registry/source-row-batch.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/package-registry/source.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/package-registry/types.ts",
+		"reason": "Import validation, authored package fixture, or third-party provider metadata preserves the literal Cloudflare identifier; no host Cloudflare binding is created."
+	},
+	{
+		"file": "packages/worker/src/package-retrievers/manifest-cache.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/package-retrievers/manifest-cache.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/import-specifiers.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/module-graph-client-bundle.node.test.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/module-graph-client-bundle.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/module-graph-import-rewriting.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/module-graph-paths.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/module-graph-workspace.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/package-app.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/package-secret-authority.node.test.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/package-workflows-cancel.node.test.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/package-workflows-runs.node.test.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/package-workflows.node.test.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/package-workflows.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/published-runtime-artifacts.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/platform-feedback/outcome-email.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/platform-feedback/outcome-email.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/platform-feedback/package-subscriptions.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/platform-worker.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/production-worker.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/repo/artifact-head-cache.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/external-publish.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/identity-icon.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/isolated-artifact-rebuild.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/isolated-check-phases.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/repo-session-blobs.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/repo-session-blobs.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/repo-session-service-publish.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/repo-session-service.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/source-sync.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/repo/source-sync.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/request-body.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/runner/supervisor.ts",
+		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
+	},
+	{
+		"file": "packages/worker/src/runtime-worker.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/src/scheduled-front-door.node.test.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/security/public-route-hardening.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/security/security-hardening.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/sentry-options.node.test.ts",
+		"reason": "Historical platform telemetry and workerd sandbox reset classification; PostgreSQL query retries use the separate SQLSTATE classifier."
+	},
+	{
+		"file": "packages/worker/src/sentry-options.ts",
+		"reason": "Historical platform telemetry and workerd sandbox reset classification; PostgreSQL query retries use the separate SQLSTATE classifier."
+	},
+	{
+		"file": "packages/worker/src/status-incidents/maintenance.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/status-incidents/package-subscriptions.node.test.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/storage-runner.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/test-support/account-deletion.ts",
+		"reason": "Frozen account export/deletion result fields and legacy cleanup inventory compatibility; the target service factories own new PostgreSQL/DynamoDB/S3 data."
+	},
+	{
+		"file": "packages/worker/src/test-support/account-export.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/test-support/auth-provider-harness.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/test-support/aws/fake-s3.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/test-support/jobs-service.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/test-support/repo-session-catalog.ts",
+		"reason": "Compatibility names or test fixtures for the migrated service contract and historical sandbox errors; no target Durable Object is provisioned."
+	},
+	{
+		"file": "packages/worker/src/test-support/repo-session-service.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/test-support/run-kody-registry.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/test-support/sentry-node-stub.ts",
+		"reason": "Historical platform telemetry and workerd sandbox reset classification; PostgreSQL query retries use the separate SQLSTATE classifier."
+	},
+	{
+		"file": "packages/worker/src/usage/aggregate-rollups.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/usage/durable-object-duration-attribution.node.test.ts",
+		"reason": "Legacy Cloudflare GraphQL billing collector and regression coverage, outside the target scheduled entry point; retained historical billing tooling. Retirement was rejected by automatic approval review."
+	},
+	{
+		"file": "packages/worker/src/usage/durable-object-duration-attribution.ts",
+		"reason": "Legacy Cloudflare GraphQL billing collector and regression coverage, outside the target scheduled entry point; retained historical billing tooling. Retirement was rejected by automatic approval review."
+	},
+	{
+		"file": "packages/worker/src/usage/durable-object-rows.node.test.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/usage/durable-object-rows.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/usage/durable-object-usage.node.test.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/usage/durable-object-usage.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/src/usage/fleet-entitlement-crossing-subscriptions.node.test.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/usage/fleet-package-error-rate-subscriptions.node.test.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/usage/fleet-package-error-rate.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/user-id.workers.test.ts",
+		"reason": "Archived Cloudflare integration fixture, excluded from the Node POC test projects; retained behavior coverage pending a separate port, never evidence for the target acceptance gate."
+	},
+	{
+		"file": "packages/worker/src/user-scoped-durable-object-name.node.test.ts",
+		"reason": "Frozen per-user identifier strings remain DynamoDB/storage keys; renaming or changing them would break existing package grants and published identifiers."
+	},
+	{
+		"file": "packages/worker/src/user-scoped-durable-object-name.ts",
+		"reason": "Frozen per-user identifier strings remain DynamoDB/storage keys; renaming or changing them would break existing package grants and published identifiers."
+	},
+	{
+		"file": "packages/worker/src/webhooks/dispatch-payload-store.ts",
+		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "packages/worker/src/worker-bundler-modules.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "packages/worker/universal/compute-overage.node.test.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/universal/compute-overage.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/universal/durable-object-duration.node.test.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/universal/durable-object-duration.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/universal/loader-data.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/universal/plans.node.test.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/universal/plans.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/universal/sentry-config.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/universal/usage-event-types.ts",
+		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
+	},
+	{
+		"file": "packages/worker/workerd-runtime.d.ts",
+		"reason": "Native workerd package sandbox declarations required for published package compatibility; these are not front-door Cloudflare bindings. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "tools/build-guide-catalog-modules.node.test.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "tools/build-guide-catalog-modules.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "tools/build-node-oauth-provider.ts",
+		"reason": "Explicit Node bridge for the existing OAuth SDK import surface; the host compatibility class is not a provisioned Cloudflare service."
+	},
+	{
+		"file": "tools/build-worker-bundler-modules.node.test.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "tools/build-worker-bundler-modules.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "tools/check-cloudflare-references.node.test.ts",
+		"reason": "Synthetic reference strings prove unallowlisted and stale exceptions fail the gate. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "tools/check-cloudflare-references.ts",
+		"reason": "The gate must spell the reference patterns it checks. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "tools/check-decorative-banners.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "tools/check-file-size-ratchet.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "tools/check-lockfile-peer-drift.node.test.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "tools/check-lockfile-peer-drift.ts",
+		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
+	},
+	{
+		"file": "tools/ci/resource-utils.node.test.ts",
+		"reason": "Historical Cloudflare resource operator tooling and tests, outside the POC runtime; no resource/deployment commands run for P8. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "tools/ci/resource-utils.ts",
+		"reason": "Historical Cloudflare resource operator tooling and tests, outside the POC runtime; no resource/deployment commands run for P8. KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
+	},
+	{
+		"file": "tools/control-kody.node.test.ts",
+		"reason": "Retained local/preview operator tooling or its regression fixtures; production and preview workflows are excluded from the POC."
+	},
+	{
+		"file": "tools/control-kody.ts",
+		"reason": "Retained local/preview operator tooling or its regression fixtures; production and preview workflows are excluded from the POC."
+	},
+	{
+		"file": "tools/demo/runner-host.node.test.ts",
+		"reason": "Native workerd package fixture retains cloudflare:workers WorkerEntrypoint to prove the standalone HTTP Runner executes published package graphs unchanged."
+	},
+	{
+		"file": "tools/ensure-dev.node.test.ts",
+		"reason": "Retained local/preview operator tooling or its regression fixtures; production and preview workflows are excluded from the POC."
+	},
+	{
+		"file": "tools/ensure-dev.ts",
+		"reason": "Retained local/preview operator tooling or its regression fixtures; production and preview workflows are excluded from the POC."
+	},
+	{
+		"file": "tools/local-origin-dev-config.node.test.ts",
+		"reason": "Retained local/preview operator tooling or its regression fixtures; production and preview workflows are excluded from the POC."
+	},
+	{
+		"file": "tools/local-origin-dev-config.ts",
+		"reason": "Retained local/preview operator tooling or its regression fixtures; production and preview workflows are excluded from the POC."
+	},
+	{
+		"file": "tools/node-runtime-aliases.ts",
+		"reason": "Explicit Node bridge for the existing OAuth SDK import surface; the host compatibility class is not a provisioned Cloudflare service."
+	},
+	{
+		"file": "tools/preview-manual-test.node.test.ts",
+		"reason": "Retained local/preview operator tooling or its regression fixtures; production and preview workflows are excluded from the POC."
+	}
+]

@@ -1,7 +1,10 @@
-import { DatabaseSync } from 'node:sqlite'
+import {
+	createTestPg,
+	createTestAuditPg,
+} from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as AuditLog from '#worker/audit-log.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import type * as MailboxMaintenance from '#worker/admin/mailbox-maintenance.ts'
@@ -119,35 +122,18 @@ const emptyDeleteResult = {
 	allCapturedBlobsAbsent: true,
 }
 
-function createAdminCtx() {
-	const appSqlite = new DatabaseSync(':memory:')
-	appSqlite.exec(`
-		CREATE TABLE users (
-			id INTEGER PRIMARY KEY,
-			stable_user_id TEXT UNIQUE NOT NULL,
-			username TEXT NOT NULL,
-			email TEXT NOT NULL
-		);
-	`)
-	const auditSqlite = new DatabaseSync(':memory:')
-	auditSqlite.exec(`
-		CREATE TABLE audit_events (
-			id INTEGER PRIMARY KEY,
-			category TEXT NOT NULL,
-			action TEXT NOT NULL,
-			result TEXT NOT NULL,
-			email_hash TEXT,
-			ip_hash TEXT,
-			client_id TEXT,
-			path TEXT,
-			reason TEXT,
-			timestamp TEXT NOT NULL
-		);
-	`)
+async function createAdminCtx() {
+	const appSqlite = await createTestPg()
+
+	const auditSqlite = await createTestAuditPg()
+
 	return {
 		env: {
-			APP_DB: createD1FromSqlite(appSqlite),
-			AUDIT_DB: createD1FromSqlite(auditSqlite),
+			APP_DB: createPgDatabase({ connection: appSqlite, role: 'kody_admin' }),
+			AUDIT_DB: createPgDatabase({
+				connection: auditSqlite,
+				role: 'kody_audit_writer',
+			}),
 		} as Env,
 		callerContext: createMcpCallerContext({
 			baseUrl: 'https://heykody.dev',
@@ -169,7 +155,7 @@ test('adminMailboxMaintenance routes final status, retention, and delete with au
 	mockModule.runAdminMailboxMaintenanceDeleteMessage.mockResolvedValue(
 		emptyDeleteResult,
 	)
-	const ctx = createAdminCtx()
+	const ctx = await createAdminCtx()
 	const stableUserId = testStableUserIdFromEmail('target@example.com')
 	const messageId = 'canary-message-1'
 

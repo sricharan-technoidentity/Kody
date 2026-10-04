@@ -1,7 +1,10 @@
 # Email primitives
 
-Kody has a storage-first email surface for Cloudflare Email Service and Email
-Routing. Every user gets an automatic inbox address at
+Kody has a storage-first email surface. The Node/Temporal POC uses SES provider
+ports, S3 blob adapters and PostgreSQL mailbox metadata; local sends enter a
+synthetic outbox. See [execution and provider limits](../poc/jobs-and-email.md).
+
+The preserved Email Routing. Every user gets an automatic inbox address at
 `{username}@<platform domain>`, where the platform domain is the deployment's
 user email domain: the `USER_EMAIL_DOMAIN` env var when set, otherwise `inbox.`
 plus the hostname of `APP_BASE_URL` (for example `you@inbox.kody.codes`). Kody
@@ -120,14 +123,14 @@ Inbound storage is quota-gated per user:
   apply at storage time. Mail over the daily or stored-message caps is rejected
   at the routing layer with a generic "over quota" response to the sender, and
   the detailed reason is recorded as a `rejected` delivery event. Wire size
-  above 25 MiB (Cloudflare Email Routing's inbound ceiling) is rejected before
-  it consumes any daily receive quota. Mail to unverified accounts (which can
-  never receive) is rejected without consuming any quota at all. Messages at or
-  under the owner's persist cap — including a `multipart/related` body with an
-  embedded image — are stored as-is. Larger accepted mail is stored with the
-  text kept and oversized parts omitted (`emailAttachmentGet` returns no bytes).
-  Transient storage failures (for example an R2 outage while saving raw MIME) do
-  not keep the daily receive charge — the attempt is refunded so delivery
+  above the retained 25 MiB parser ceiling is rejected before it consumes any
+  daily receive quota. Mail to unverified accounts (which can never receive) is
+  rejected without consuming any quota at all. Messages at or under the owner's
+  persist cap — including a `multipart/related` body with an embedded image —
+  are stored as-is. Larger accepted mail is stored with the text kept and
+  oversized parts omitted (`emailAttachmentGet` returns no bytes). Transient
+  storage failures (for example an object-storage outage while saving raw MIME)
+  do not keep the daily receive charge — the attempt is refunded so delivery
   retries are not blocked by quota.
 - Plan users get their plan's limits. New accounts start on the `free` plan. The
   operator-only `max` plan uses finite email caps (10,000 sends/day, 20,000
@@ -176,7 +179,7 @@ Inbound storage is quota-gated per user:
   audit-logged, and is capped per sender per UTC day.
 - Outbound sends consume a per-day entitlement. The `max` plan allows 10,000
   send attempts per UTC day.
-- A successful send request has `processing_status: "sent"`. Cloudflare delivery
+- A successful send request has `processing_status: "sent"`. Provider delivery
   events independently populate `delivery_status` with `delivered`, `deferred`,
   `bounced`, `failed`, `rejected`, or `complained`; use `emailDeliveryEventList`
   for the event history and SMTP details.
@@ -208,15 +211,16 @@ Inbound storage is quota-gated per user:
   `import { email }` from `kody:runtime` is available as a convenience helper
   for message lookup, attachment lookup, and replies.
 - Attachments are metadata-first by default. Accepted inbound raw MIME is stored
-  in R2 at or under the owner's plan `email_message_bytes` persist cap
-  (`maxRawMimeBytes` / `maxKeptInboundRawBytes`, 256 KiB free and 768 KiB
+  in object storage at or under the owner's plan `email_message_bytes` persist
+  cap (`maxRawMimeBytes` / `maxKeptInboundRawBytes`, 256 KiB free and 768 KiB
   paid/max). The reader accepts wire size up to 25 MiB and reduces anything
   above the persist cap: text and HTML stay, oversized parts are recorded as
   `unavailable` attachments. On-demand attachment lookup reconstructs bytes from
   the stored raw MIME when the part was kept; omitted parts return no bytes.
-- Cloudflare Email Routing already rejects mail that fails both SPF and DKIM and
-  honors sender DMARC policy before Kody sees the message. Kody's own spam
-  controls (below) run on mail that still reaches storage.
+- Production inbound transport must establish SPF/DKIM/DMARC handling before
+  deployment. The local POC injects synthetic inbound messages and does not
+  prove provider filtering or routing. Kody's own classification controls
+  (below) run on messages that reach storage.
 
 ## Spam controls
 
@@ -321,10 +325,10 @@ only want trusted inbound mail stay on `email.message.received`.
 
 ## `email.message.delivery.updated` package subscription
 
-Cloudflare Email Sending lifecycle events dispatch
-`email.message.delivery.updated` after Kody correlates the provider message id,
-stores the event idempotently, and updates the outbound message's latest
-delivery status. Email Routing events are not part of this topic.
+Provider email lifecycle events dispatch `email.message.delivery.updated` after
+Kody correlates the provider message id, stores the event idempotently, and
+updates the outbound message's latest delivery status. Email Routing events are
+not part of this topic.
 
 The metadata-first payload contains the owned Kody message and the provider
 delivery event:
@@ -371,8 +375,8 @@ type EmailMessageDeliveryUpdatedEvent = {
 }
 ```
 
-`deferred` means Cloudflare still has delivery retries pending; handlers should
-not independently resend the message. Cloudflare automatically suppresses hard
+`deferred` means the provider still has delivery retries pending; handlers
+should not independently resend the message. The provider can suppress hard
 bounces and spam complaints. Out-of-order events remain in delivery history but
 do not dispatch after a newer delivery state has already been stored.
 
@@ -441,22 +445,13 @@ type SystemEmailSentEvent = {
 
 ## Local inbound testing
 
-Run the worker locally with `APP_BASE_URL` set, sign up a user, then post raw
-MIME to Wrangler's email test endpoint addressed to
-`{username}@inbox.<APP_BASE_URL hostname>` (or `{username}@<USER_EMAIL_DOMAIN>`
-when the override is set). The local worker defaults to port `3742` unless you
-set `PORT`:
-
-```sh
-curl --request POST \
-  'http://localhost:3742/cdn-cgi/handler/email?from=sender@example.com&to=username@inbox.example.com' \
-  --data-raw 'From: Sender <sender@example.com>
-To: Username <username@inbox.example.com>
-Subject: Hello
-Message-ID: <hello@example.com>
-
-Hello from local email routing.'
-```
-
-Then inspect the message with `emailMessageList`, `emailMessageSearch`, and
+The Node POC does not expose Wrangler's email handler endpoint. Local
+integration tests inject synthetic MIME through the mailbox service and Temporal
+mail activities. The demo's SES outbox is an explicit fake; inspect
+seeded/synthetic messages through `emailMessageList`, `emailMessageSearch` and
 `emailMessageGet`.
+
+Production inbound transport, provider authentication/filtering and routing are
+separate deployment work. The optional live SES proof sends to the mailbox
+simulator only. See [jobs and email in the POC](../poc/jobs-and-email.md) and
+[live proof prerequisites](../poc/aws.md).

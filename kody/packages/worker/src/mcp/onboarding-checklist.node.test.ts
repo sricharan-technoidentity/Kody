@@ -1,7 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { buildOnboardingSearchNotice } from '#mcp/tools/search-onboarding-notice.ts'
 import {
@@ -12,20 +12,25 @@ import {
 	readOnboardingChecklistDismissed,
 } from './onboarding-checklist.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
+async function createEnv() {
+	const sqlite = await createTestPg()
 
-function createEnv() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
 	const { env: meterEnv } = createInMemoryUserMeterEnv()
 	return {
-		env: { APP_DB: createD1FromSqlite(sqlite), ...meterEnv } as Env,
+		env: {
+			APP_DB: createPgDatabase({
+				connection: sqlite,
+				role: 'kody_writer',
+				userId: userId,
+			}),
+			...meterEnv,
+		} as Env,
 	}
 }
 
 const userId = 'a'.repeat(64)
 
-async function seedUser(db: D1Database, stableUserId = userId) {
+async function seedUser(db: SqlDatabase, stableUserId = userId) {
 	await db
 		.prepare(
 			`INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id)
@@ -41,7 +46,7 @@ async function seedUser(db: D1Database, stableUserId = userId) {
 		.run()
 }
 
-async function readDismissedAt(db: D1Database, stableUserId = userId) {
+async function readDismissedAt(db: SqlDatabase, stableUserId = userId) {
 	const row = await db
 		.prepare(
 			`SELECT onboarding_checklist_dismissed_at
@@ -54,7 +59,7 @@ async function readDismissedAt(db: D1Database, stableUserId = userId) {
 }
 
 test('checklist derives wizard steps from grants and an access win, not integrations', async () => {
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	await seedUser(env.APP_DB)
 
 	const fresh = await deriveOnboardingChecklist({
@@ -207,7 +212,7 @@ test('checklist derives wizard steps from grants and an access win, not integrat
 })
 
 test('search onboarding notice lists remaining wizard steps without writing dismissal', async () => {
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	await seedUser(env.APP_DB)
 	const envWithGrants = {
 		...env,
@@ -237,7 +242,7 @@ test('search onboarding notice lists remaining wizard steps without writing dism
 })
 
 test('search onboarding notice stays quiet when grants cannot be listed', async () => {
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	await seedUser(env.APP_DB)
 	expect(
 		await buildOnboardingSearchNotice({
@@ -263,7 +268,7 @@ test('search onboarding notice stays quiet when grants cannot be listed', async 
 })
 
 test('access-win memory subject is the newest active subject and fails open', async () => {
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	await seedUser(env.APP_DB)
 	expect(await loadOnboardingAccessWinMemorySubject(env, userId)).toBeNull()
 

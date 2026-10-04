@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { parseJsonStringArray } from '@kody-internal/shared/json-parsing.ts'
 import {
 	decryptPlatformOauthClientSecret,
@@ -95,7 +96,7 @@ const platformAppSelectColumns = `
 `
 
 export async function listPlatformOauthApps(input: {
-	db: D1Database
+	db: SqlDatabase
 	includeDisabled?: boolean
 }): Promise<Array<PlatformOauthApp>> {
 	const statement = input.includeDisabled
@@ -111,7 +112,7 @@ export async function listPlatformOauthApps(input: {
  * creation order so a fresh deployment shows a stable list.
  */
 export async function listTopPlatformAppsByUse(input: {
-	db: D1Database
+	db: SqlDatabase
 	limit: number
 }): Promise<Array<PlatformOauthApp>> {
 	const result = await input.db
@@ -132,7 +133,7 @@ export async function listTopPlatformAppsByUse(input: {
 }
 
 export async function getPlatformOauthAppBySlug(input: {
-	db: D1Database
+	db: SqlDatabase
 	slug: string
 	includeDisabled?: boolean
 }): Promise<PlatformOauthApp | null> {
@@ -182,7 +183,7 @@ export type PlatformOauthAppSaveInput = {
 }
 
 export async function upsertPlatformOauthApp(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'SECRET_KMS'>
 	app: PlatformOauthAppSaveInput
 }): Promise<PlatformOauthApp> {
@@ -343,7 +344,7 @@ export async function upsertPlatformOauthApp(input: {
  * satisfied at every statement, and `db.batch` makes it atomic.
  */
 export async function renamePlatformOauthApp(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'SECRET_KMS'>
 	slug: string
 	newSlug: string
@@ -437,7 +438,7 @@ export async function renamePlatformOauthApp(input: {
 }
 
 export async function deletePlatformOauthApp(input: {
-	db: D1Database
+	db: SqlDatabase
 	slug: string
 }): Promise<boolean> {
 	const slug = canonicalIntegrationName(input.slug)
@@ -459,7 +460,7 @@ export async function deletePlatformOauthApp(input: {
 }
 
 export async function countConnectionsForPlatformApp(input: {
-	db: D1Database
+	db: SqlDatabase
 	slug: string
 }): Promise<number> {
 	const row = await input.db
@@ -480,7 +481,7 @@ export async function countConnectionsForPlatformApp(input: {
  * value in a response, capability output, or log.
  */
 export async function getPlatformOauthAppClientSecret(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'SECRET_KMS'>
 	slug: string
 }): Promise<string | null> {
@@ -496,7 +497,7 @@ export async function getPlatformOauthAppClientSecret(input: {
 }
 
 async function getPlatformOauthAppRowBySlug(input: {
-	db: D1Database
+	db: SqlDatabase
 	slug: string
 }): Promise<PlatformOauthAppRow | null> {
 	const row = await input.db

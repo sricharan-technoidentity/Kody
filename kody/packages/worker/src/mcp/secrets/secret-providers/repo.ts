@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 import {
 	type SecretProviderBindingRecord,
@@ -64,7 +65,7 @@ function toGrantRecord(row: GrantRow): SecretProviderGrantRecord {
 }
 
 async function deleteSecretProviderGrantsForBinding(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; providerId: string },
 ) {
 	await db
@@ -77,7 +78,7 @@ async function deleteSecretProviderGrantsForBinding(
 }
 
 export async function upsertSecretProviderBinding(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		providerId: string
@@ -121,7 +122,7 @@ export async function upsertSecretProviderBinding(
 }
 
 export async function deleteSecretProviderBinding(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; providerId: string },
 ) {
 	await deleteSecretProviderGrantsForBinding(db, input)
@@ -135,7 +136,7 @@ export async function deleteSecretProviderBinding(
 }
 
 export async function getSecretProviderBinding(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; providerId: string },
 ): Promise<SecretProviderBindingRecord | null> {
 	const row = await db
@@ -151,7 +152,7 @@ export async function getSecretProviderBinding(
 }
 
 export async function listSecretProviderBindings(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string },
 ): Promise<Array<SecretProviderBindingRecord>> {
 	const result = await db
@@ -168,7 +169,7 @@ export async function listSecretProviderBindings(
 }
 
 export async function insertSecretProviderGrant(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		providerId: string
@@ -194,7 +195,7 @@ export async function insertSecretProviderGrant(
 }
 
 export async function deleteSecretProviderGrant(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		providerId: string
@@ -212,7 +213,7 @@ export async function deleteSecretProviderGrant(
 }
 
 export async function getSecretProviderGrant(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		providerId: string
@@ -232,7 +233,7 @@ export async function getSecretProviderGrant(
 }
 
 export async function listSecretProviderGrantsForPackage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; packageId: string },
 ): Promise<Array<SecretProviderGrantRecord>> {
 	const result = await db
@@ -248,7 +249,7 @@ export async function listSecretProviderGrantsForPackage(
 }
 
 export async function listSecretProviderGrantsForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string },
 ): Promise<Array<SecretProviderGrantRecord>> {
 	const result = await db

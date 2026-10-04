@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const mockModule = vi.hoisted(() => ({
@@ -70,7 +71,7 @@ const { createAccountValuesApiHandler } = await import('./account-values.ts')
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env
 }
 

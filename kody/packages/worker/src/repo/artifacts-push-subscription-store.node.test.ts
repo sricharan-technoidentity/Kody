@@ -1,31 +1,14 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	deleteArtifactsPushSubscriptionBySourceId,
 	getArtifactsPushSubscriptionBySourceId,
 	upsertArtifactsPushSubscription,
 } from './artifacts-push-subscription-store.ts'
 
-function createDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE entity_source_artifacts_push_subscriptions (
-			source_id TEXT PRIMARY KEY NOT NULL,
-			user_id TEXT NOT NULL,
-			repo_id TEXT NOT NULL,
-			subscription_id TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-		CREATE UNIQUE INDEX idx_entity_source_artifacts_push_subscriptions_repo_id
-			ON entity_source_artifacts_push_subscriptions(repo_id);
-	`)
-	return createD1FromSqlite(sqlite)
-}
-
 test('artifacts push subscription store upserts, reads, and deletes by source', async () => {
-	const db = createDb()
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	await upsertArtifactsPushSubscription(db, {
 		source_id: 'source-1',
 		user_id: 'user-1',
@@ -67,8 +50,11 @@ test('artifacts push subscription store upserts, reads, and deletes by source', 
 })
 
 test('artifacts push subscription store returns null when the side table is absent', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
+	await using database = await createTestDb({ userId: 'user-1' })
+	await database.pg.exec(
+		'DROP TABLE entity_source_artifacts_push_subscriptions',
+	)
+	const db = database.db
 	await expect(
 		getArtifactsPushSubscriptionBySourceId(db, 'source-1'),
 	).resolves.toBeNull()

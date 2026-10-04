@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { joinAppUrl } from '#worker/app-base-url.ts'
 import { dispatchAuthDenialBurstSubscriptionEvent } from './auth-denial-package-subscriptions.ts'
 import { buildAuthDenialBurstEvent } from './auth-denial-subscription-event.ts'
@@ -21,8 +22,8 @@ const watchedAuthDenialActions = [
 ] as const
 
 type AuthDenialAlertEnv = {
-	APP_DB: D1Database
-	AUDIT_DB: D1Database
+	APP_DB: SqlDatabase
+	AUDIT_DB: SqlDatabase
 	APP_BASE_URL?: string
 	BUNDLE_ARTIFACTS_KV?: KVNamespace
 }

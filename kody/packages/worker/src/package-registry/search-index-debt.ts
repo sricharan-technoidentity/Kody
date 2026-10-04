@@ -1,4 +1,5 @@
-import * as Sentry from '@sentry/cloudflare'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { upsertSavedPackageVector } from './vectorize.ts'
 
@@ -27,7 +28,7 @@ type SearchIndexDebtRow = {
 const inFlightReconciles = new Map<string, Promise<void>>()
 
 export async function markSavedPackageSearchIndexDebt(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 	userId: string
 	embedText: string
@@ -65,7 +66,7 @@ export async function markSavedPackageSearchIndexDebt(input: {
 }
 
 export async function clearSavedPackageSearchIndexDebt(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 	generation: number
 }) {
@@ -80,7 +81,7 @@ export async function clearSavedPackageSearchIndexDebt(input: {
 
 /** Read current debt generation, or null when no debt row exists. */
 export async function getSavedPackageSearchIndexDebtGeneration(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 }): Promise<number | null> {
 	const row = await input.db
@@ -93,7 +94,7 @@ export async function getSavedPackageSearchIndexDebtGeneration(input: {
 }
 
 async function readSavedPackageSearchIndexDebt(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 }): Promise<SearchIndexDebtRow | null> {
 	const row = await input.db
@@ -119,7 +120,7 @@ async function readSavedPackageSearchIndexDebt(input: {
 }
 
 async function recordSavedPackageSearchIndexDebtFailure(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageId: string
 	generation: number
 	lastError: string
@@ -136,7 +137,7 @@ async function recordSavedPackageSearchIndexDebtFailure(input: {
 }
 
 export async function listSavedPackageSearchIndexDebt(input: {
-	db: D1Database
+	db: SqlDatabase
 	limit: number
 }): Promise<Array<{ packageId: string; userId: string }>> {
 	const rows = await input.db

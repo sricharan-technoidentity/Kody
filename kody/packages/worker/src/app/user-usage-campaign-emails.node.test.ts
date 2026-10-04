@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
@@ -47,7 +48,7 @@ async function createDb() {
 	const store = await createTestDb()
 	const db = createPgDatabase({ connection: store.pg, role: 'kody_admin' })
 	const forUser = (userId: string) =>
-		store.forUser(userId).db as unknown as D1Database
+		store.forUser(userId).db as unknown as SqlDatabase
 	const env = {
 		APP_DB: db,
 		APP_DB_FOR_USER: forUser,
@@ -58,7 +59,7 @@ async function createDb() {
 	} as unknown as Env
 	return {
 		store,
-		db: db as unknown as D1Database,
+		db: db as unknown as SqlDatabase,
 		forUser,
 		env,
 		userEnv: (userId: string) => ({ ...env, APP_DB: forUser(userId) }) as Env,

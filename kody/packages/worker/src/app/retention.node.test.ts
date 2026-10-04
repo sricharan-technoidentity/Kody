@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	agentPackageConversationUseRetentionDays,
@@ -22,7 +23,7 @@ import {
 import { createPgDatabase, type PgDatabase } from '#worker/aws/pg-database.ts'
 import { createTestAuditDb } from '#worker/test-support/aws/test-audit-db.ts'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
-import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-catalog.ts'
 import { type RepoSessionRow } from '#worker/repo/types.ts'
 
 type Rows = Array<Record<string, unknown>>
@@ -75,11 +76,11 @@ async function createRetentionDb() {
 	})
 	return {
 		retentionDb,
-		db: retentionDb as unknown as D1Database,
+		db: retentionDb as unknown as SqlDatabase,
 		auditDb: createPgDatabase({
 			connection: audit.pg,
 			role: 'kody_audit_retention',
-		}) as unknown as D1Database,
+		}) as unknown as SqlDatabase,
 		sql: fixtureSql(store.pg),
 		auditSql: fixtureSql(audit.pg),
 		store,
@@ -336,7 +337,7 @@ test('retention prune reports selected separately from deleted when rows vanish 
 				},
 			} as typeof prepared
 		},
-	} satisfies PgDatabase as unknown as D1Database
+	} satisfies PgDatabase as unknown as SqlDatabase
 	for (let index = 0; index < 2; index += 1) {
 		await insertPlatformFeedback(sql, {
 			id: `feedback-${index}`,
@@ -414,36 +415,34 @@ test('published bundle artifact retention deletes stale rows, KV blobs, and sour
 	const { sql, db } = retention
 	const kvDelete = vi.fn(async () => undefined)
 	const indexEnv = createInMemoryRepoSessionIndexEnv(db)
-	await indexEnv
-		.REPO_SESSION_INDEX!.get(indexEnv.REPO_SESSION_INDEX!.idFromName('user-1'))
-		.insertSession({
-			ownerId: 'user-1',
-			row: {
-				id: 'session-1',
-				user_id: 'user-1',
-				source_id: 'source-session',
-				source_repo_id: 'repo-1',
-				session_branch: 'sessions/session-1',
-				source_branch: 'main',
-				base_commit: 'commit',
-				source_root: '/',
-				conversation_id: null,
-				status: 'active',
-				expires_at: null,
-				last_checkpoint_at: null,
-				last_checkpoint_commit: null,
-				last_check_run_id: null,
-				last_check_tree_hash: null,
-				created_at: daysAgo(1),
-				updated_at: daysAgo(1),
-			} satisfies RepoSessionRow,
-		})
+	await indexEnv.REPO_SESSION_CATALOG!('user-1').insertSession({
+		ownerId: 'user-1',
+		row: {
+			id: 'session-1',
+			user_id: 'user-1',
+			source_id: 'source-session',
+			source_repo_id: 'repo-1',
+			session_branch: 'sessions/session-1',
+			source_branch: 'main',
+			base_commit: 'commit',
+			source_root: '/',
+			conversation_id: null,
+			status: 'active',
+			expires_at: null,
+			last_checkpoint_at: null,
+			last_checkpoint_commit: null,
+			last_check_run_id: null,
+			last_check_tree_hash: null,
+			created_at: daysAgo(1),
+			updated_at: daysAgo(1),
+		} satisfies RepoSessionRow,
+	})
 	const env = {
 		APP_DB: db,
 		BUNDLE_ARTIFACTS_KV: {
 			delete: kvDelete,
 		},
-		REPO_SESSION_INDEX: indexEnv.REPO_SESSION_INDEX,
+		REPO_SESSION_CATALOG: indexEnv.REPO_SESSION_CATALOG,
 	} as unknown as Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV'> & typeof indexEnv
 	for (const [sourceId, publishedCommit] of [
 		['source-current', 'commit-current'],
@@ -564,14 +563,14 @@ test('published bundle artifact retention rechecks staleness before deleting sel
 			}
 			return prepared
 		},
-	} satisfies PgDatabase as unknown as D1Database
+	} satisfies PgDatabase as unknown as SqlDatabase
 	const env = {
 		APP_DB: dbWithRefreshRace,
 		BUNDLE_ARTIFACTS_KV: {
 			delete: kvDelete,
 		},
-		REPO_SESSION_INDEX:
-			createInMemoryRepoSessionIndexEnv(dbWithRefreshRace).REPO_SESSION_INDEX,
+		REPO_SESSION_CATALOG:
+			createInMemoryRepoSessionIndexEnv(dbWithRefreshRace).REPO_SESSION_CATALOG,
 	} as unknown as Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV'>
 	await sql(
 		`INSERT INTO entity_sources (
@@ -639,7 +638,7 @@ test('retention row deletes chunk ids to stay within the D1 binding limit', asyn
 	const auditDb = withMaxBindings(
 		retention.auditDb as unknown as PgDatabase,
 		100,
-	) as unknown as D1Database
+	) as unknown as SqlDatabase
 	for (let index = 0; index < 101; index += 1) {
 		await insertAuditEvent(auditSql, {
 			timestamp: daysAgo(auditEventRetentionDays + 1),

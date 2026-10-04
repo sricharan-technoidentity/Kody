@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	createEmailInbox,
 	createEmailInboxAddress,
@@ -28,7 +29,7 @@ export type ProvisionedDefaultInbox = {
  * owner without moving the prior owner's inbox or messages.
  */
 export async function ensureDefaultEmailInbox(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	username: string
 	domain: string

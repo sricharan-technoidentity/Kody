@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { assertSystemEmailGraphAuthority } from './system-email-authority.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 import { commitSystemInboundEventMutations } from './system-inbound-delivery-transaction.ts'
@@ -5,7 +6,7 @@ import { commitSystemInboundEventMutations } from './system-inbound-delivery-tra
 const systemInboundProvider = 'cloudflare-email-routing'
 
 export async function recordBoundedSystemEmailRejection(input: {
-	db: D1Database
+	db: SqlDatabase
 	inboxId: string
 	recipient: string
 	reason: string
@@ -43,20 +44,10 @@ export async function recordBoundedSystemEmailRejection(input: {
 							WHERE id = ? AND user_id = ?
 						)
 						ON CONFLICT(id) DO UPDATE SET
-							detail_json = json_set(
-								detail_json,
-								'$.count',
-								COALESCE(json_extract(detail_json, '$.count'), 0) + 1,
-								'$.last_reason',
-								json_extract(excluded.detail_json, '$.last_reason'),
-								'$.last_phase',
-								json_extract(excluded.detail_json, '$.last_phase'),
-								'$.last_at',
-								json_extract(excluded.detail_json, '$.last_at')
-							),
+							detail_json = (jsonb_set(jsonb_set(jsonb_set(jsonb_set((system_email_delivery_events.detail_json)::jsonb, '{count}', COALESCE(to_jsonb((COALESCE((((system_email_delivery_events.detail_json)::jsonb ->> 'count'))::bigint, 0) + 1)::bigint), 'null'::jsonb)), '{last_reason}', COALESCE(to_jsonb((((excluded.detail_json)::jsonb ->> 'last_reason'))::text), 'null'::jsonb)), '{last_phase}', COALESCE(to_jsonb((((excluded.detail_json)::jsonb ->> 'last_phase'))::text), 'null'::jsonb)), '{last_at}', COALESCE(to_jsonb((((excluded.detail_json)::jsonb ->> 'last_at'))::text), 'null'::jsonb)))::text,
 							updated_at = excluded.updated_at
 						RETURNING CAST(
-							json_extract(detail_json, '$.count') AS INTEGER
+							(((system_email_delivery_events.detail_json)::jsonb ->> 'count'))::bigint AS INTEGER
 						) AS count`,
 					)
 					.bind(
@@ -82,7 +73,7 @@ export async function recordBoundedSystemEmailRejection(input: {
 					FROM system_email_delivery_events aggregate
 					WHERE aggregate.id = ?
 						AND CAST(
-							json_extract(aggregate.detail_json, '$.count') AS INTEGER
+							(((aggregate.detail_json)::jsonb ->> 'count'))::bigint AS INTEGER
 						) <= ?`,
 					)
 					.bind(

@@ -70,7 +70,7 @@ function canonicalizeStoredEmail(email: string) {
 }
 
 export async function loadEmailDestinationAccount(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId?: number
 	stableUserId?: string
 }): Promise<EmailDestinationAccount | null> {
@@ -122,7 +122,7 @@ export async function loadEmailDestinationAccount(input: {
 }
 
 async function requireEmailDestinationAccount(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId?: number
 	stableUserId?: string
 }): Promise<EmailDestinationAccount> {
@@ -134,7 +134,7 @@ async function requireEmailDestinationAccount(input: {
 }
 
 async function listAdditionalDestinationRows(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<Array<DestinationRow>> {
 	const result = await db
@@ -150,7 +150,7 @@ async function listAdditionalDestinationRows(
 }
 
 export async function listEmailNotificationDestinations(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId?: number
 	stableUserId?: string
 	accountEmail?: string
@@ -206,7 +206,7 @@ export function buildEmailDestinationsLoaderData(
 }
 
 export async function addEmailNotificationDestination(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId: number
 	email: string
 	now?: Date
@@ -297,7 +297,7 @@ export async function addEmailNotificationDestination(input: {
 }
 
 export async function markEmailNotificationDestinationVerified(input: {
-	db: D1Database
+	db: SqlDatabase
 	destinationId: string
 	userId: number
 	now?: Date
@@ -324,7 +324,7 @@ export async function markEmailNotificationDestinationVerified(input: {
 }
 
 export async function setDefaultEmailNotificationDestination(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId: number
 	destinationId: string
 }): Promise<Array<EmailNotificationDestination>> {
@@ -397,7 +397,7 @@ export async function setDefaultEmailNotificationDestination(input: {
 }
 
 export async function removeEmailNotificationDestination(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId: number
 	destinationId: string
 }): Promise<Array<EmailNotificationDestination>> {
@@ -435,7 +435,7 @@ export async function removeEmailNotificationDestination(input: {
 }
 
 export async function deleteEmailNotificationDestinationRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	destinationId: string
 	userId: number
 }) {
@@ -486,7 +486,7 @@ export function collectAcceptableNotificationEmails(input: {
 }
 
 export async function resolveDefaultNotificationEmail(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	accountEmail: string
 }): Promise<string> {
@@ -508,7 +508,7 @@ export async function resolveDefaultNotificationEmail(input: {
 }
 
 export async function resolveAcceptableNotificationEmails(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	accountEmail: string
 }): Promise<{

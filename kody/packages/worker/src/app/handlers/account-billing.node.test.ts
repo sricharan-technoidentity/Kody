@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as StripeClient from '#worker/billing/stripe-client.ts'
 import { StripeApiError } from '#worker/billing/stripe-client.ts'
@@ -107,7 +108,7 @@ function createBillingDb(customerId: string | null = null) {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function createEnv(overrides: Record<string, unknown> = {}) {

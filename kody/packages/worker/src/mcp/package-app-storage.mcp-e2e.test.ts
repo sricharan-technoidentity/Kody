@@ -35,7 +35,7 @@ type AppStorageResponse = {
 }
 
 function readExecuteResult<T>(toolResult: CallToolResult): T {
-	expect(toolResult.isError).toBeFalsy()
+	expect(toolResult.isError, JSON.stringify(toolResult)).toBeFalsy()
 	const structured = toolResult.structuredContent as ExecuteStructured
 	expect(structured.error).toBeUndefined()
 	expect(structured.result).toBeTruthy()
@@ -106,7 +106,7 @@ export default {
 	]
 }
 
-test('package app fetch handler can use packageStorage against a real local worker', async () => {
+test('package app fetch handler can use packageStorage against the Node front door and real Runner', async () => {
 	silenceExpectedConsoleWarns([
 		/Ignoring duplicate module:.*generated\/esbuild\.wasm/,
 	])

@@ -1,9 +1,9 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { insertSavedPackage } from '#worker/package-registry/repo.ts'
 import { insertEntitySource } from '#worker/repo/entity-sources.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { enablePackageShareGrantsForTests } from '#worker/package-registry/share-flag.ts'
 import {
 	packageShareAcceptCapability,
@@ -15,12 +15,11 @@ import {
 	packageShareRevokeCapability,
 } from './package-share.ts'
 
-const migrationsDirectory = new URL('../../../../migrations/', import.meta.url)
 const ownerUserId = 'aa'.repeat(32)
 const guestUserId = 'bb'.repeat(32)
 
 async function insertUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { username: string; email: string; userId: string },
 ) {
 	await db
@@ -33,7 +32,7 @@ async function insertUser(
 }
 
 function callerContext(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	email: string
 	username: string
@@ -69,18 +68,28 @@ test('package share capabilities declare the package-share-grants flag', () => {
 })
 
 test('packageShareInvite and packageShareAccept use pin by default', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
-	await enablePackageShareGrantsForTests(db)
-	await insertUser(db, {
+	const sqlite = await createTestPg()
+
+	const adminDb = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
+	await enablePackageShareGrantsForTests(adminDb)
+	await insertUser(adminDb, {
 		username: 'alice',
 		email: 'alice@example.com',
 		userId: ownerUserId,
 	})
-	await insertUser(db, {
+	await insertUser(adminDb, {
 		username: 'jesse',
 		email: 'jesse@example.com',
+		userId: guestUserId,
+	})
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: ownerUserId,
+	})
+	const guestDb = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
 		userId: guestUserId,
 	})
 	const packageId = crypto.randomUUID()
@@ -132,7 +141,7 @@ test('packageShareInvite and packageShareAccept use pin by default', async () =>
 	const accepted = await packageShareAcceptCapability.handler(
 		{ name: '@alice/shared-notes' },
 		callerContext({
-			db,
+			db: guestDb,
 			userId: guestUserId,
 			email: 'jesse@example.com',
 			username: 'jesse',
@@ -147,7 +156,7 @@ test('packageShareInvite and packageShareAccept use pin by default', async () =>
 	const listed = await packageShareListCapability.handler(
 		{ scope: 'inbound' },
 		callerContext({
-			db,
+			db: guestDb,
 			userId: guestUserId,
 			email: 'jesse@example.com',
 			username: 'jesse',
@@ -158,14 +167,24 @@ test('packageShareInvite and packageShareAccept use pin by default', async () =>
 })
 
 test('MCP inbound list and accept-by-name see unbound verified email invites', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
-	await enablePackageShareGrantsForTests(db)
-	await insertUser(db, {
+	const sqlite = await createTestPg()
+
+	const adminDb = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
+	await enablePackageShareGrantsForTests(adminDb)
+	await insertUser(adminDb, {
 		username: 'alice',
 		email: 'alice@example.com',
 		userId: ownerUserId,
+	})
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: ownerUserId,
+	})
+	const guestDb = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: guestUserId,
 	})
 	const packageId = crypto.randomUUID()
 	const sourceId = `source-${packageId}`
@@ -209,7 +228,7 @@ test('MCP inbound list and accept-by-name see unbound verified email invites', a
 		}),
 	)
 
-	await insertUser(db, {
+	await insertUser(adminDb, {
 		username: 'jesse',
 		email: 'jesse@example.com',
 		userId: guestUserId,
@@ -218,7 +237,7 @@ test('MCP inbound list and accept-by-name see unbound verified email invites', a
 	const listed = await packageShareListCapability.handler(
 		{ scope: 'inbound' },
 		callerContext({
-			db,
+			db: guestDb,
 			userId: guestUserId,
 			email: 'jesse@example.com',
 			username: 'jesse',
@@ -233,7 +252,7 @@ test('MCP inbound list and accept-by-name see unbound verified email invites', a
 	const accepted = await packageShareAcceptCapability.handler(
 		{ name: '@alice/shared-notes' },
 		callerContext({
-			db,
+			db: guestDb,
 			userId: guestUserId,
 			email: 'jesse@example.com',
 			username: 'jesse',

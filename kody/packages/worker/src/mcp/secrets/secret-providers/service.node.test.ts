@@ -1,8 +1,9 @@
+import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { saveSecret } from '#mcp/secrets/service.ts'
 import * as shareGrants from '#worker/package-registry/share-grants.ts'
@@ -34,62 +35,63 @@ vi.mock('./declared-provider.ts', () => ({
 	readDeclaredSecretProviderId: vi.fn(),
 }))
 
-const migrationsDirectory = new URL('../../../../migrations/', import.meta.url)
 const itemId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const canonicalRef = `i/${itemId}/password`
 const providerId = '1password'
 
 async function createHarness() {
 	clearProviderSecretCacheForTests()
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
+	const sqlite = await createTestPg()
+
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
+		APP_DB: createPgDatabase({
+			connection: sqlite,
+			role: 'kody_writer',
+			userId: 'user-owner',
+		}),
 		SECRET_KMS: testSecretKms,
+		APP_DB_FOR_USER: (userId: string) =>
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
 		...createInMemoryUserMeterEnv().env,
 	} as Env
-	seedUser(sqlite, { id: 1, stableUserId: 'user-owner' })
-	seedUser(sqlite, { id: 2, stableUserId: 'user-guest' })
-	await enableSecretProvidersForTests(env.APP_DB)
+	await seedUser(sqlite, { id: 1, stableUserId: 'user-owner' })
+	await seedUser(sqlite, { id: 2, stableUserId: 'user-guest' })
+	await enableSecretProvidersForTests(
+		createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	)
 	return { sqlite, env }
 }
 
-function seedUser(
-	sqlite: DatabaseSync,
+async function seedUser(
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
 	input: { id: number; stableUserId: string },
 ) {
-	sqlite
-		.prepare(
-			`INSERT INTO users (
+	await pgQuery(sqlite).run(
+		`INSERT INTO users (
 				id, username, email, stable_user_id, password_hash, email_verified_at
 			) VALUES (?, ?, ?, ?, 'x', CURRENT_TIMESTAMP)`,
-		)
-		.run(
-			input.id,
-			input.stableUserId,
-			`${input.stableUserId}@example.com`,
-			input.stableUserId,
-		)
+		input.id,
+		input.stableUserId,
+		`${input.stableUserId}@example.com`,
+		input.stableUserId,
+	)
 }
 
-function seedPackage(
-	sqlite: DatabaseSync,
+async function seedPackage(
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
 	input: { id: string; userId: string; kodyId: string },
 ) {
-	sqlite
-		.prepare(
-			`INSERT INTO saved_packages (
+	await pgQuery(sqlite).run(
+		`INSERT INTO saved_packages (
 				id, user_id, name, kody_id, description, source_id
 			) VALUES (?, ?, ?, ?, ?, ?)`,
-		)
-		.run(
-			input.id,
-			input.userId,
-			input.kodyId,
-			input.kodyId,
-			'',
-			`source-${input.id}`,
-		)
+		input.id,
+		input.userId,
+		input.kodyId,
+		input.kodyId,
+		'',
+		`source-${input.id}`,
+	)
 }
 
 async function seedDoorSecret(env: Env, userId: string) {
@@ -124,8 +126,16 @@ test('provider resolve grants, hosts, cache, owner execute, share owner binding,
 	const { sqlite, env } = await createHarness()
 	const ownerId = 'user-owner'
 	const guestId = 'user-guest'
-	seedPackage(sqlite, { id: 'pkg-provider', userId: ownerId, kodyId: 'op' })
-	seedPackage(sqlite, { id: 'pkg-consumer', userId: ownerId, kodyId: 'deploy' })
+	await seedPackage(sqlite, {
+		id: 'pkg-provider',
+		userId: ownerId,
+		kodyId: 'op',
+	})
+	await seedPackage(sqlite, {
+		id: 'pkg-consumer',
+		userId: ownerId,
+		kodyId: 'deploy',
+	})
 	await seedDoorSecret(env, ownerId)
 	await seedBinding(env, { userId: ownerId, packageId: 'pkg-provider' })
 	vi.mocked(readDeclaredSecretProviderId).mockResolvedValue(providerId)
@@ -232,7 +242,7 @@ test('provider resolve grants, hosts, cache, owner execute, share owner binding,
 	)
 	clearProviderSecretCacheForTests()
 	const shared = await resolveProviderSecret({
-		env,
+		env: getAccountEnv(env, guestId),
 		baseUrl: 'https://kody.example',
 		userId: guestId,
 		provider: providerId,
@@ -289,8 +299,16 @@ test('provider resolve grants, hosts, cache, owner execute, share owner binding,
 test('revoke drops a package grant before the next resolve', async () => {
 	const { sqlite, env } = await createHarness()
 	const ownerId = 'user-owner'
-	seedPackage(sqlite, { id: 'pkg-provider', userId: ownerId, kodyId: 'op' })
-	seedPackage(sqlite, { id: 'pkg-consumer', userId: ownerId, kodyId: 'deploy' })
+	await seedPackage(sqlite, {
+		id: 'pkg-provider',
+		userId: ownerId,
+		kodyId: 'op',
+	})
+	await seedPackage(sqlite, {
+		id: 'pkg-consumer',
+		userId: ownerId,
+		kodyId: 'deploy',
+	})
 	await seedDoorSecret(env, ownerId)
 	await seedBinding(env, { userId: ownerId, packageId: 'pkg-provider' })
 	vi.mocked(readDeclaredSecretProviderId).mockResolvedValue(providerId)
@@ -344,15 +362,25 @@ test('revoke drops a package grant before the next resolve', async () => {
 
 test('flag off treats provider placeholders as unsupported and never calls the provider', async () => {
 	clearProviderSecretCacheForTests()
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
+	const sqlite = await createTestPg()
+
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
+		APP_DB: createPgDatabase({
+			connection: sqlite,
+			role: 'kody_writer',
+			userId: 'user-owner',
+		}),
 		SECRET_KMS: testSecretKms,
+		APP_DB_FOR_USER: (userId: string) =>
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
 		...createInMemoryUserMeterEnv().env,
 	} as Env
 	const ownerId = 'user-owner'
-	seedPackage(sqlite, { id: 'pkg-provider', userId: ownerId, kodyId: 'op' })
+	await seedPackage(sqlite, {
+		id: 'pkg-provider',
+		userId: ownerId,
+		kodyId: 'op',
+	})
 	await seedDoorSecret(env, ownerId)
 	await seedBinding(env, { userId: ownerId, packageId: 'pkg-provider' })
 	vi.mocked(readDeclaredSecretProviderId).mockResolvedValue(providerId)
@@ -374,10 +402,16 @@ test('flag off treats provider placeholders as unsupported and never calls the p
 })
 
 test('flag evaluation is fail-closed when the account cannot be resolved', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
-	await enableSecretProvidersForTests(db)
+	const sqlite = await createTestPg()
+
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: 'user-owner',
+	})
+	await enableSecretProvidersForTests(
+		createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	)
 
 	await expect(
 		isSecretProvidersEnabled({ db, userId: null, stableUserId: null }),
@@ -389,7 +423,7 @@ test('flag evaluation is fail-closed when the account cannot be resolved', async
 		}),
 	).resolves.toBe(false)
 
-	seedUser(sqlite, { id: 10, stableUserId: 'user-owner' })
+	await seedUser(sqlite, { id: 10, stableUserId: 'user-owner' })
 	await expect(
 		isSecretProvidersEnabled({
 			db,
@@ -401,16 +435,25 @@ test('flag evaluation is fail-closed when the account cannot be resolved', async
 	const env = {
 		APP_DB: db,
 		SECRET_KMS: testSecretKms,
+		APP_DB_FOR_USER: (userId: string) =>
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
 		...createInMemoryUserMeterEnv().env,
 	} as Env
-	seedPackage(sqlite, { id: 'pkg-provider', userId: 'ghost', kodyId: 'op' })
-	await seedDoorSecret(env, 'ghost')
-	await seedBinding(env, { userId: 'ghost', packageId: 'pkg-provider' })
+	await seedPackage(sqlite, {
+		id: 'pkg-provider',
+		userId: 'ghost',
+		kodyId: 'op',
+	})
+	await seedDoorSecret(getAccountEnv(env, 'ghost'), 'ghost')
+	await seedBinding(getAccountEnv(env, 'ghost'), {
+		userId: 'ghost',
+		packageId: 'pkg-provider',
+	})
 	vi.mocked(readDeclaredSecretProviderId).mockResolvedValue(providerId)
 	let providerCalls = 0
 	await expect(
 		resolveProviderSecret({
-			env,
+			env: getAccountEnv(env, 'ghost'),
 			baseUrl: 'https://kody.example',
 			userId: 'ghost',
 			provider: providerId,
@@ -427,9 +470,21 @@ test('flag evaluation is fail-closed when the account cannot be resolved', async
 test('rebind to a different package drops grants and the provider cache', async () => {
 	const { sqlite, env } = await createHarness()
 	const ownerId = 'user-owner'
-	seedPackage(sqlite, { id: 'pkg-provider', userId: ownerId, kodyId: 'op' })
-	seedPackage(sqlite, { id: 'pkg-provider-2', userId: ownerId, kodyId: 'op-2' })
-	seedPackage(sqlite, { id: 'pkg-consumer', userId: ownerId, kodyId: 'deploy' })
+	await seedPackage(sqlite, {
+		id: 'pkg-provider',
+		userId: ownerId,
+		kodyId: 'op',
+	})
+	await seedPackage(sqlite, {
+		id: 'pkg-provider-2',
+		userId: ownerId,
+		kodyId: 'op-2',
+	})
+	await seedPackage(sqlite, {
+		id: 'pkg-consumer',
+		userId: ownerId,
+		kodyId: 'deploy',
+	})
 	await seedDoorSecret(env, ownerId)
 	await seedBinding(env, { userId: ownerId, packageId: 'pkg-provider' })
 	vi.mocked(readDeclaredSecretProviderId).mockResolvedValue(providerId)
@@ -535,8 +590,16 @@ test('rebind to a different package drops grants and the provider cache', async 
 test('unbind drops grants and refuses the next resolve', async () => {
 	const { sqlite, env } = await createHarness()
 	const ownerId = 'user-owner'
-	seedPackage(sqlite, { id: 'pkg-provider', userId: ownerId, kodyId: 'op' })
-	seedPackage(sqlite, { id: 'pkg-consumer', userId: ownerId, kodyId: 'deploy' })
+	await seedPackage(sqlite, {
+		id: 'pkg-provider',
+		userId: ownerId,
+		kodyId: 'op',
+	})
+	await seedPackage(sqlite, {
+		id: 'pkg-consumer',
+		userId: ownerId,
+		kodyId: 'deploy',
+	})
 	await seedDoorSecret(env, ownerId)
 	await seedBinding(env, { userId: ownerId, packageId: 'pkg-provider' })
 	vi.mocked(readDeclaredSecretProviderId).mockResolvedValue(providerId)
@@ -581,7 +644,11 @@ test('unbind drops grants and refuses the next resolve', async () => {
 test('grant and inspect require a binding before offering Allow', async () => {
 	const { sqlite, env } = await createHarness()
 	const ownerId = 'user-owner'
-	seedPackage(sqlite, { id: 'pkg-consumer', userId: ownerId, kodyId: 'deploy' })
+	await seedPackage(sqlite, {
+		id: 'pkg-consumer',
+		userId: ownerId,
+		kodyId: 'deploy',
+	})
 	await expect(
 		grantSecretProviderToPackage({
 			env,

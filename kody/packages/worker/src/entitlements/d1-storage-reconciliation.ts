@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type JobsStore } from '@kody-internal/shared/jobs/store.ts'
 import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { type UserMeterEnv } from './user-meter-client.ts'
@@ -27,7 +28,7 @@ import {
 export const d1StorageReconciliationBatchSize = 8
 
 export async function reconcileD1StorageBytes(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	batchSize?: number
 	/** Required because UserMeter is the storage-usage authority. */

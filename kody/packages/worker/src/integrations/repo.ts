@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { parseJsonStringArray } from '@kody-internal/shared/json-parsing.ts'
 import {
 	isIntegrationAuthFailureReason,
@@ -148,7 +149,7 @@ const joinedFromClause = `
 `
 
 export async function listJoinedIntegrationsForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<Array<JoinedIntegration>> {
 	const result = await input.db
@@ -164,7 +165,7 @@ export async function listJoinedIntegrationsForUser(input: {
 }
 
 export async function getJoinedIntegrationByName(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 }): Promise<JoinedIntegration | null> {
@@ -181,7 +182,7 @@ export async function getJoinedIntegrationByName(input: {
 }
 
 export async function getOauthAppBySlug(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	slug: string
 }): Promise<UserOauthApp | null> {
@@ -198,7 +199,7 @@ export async function getOauthAppBySlug(input: {
 }
 
 export async function listOauthAppsByProvider(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	provider: string
 }): Promise<Array<UserOauthApp>> {
@@ -215,7 +216,7 @@ export async function listOauthAppsByProvider(input: {
 }
 
 export async function findOauthAppByClientCredentials(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	clientId: string
 }): Promise<UserOauthApp | null> {
@@ -234,7 +235,7 @@ export async function findOauthAppByClientCredentials(input: {
 
 /** Match an app only when the full app-level tuple agrees (not just credentials). */
 export async function findOauthAppByAppTuple(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	clientId: string
 	tokenUrl: string
@@ -279,7 +280,7 @@ export async function findOauthAppByAppTuple(input: {
 }
 
 export async function listOauthAppsWithConnectionCounts(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<Array<UserOauthAppWithConnectionCount>> {
 	const result = await input.db
@@ -315,7 +316,7 @@ export async function listOauthAppsWithConnectionCounts(input: {
 }
 
 export async function countConnectionsForApp(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	appSlug: string
 }): Promise<number> {
@@ -331,7 +332,7 @@ export async function countConnectionsForApp(input: {
 }
 
 export async function upsertOauthApp(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<
 		UserOauthAppRow,
 		| 'created_at'
@@ -390,7 +391,7 @@ export async function upsertOauthApp(input: {
 }
 
 export async function updateOauthAppClientCredentials(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	slug: string
 	clientId: string
@@ -414,7 +415,7 @@ export async function updateOauthAppClientCredentials(input: {
 }
 
 export async function deleteOauthApp(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	slug: string
 }): Promise<boolean> {
@@ -429,7 +430,7 @@ export async function deleteOauthApp(input: {
 }
 
 export async function upsertIntegrationConnection(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<UserIntegrationRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -473,7 +474,7 @@ export async function upsertIntegrationConnection(input: {
 }
 
 export async function addPlatformIntegrationRequiredHosts(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 	hosts: Array<string>
@@ -496,7 +497,7 @@ export async function addPlatformIntegrationRequiredHosts(input: {
 }
 
 export async function deleteIntegrationConnection(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 }): Promise<boolean> {
@@ -511,7 +512,7 @@ export async function deleteIntegrationConnection(input: {
 }
 
 export async function getIntegrationCredentialCiphertexts(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 }): Promise<{
@@ -538,7 +539,7 @@ export async function getIntegrationCredentialCiphertexts(input: {
 }
 
 export async function updateIntegrationCredentialCiphertexts(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 	accessTokenEncrypted: string
@@ -564,7 +565,7 @@ export async function updateIntegrationCredentialCiphertexts(input: {
 }
 
 export async function getOauthAppClientSecretCiphertext(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	slug: string
 }): Promise<string | null> {
@@ -581,7 +582,7 @@ export async function getOauthAppClientSecretCiphertext(input: {
 }
 
 export async function updateOauthAppClientSecretCiphertext(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	slug: string
 	clientSecretEncrypted: string
@@ -598,7 +599,7 @@ export async function updateOauthAppClientSecretCiphertext(input: {
 }
 
 export async function updateIntegrationUsage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 	usageMode: IntegrationUsageMode
@@ -672,7 +673,7 @@ export function mapIntegrationRow(
 }
 
 export async function writeIntegrationAuthFailure(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 	reason: IntegrationAuthFailureReason
@@ -717,7 +718,7 @@ export async function writeIntegrationAuthFailure(input: {
 }
 
 export async function clearIntegrationAuthFailure(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 }): Promise<void> {

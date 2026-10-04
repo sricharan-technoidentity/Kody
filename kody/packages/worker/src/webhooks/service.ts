@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import {
 	decryptWebhookUrlSecret,
@@ -112,7 +113,7 @@ export type {
 } from './apply.ts'
 
 async function resolveOwnerUsername(input: {
-	db: D1Database
+	db: SqlDatabase
 	email?: string | null
 	username?: string | null
 }) {
@@ -130,7 +131,7 @@ async function resolveOwnerUsername(input: {
 }
 
 async function resolveOwnedPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId?: string
 	kodyId?: string
@@ -553,7 +554,7 @@ type WebhookUrlRevealTarget =
 	| { packageId?: string; kodyId?: string; webhookName: string }
 
 async function resolveRevealHandle(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	target: WebhookUrlRevealTarget
 }) {

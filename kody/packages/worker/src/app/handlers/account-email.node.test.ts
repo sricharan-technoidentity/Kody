@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import type * as EmailPlatformAddress from '#worker/email/platform-address.ts'
@@ -248,7 +249,7 @@ function createEnv(input?: {
 	return {
 		APP_DB: {
 			prepare: (...args: Array<unknown>) => mockModule.prepare(...args),
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 		APP_BASE_URL: 'https://example.com',
 		COOKIE_SECRET: 'secret',
 		...meter.env,

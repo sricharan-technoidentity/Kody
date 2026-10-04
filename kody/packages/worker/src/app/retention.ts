@@ -1,5 +1,6 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { accountRetentionDispositions } from '#app/account-retention-dispositions.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { agentPackagePopularityMaxAgeDays } from '#worker/usage/agent-package-conversation-uses.ts'
 import {
 	buildPublishedSourceManifestSnapshotKvKey,
@@ -184,12 +185,12 @@ function placeholders(values: ReadonlyArray<unknown>) {
 type RowKey = ReadonlyArray<IdValue>
 
 async function selectKeys(input: {
-	db: D1Database
+	db: SqlDatabase
 	sql: string
 	bindings: ReadonlyArray<string | number>
 	keyColumns: ReadonlyArray<string>
 }): Promise<Array<RowKey>> {
-	const { results } = await runD1WithRetry(() =>
+	const { results } = await runSqlWithRetry(() =>
 		input.db
 			.prepare(input.sql)
 			.bind(...input.bindings)
@@ -206,7 +207,7 @@ async function selectKeys(input: {
  * that deletes fewer rows (racing writers) must not mark a table drained.
  */
 async function selectAndDeleteByKeys(input: {
-	db: D1Database
+	db: SqlDatabase
 	sql: string
 	bindings: ReadonlyArray<string | number>
 	table: string
@@ -228,7 +229,7 @@ async function selectAndDeleteByKeys(input: {
  * within the bind limit.
  */
 async function deleteByKeys(input: {
-	db: D1Database
+	db: SqlDatabase
 	table: string
 	keyColumns: ReadonlyArray<string>
 	keys: ReadonlyArray<RowKey>
@@ -245,7 +246,7 @@ async function deleteByKeys(input: {
 	let deleted = 0
 	for (let index = 0; index < input.keys.length; index += rowsPerChunk) {
 		const chunk = input.keys.slice(index, index + rowsPerChunk)
-		const result = await runD1WithRetry(() =>
+		const result = await runSqlWithRetry(() =>
 			input.db
 				.prepare(
 					`DELETE FROM ${input.table}
@@ -275,7 +276,7 @@ async function deletePublishedBundleArtifactRowIfStillStale(input: {
 	) {
 		return 0
 	}
-	const result = await runD1WithRetry(() =>
+	const result = await runSqlWithRetry(() =>
 		input.env.APP_DB.prepare(
 			`DELETE FROM published_bundle_artifacts
 			WHERE id = ?
@@ -296,7 +297,7 @@ async function deletePublishedBundleArtifactRowIfStillStale(input: {
 }
 
 export async function pruneMemorySuppressionsForRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	batchSize?: number
 }) {
@@ -321,7 +322,7 @@ export async function pruneMemorySuppressionsForRetention(input: {
 }
 
 export async function prunePlatformFeedbackForRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	batchSize?: number
 }) {
@@ -346,7 +347,7 @@ export async function prunePlatformFeedbackForRetention(input: {
 	const chunkSize = retentionDeleteIdsMaxParameters - 1
 	for (let index = 0; index < ids.length; index += chunkSize) {
 		const chunk = ids.slice(index, index + chunkSize)
-		const result = await runD1WithRetry(() =>
+		const result = await runSqlWithRetry(() =>
 			input.db
 				.prepare(
 					`DELETE FROM platform_feedback
@@ -372,7 +373,7 @@ export async function prunePublishedBundleArtifactsForRetention(input: {
 		publishedBundleArtifactRetentionDays,
 	)
 	const batchSize = input.batchSize ?? publishedBundleArtifactRetentionBatchSize
-	const { results } = await runD1WithRetry(() =>
+	const { results } = await runSqlWithRetry(() =>
 		input.env.APP_DB.prepare(
 			`SELECT artifact.id, artifact.kv_key, artifact.source_id, artifact.user_id, artifact.published_commit
 		FROM published_bundle_artifacts AS artifact
@@ -464,7 +465,7 @@ export async function prunePublishedBundleArtifactsForRetention(input: {
 }
 
 export async function pruneUsageRollupsForRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	batchSize?: number
 }) {
@@ -486,7 +487,7 @@ export async function pruneUsageRollupsForRetention(input: {
 }
 
 export async function pruneFeatureFlagExposuresForRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	batchSize?: number
 }) {
@@ -508,7 +509,7 @@ export async function pruneFeatureFlagExposuresForRetention(input: {
 }
 
 export async function pruneAuditEventsForRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	batchSize?: number
 }) {
@@ -527,7 +528,7 @@ export async function pruneAuditEventsForRetention(input: {
 }
 
 export async function pruneStripeWebhookEventsForRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	batchSize?: number
 }) {
@@ -549,7 +550,7 @@ export async function pruneStripeWebhookEventsForRetention(input: {
 }
 
 export async function pruneAgentPackageConversationUsesForRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	batchSize?: number
 }) {

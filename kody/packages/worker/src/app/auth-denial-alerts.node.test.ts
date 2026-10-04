@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { authDenialBurstTopic } from './auth-denial-subscription-event.ts'
@@ -31,7 +32,7 @@ function createDb(count: number) {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 test('auth denial burst alerts stay quiet below threshold, then notify and cool down', async () => {

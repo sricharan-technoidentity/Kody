@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { type ContentBlock } from '@modelcontextprotocol/sdk/types.js'
 import {
 	createHostSecretAccessDeniedBatchMessage,
@@ -96,7 +96,7 @@ async function ToolDispatcherCall(_name: string, _argsJson: string) {
 
 function createExecutorTestEnv(loader: Env['LOADER']) {
 	return {
-		LOADER: loader,
+		RUNNER_LOADER: { forContext: vi.fn(() => loader) },
 		APP_COMMIT_SHA: 'commit-for-test',
 	} as Env
 }
@@ -398,18 +398,18 @@ test('createExecuteExecutor aligns dynamic worker compatibility with shared opti
 	expect(workerOptions).toMatchObject(createDynamicWorkerCompatibilityOptions())
 })
 
-test('createExecuteExecutor gives the fetch gateway a deadline under the sandbox budget', async () => {
+test('createExecuteExecutor gives the Runner egress context a deadline under the sandbox budget', async () => {
 	const readGatewayProps = async (timeoutMs?: number | null) => {
 		const fakeLoader = createFakeWorkerLoader()
+		const env = createExecutorTestEnv(fakeLoader.loader)
 		await createExecuteExecutor({
-			env: createExecutorTestEnv(fakeLoader.loader),
+			env,
 			exports: createExecutorTestExports(),
 			gatewayProps: createGatewayProps('user-1'),
 			timeoutMs,
 		}).execute('async () => "ok"', [{ name: 'kody', fns: {} }])
-		const workerOptions = fakeLoader.createdOptions.get(fakeLoader.ids[0]!)
-		return (workerOptions?.globalOutbound as { props?: unknown } | undefined)
-			?.props
+		return (env.RUNNER_LOADER!.forContext as ReturnType<typeof vi.fn>).mock
+			.calls[0]?.[0]
 	}
 
 	await expect(readGatewayProps()).resolves.toMatchObject({

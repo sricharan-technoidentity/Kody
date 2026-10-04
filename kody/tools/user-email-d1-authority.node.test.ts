@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -27,12 +28,12 @@ test('production USER email graph D1 references stay inside static authority bou
 test('static authority catches live and mailbox-named D1 graph SQL', async () => {
 	await using fixture = await authorityFixture({
 		'packages/worker/src/email/live-flow.ts': `
-			export function read(db: D1Database) {
+			export function read(db: SqlDatabase) {
 				return db.prepare('SELECT * FROM email_messages')
 			}
 		`,
 		'packages/worker/src/email/mailbox-escape.ts': `
-			export function write(db: D1Database) {
+			export function write(db: SqlDatabase) {
 				return db.prepare('DELETE FROM "email_threads"')
 			}
 		`,
@@ -55,27 +56,27 @@ test('static authority catches live and mailbox-named D1 graph SQL', async () =>
 test('static authority catches quoted, qualified, TSX, and system-prefix SQL bypasses', async () => {
 	await using fixture = await authorityFixture({
 		'packages/worker/src/email/qualified.ts': `
-			export const read = (db: D1Database) =>
+			export const read = (db: SqlDatabase) =>
 				db.prepare('SELECT * FROM main.email_messages')
 		`,
 		'packages/worker/src/email/double-quoted.ts': `
-			export const read = (db: D1Database) =>
+			export const read = (db: SqlDatabase) =>
 				db.prepare('SELECT * FROM "main"."email_threads"')
 		`,
 		'packages/worker/src/email/bracketed.ts': `
-			export const read = (db: D1Database) =>
+			export const read = (db: SqlDatabase) =>
 				db.prepare('SELECT * FROM [main].[email_attachments]')
 		`,
 		'packages/worker/src/email/backtick.ts': `
-			export const read = (db: D1Database) =>
+			export const read = (db: SqlDatabase) =>
 				db.prepare('SELECT * FROM \`main\`.\`email_delivery_events\`')
 		`,
 		'packages/worker/src/email/single-quoted.tsx': `
-			export const read = (db: D1Database) =>
+			export const read = (db: SqlDatabase) =>
 				db.prepare("SELECT * FROM 'main'.'email_messages'")
 		`,
 		'packages/worker/src/email/system-escape.ts': `
-			export const read = (db: D1Database) =>
+			export const read = (db: SqlDatabase) =>
 				db.prepare('DELETE FROM email_threads')
 		`,
 	})
@@ -147,19 +148,19 @@ test('static authority catches every legacy import shape and mutator aliases', a
 test('static authority rejects dynamic D1 SQL composition, including batched statements', async () => {
 	await using fixture = await authorityFixture({
 		'packages/worker/src/email/template-expression.ts': `
-			export const read = (db: D1Database, table: string) =>
+			export const read = (db: SqlDatabase, table: string) =>
 				db.prepare(\`SELECT * FROM \${table}\`)
 		`,
 		'packages/worker/src/email/concatenated.ts': `
-			export const read = (db: D1Database, suffix: string) =>
+			export const read = (db: SqlDatabase, suffix: string) =>
 				db.prepare('SELECT * FROM email_' + suffix)
 		`,
 		'packages/worker/src/email/nonliteral-variable.ts': `
-			export const read = (db: D1Database, sql: string) => db.prepare(sql)
+			export const read = (db: SqlDatabase, sql: string) => db.prepare(sql)
 		`,
 		'packages/worker/src/email/helper-composed.ts': `
 			const tableSql = (table: string) => \`SELECT * FROM \${table}\`
-			export const read = (db: D1Database) =>
+			export const read = (db: SqlDatabase) =>
 				db.prepare(tableSql('email_messages'))
 		`,
 		'packages/worker/src/email/batched.ts': `
@@ -169,11 +170,11 @@ test('static authority rejects dynamic D1 SQL composition, including batched sta
 				])
 		`,
 		'packages/worker/src/email/exec-template.ts': `
-			export const write = (db: D1Database, table: string) =>
+			export const write = (db: SqlDatabase, table: string) =>
 				db.exec(\`DELETE FROM \${table}\`)
 		`,
 		'packages/worker/src/email/exec-concatenated.ts': `
-			export const write = (db: D1Database, suffix: string) =>
+			export const write = (db: SqlDatabase, suffix: string) =>
 				db.exec('DELETE FROM email_' + suffix)
 		`,
 	})

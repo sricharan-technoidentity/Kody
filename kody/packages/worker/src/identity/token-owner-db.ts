@@ -16,7 +16,7 @@ export type AccountWriterFactory = (stableUserId: string) => PgDatabase
 export function getAccountWriterFactory(
 	env: Pick<Env, 'APP_DB'>,
 ): AccountWriterFactory | undefined {
-	// ponytail: legacy Env has no APP_DB_FOR_USER; P7's AwsEnv builds it from createPgPools().forUser.
+	// ponytail: legacy fixtures may omit APP_DB_FOR_USER; require the host account writer factory after those fixtures are converted.
 	return (env as { APP_DB_FOR_USER?: AccountWriterFactory }).APP_DB_FOR_USER
 }
 
@@ -40,8 +40,8 @@ export function getAccountEnv<E extends Pick<Env, 'APP_DB'>>(
 export function getNewAccountDb(
 	env: Pick<Env, 'APP_DB'>,
 	stableUserId: string,
-): D1Database | PgDatabase {
-	const db = env.APP_DB as D1Database | PgDatabase
+): SqlDatabase | PgDatabase {
+	const db = env.APP_DB as SqlDatabase | PgDatabase
 	if (!('dialect' in db && db.dialect === 'postgres')) return db
 	const forUser = getAccountWriterFactory(env)
 	if (!forUser)

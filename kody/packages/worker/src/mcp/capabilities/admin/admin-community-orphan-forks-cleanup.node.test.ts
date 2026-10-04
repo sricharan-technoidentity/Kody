@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import {
@@ -16,7 +17,7 @@ vi.mock('#worker/community/service.ts', () => ({
 
 function createContext(roles: Array<string>) {
 	return {
-		env: { APP_DB: {} as D1Database } as Env,
+		env: { APP_DB: {} as SqlDatabase } as Env,
 		callerContext: createMcpCallerContext({
 			baseUrl: 'https://heykody.dev',
 			user: {

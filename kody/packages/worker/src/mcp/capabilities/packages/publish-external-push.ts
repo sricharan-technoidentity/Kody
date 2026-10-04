@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { z } from 'zod'
 import { canonicalJsonStringify } from '@kody-internal/shared/canonical-json.ts'
 import { resolveHostedPackageAppUrl } from '@kody-internal/shared/public-urls.ts'
@@ -517,7 +518,7 @@ async function getPendingSecretApprovalsForPublishedPackage(input: {
 }
 
 async function getPublishStaticDependents(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	sourceId: string
 	publishedCommit: string | null

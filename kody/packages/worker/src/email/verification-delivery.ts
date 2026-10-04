@@ -63,7 +63,7 @@ function truncateDeliveryDetail(value: string | null | undefined) {
 }
 
 export async function registerTransactionalEmailDelivery(input: {
-	db: D1Database
+	db: SqlDatabase
 	providerMessageId: string
 	userId: number
 	recipient: string
@@ -96,7 +96,7 @@ export async function registerTransactionalEmailDelivery(input: {
 }
 
 export async function lookupTransactionalEmailDelivery(input: {
-	db: D1Database
+	db: SqlDatabase
 	providerMessageId: string
 }) {
 	return await input.db
@@ -115,7 +115,7 @@ export async function lookupTransactionalEmailDelivery(input: {
 }
 
 export async function loadUserEmailVerificationDelivery(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<EmailVerificationDelivery | null> {
 	const row = await db
@@ -139,7 +139,7 @@ export async function loadUserEmailVerificationDelivery(
 }
 
 export async function setUserEmailVerificationDelivery(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	status: EmailVerificationDeliveryStatus
 	class?: EmailVerificationDeliveryClass | null
@@ -191,7 +191,7 @@ export async function clearUserEmailVerificationDelivery(
 }
 
 export async function assertVerificationResendAllowed(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ) {
 	const delivery = await loadUserEmailVerificationDelivery(db, userId)
@@ -217,7 +217,7 @@ export type RecordedTransactionalDelivery = {
 }
 
 export async function recordTransactionalEmailDeliveryEvent(input: {
-	db: D1Database
+	db: SqlDatabase
 	providerMessageId: string
 	deliveryStatus: EmailDeliveryStatus
 	eventTimestamp: string

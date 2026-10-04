@@ -1,9 +1,6 @@
-import * as Sentry from '@sentry/cloudflare'
-import { DurableObject } from 'cloudflare:workers'
-import { Lifecycle } from 'agents/lifecycle'
+import { type McpClientStorage } from './storage.ts'
 import { MCPClientManager } from 'agents/mcp/client'
 import { type CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { buildSentryOptions } from '#worker/sentry-options.ts'
 import {
 	createMcpClientOAuthProvider,
 	mcpClientName,
@@ -97,46 +94,27 @@ export function isRecoverableMcpOAuthStateError(error: string | null) {
 	)
 }
 
-/**
- * Per-user Durable Object that owns the Agents SDK `MCPClientManager` for all
- * of that user's remote MCP servers. The DO id is derived from the stable MCP
- * `userId` (see `mcp-client-hub-key.ts` helpers in `hub-client.ts`), so
- * connections, OAuth client registrations, and tokens are isolated per user
- * inside this object's storage.
- */
-class McpClientHubBase extends DurableObject<Env> {
+/** Owner-scoped remote MCP service; registrations persist in Aurora, credentials in Identity. */
+export class McpClientHub {
 	private readonly manager: MCPClientManager
-	private readonly lifecycle: Lifecycle<Env>
+	private readonly ctx: { storage: McpClientStorage }
 	private restored: Promise<void> | null = null
 	private readonly lastDiscoverErrors = new Map<string, McpServerLastError>()
 	private readonly tokenPresence = new Map<string, McpOAuthTokenPresence>()
 	private readonly connectLocks = new Map<string, Promise<void>>()
 
-	constructor(state: DurableObjectState, env: Env) {
-		super(state, env)
-		// The manager creates this table during lifecycle start, but
-		// `sanitizeStoredMcpSessions` reads it before start so the table must
-		// exist first.
-		state.storage.sql.exec(`
-			CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-				id TEXT PRIMARY KEY NOT NULL,
-				name TEXT NOT NULL,
-				server_url TEXT NOT NULL,
-				callback_url TEXT NOT NULL,
-				client_id TEXT,
-				auth_url TEXT,
-				server_options TEXT
-			)
-		`)
-		// createAuthProvider mirrors Agent.addMcpServer so restore + OAuth
-		// callback paths rebuild a DO-storage-backed provider after hibernation.
+	constructor(storage: McpClientStorage) {
+		this.ctx = { storage }
 		this.manager = new MCPClientManager(mcpClientName, mcpClientVersion, {
 			createAuthProvider: (callbackUrl) =>
-				createMcpClientOAuthProvider(state.storage, callbackUrl),
+				createMcpClientOAuthProvider(
+					storage as unknown as DurableObjectStorage,
+					callbackUrl,
+				),
 		})
-		// The manager is a lifecycle capability: it receives DO storage from the
-		// lifecycle and restores persisted connections in its `onStart`.
-		this.lifecycle = Lifecycle.install(this).use(this.manager)
+		// The SDK's HTTP manager and OAuth helpers are Node-compatible. Only its
+		// lifecycle storage dependency is replaced; no Durable Object is constructed.
+		Object.defineProperty(this.manager, 'lifecycle', { value: { storage } })
 	}
 
 	private ensureRestored() {
@@ -149,10 +127,13 @@ class McpClientHubBase extends DurableObject<Env> {
 	 * sessions are dropped first because start restores connections.
 	 */
 	private async restoreSanitizedConnections() {
-		sanitizeStoredMcpSessions(this.ctx.storage, {
-			keepLegacyHandshakeIds: await this.readLegacyHandshakeServerIds(),
-		})
-		await this.lifecycle.start()
+		sanitizeStoredMcpSessions(
+			this.ctx.storage as unknown as DurableObjectStorage,
+			{
+				keepLegacyHandshakeIds: await this.readLegacyHandshakeServerIds(),
+			},
+		)
+		await this.manager.onStart()
 		await this.hydrateTokenRecoveryErrors()
 	}
 
@@ -301,7 +282,7 @@ class McpClientHubBase extends DurableObject<Env> {
 		// authorization URL. The clientName must match the one passed to
 		// `restoreConnectionsFromStorage` so storage keys line up after restarts.
 		const authProvider = createMcpClientOAuthProvider(
-			this.ctx.storage,
+			this.ctx.storage as unknown as DurableObjectStorage,
 			input.callbackUrl,
 		)
 		authProvider.serverId = input.serverId
@@ -645,7 +626,7 @@ class McpClientHubBase extends DurableObject<Env> {
 			})
 
 			const authProvider = createMcpClientOAuthProvider(
-				this.ctx.storage,
+				this.ctx.storage as unknown as DurableObjectStorage,
 				input.callbackUrl,
 			)
 			authProvider.serverId = input.serverId
@@ -673,7 +654,7 @@ class McpClientHubBase extends DurableObject<Env> {
 			}
 
 			const originalAuthProvider = createMcpClientOAuthProvider(
-				this.ctx.storage,
+				this.ctx.storage as unknown as DurableObjectStorage,
 				row.callback_url,
 			)
 			originalAuthProvider.serverId = input.serverId
@@ -814,7 +795,7 @@ class McpClientHubBase extends DurableObject<Env> {
 		try {
 			await this.manager.removeServer(serverId)
 			const authProvider = createMcpClientOAuthProvider(
-				this.ctx.storage,
+				this.ctx.storage as unknown as DurableObjectStorage,
 				row.callback_url,
 			)
 			authProvider.serverId = serverId
@@ -836,7 +817,7 @@ class McpClientHubBase extends DurableObject<Env> {
 			try {
 				await this.manager.removeServer(serverId).catch(() => {})
 				const authProvider = createMcpClientOAuthProvider(
-					this.ctx.storage,
+					this.ctx.storage as unknown as DurableObjectStorage,
 					row.callback_url,
 				)
 				authProvider.serverId = serverId
@@ -1727,11 +1708,7 @@ class McpClientHubBase extends DurableObject<Env> {
 		this.restored = null
 		await this.ctx.storage.deleteAll()
 	}
+	async close() {
+		await this.manager.closeAllConnections()
+	}
 }
-
-export const McpClientHub = Sentry.instrumentDurableObjectWithSentry(
-	(env: Env) => buildSentryOptions(env),
-	McpClientHubBase,
-)
-
-export type McpClientHub = InstanceType<typeof McpClientHub>

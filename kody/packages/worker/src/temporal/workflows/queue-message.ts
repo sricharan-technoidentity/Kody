@@ -1,4 +1,9 @@
-import { proxyActivities } from '@temporalio/workflow'
+import {
+	executeChild,
+	proxyActivities,
+	workflowInfo,
+} from '@temporalio/workflow'
+import { DeliveryEvents } from './delivery-events.ts'
 import {
 	type KodyActivities,
 	type QueueMessageInput,
@@ -19,5 +24,12 @@ const { processQueueMessage } = proxyActivities<
 
 /** One former queue message (`queue:{queue}:{key}`). */
 export async function QueueMessage(input: QueueMessageInput): Promise<void> {
+	if (input.queue === 'email-delivery') {
+		await executeChild(DeliveryEvents, {
+			workflowId: `${workflowInfo().workflowId}:delivery`,
+			args: [{ body: input.body }],
+		})
+		return
+	}
 	await processQueueMessage(input)
 }

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const mockModule = vi.hoisted(() => ({
@@ -54,7 +55,7 @@ vi.mock('./source-sync.ts', () => ({
 const { forkArtifactRepo, persistForkedArtifactRepoContents } =
 	await import('./artifact-repo-fork.ts')
 
-const env = { APP_DB: {} as D1Database } as Env
+const env = { APP_DB: {} as SqlDatabase } as Env
 const source = {
 	id: 'source-1',
 	user_id: 'user-1',

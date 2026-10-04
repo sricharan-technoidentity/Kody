@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	parseJsonStringArray,
 	parseJsonWithFallback,
@@ -106,7 +107,7 @@ function toListItem(row: Record<string, unknown>): AdminSystemEmailListItem {
 	}
 }
 
-async function listAttachments(db: D1Database, messageId: string) {
+async function listAttachments(db: SqlDatabase, messageId: string) {
 	const attachments = await listSystemEmailAttachments({ db, messageId })
 	return attachments.map((attachment) => ({
 		id: attachment.id,
@@ -121,7 +122,7 @@ async function listAttachments(db: D1Database, messageId: string) {
 }
 
 export async function loadAdminSystemEmailMessageById(
-	db: D1Database,
+	db: SqlDatabase,
 	messageId: string,
 	blobs: R2Bucket,
 ): Promise<AdminSystemEmailDetail | null> {

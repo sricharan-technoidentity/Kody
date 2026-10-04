@@ -329,12 +329,13 @@ test.each([
 // Bootstraps a real temp git repo and spawns the checker script, which can
 // exceed the default test timeout on loaded local machines.
 test(
-	'runtime main validation rejects a historical migration and ledger co-edit',
+	'runtime main validation rejects a historical migration and ledger co-edit in a nested checkout',
 	{ timeout: 30_000 },
 	async () => {
 		const tempRoot = await mkdtemp(
 			path.join(os.tmpdir(), 'kody-migration-main-'),
 		)
+		const projectRoot = path.join(tempRoot, 'project')
 		const checkerPath = fileURLToPath(
 			new URL('./check-migrations.ts', import.meta.url),
 		)
@@ -352,18 +353,18 @@ test(
 			})
 
 		try {
-			await mkdir(path.join(tempRoot, 'packages', 'worker'), {
+			await mkdir(path.join(projectRoot, 'packages', 'worker'), {
 				recursive: true,
 			})
-			await mkdir(path.join(tempRoot, 'tools'), { recursive: true })
+			await mkdir(path.join(projectRoot, 'tools'), { recursive: true })
 			await cp(
 				path.join('packages', 'worker', 'migrations'),
-				path.join(tempRoot, 'packages', 'worker', 'migrations'),
+				path.join(projectRoot, 'packages', 'worker', 'migrations'),
 				{ recursive: true },
 			)
 			await cp(
 				path.join('tools', 'migration-ledger.json'),
-				path.join(tempRoot, 'tools', 'migration-ledger.json'),
+				path.join(projectRoot, 'tools', 'migration-ledger.json'),
 			)
 			runGit('init', '-b', 'main')
 			runGit('config', 'user.name', 'Migration Test')
@@ -372,13 +373,17 @@ test(
 			runGit('commit', '-m', 'bootstrap')
 
 			const migrationPath = path.join(
-				tempRoot,
+				projectRoot,
 				'packages',
 				'worker',
 				'migrations',
 				'0091-future.sql',
 			)
-			const ledgerPath = path.join(tempRoot, 'tools', 'migration-ledger.json')
+			const ledgerPath = path.join(
+				projectRoot,
+				'tools',
+				'migration-ledger.json',
+			)
 			const ledger = JSON.parse(
 				await readFile(ledgerPath, 'utf8'),
 			) as MigrationLedger
@@ -404,7 +409,7 @@ test(
 			runGit('commit', '-m', 'co-edit migration and ledger')
 
 			const result = spawnSync(process.execPath, [checkerPath], {
-				cwd: tempRoot,
+				cwd: projectRoot,
 				encoding: 'utf8',
 				env: {
 					...scratchGitEnv,

@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import {
 	type ContentBlock,
 	type ToolAnnotations,

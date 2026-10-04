@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider'
 import { getWorkerSentryOptions } from './sentry-options.ts'
 import { handleRequest } from '#app/handler.ts'
@@ -53,7 +53,7 @@ import { handleDoPitrRequest } from '#worker/dr/do-pitr-maintenance.ts'
 import { handleStatusIncidentEventRequest } from '#worker/status-incidents/maintenance.ts'
 import { verifyPublicFormProtection } from '#app/public-form-protection.ts'
 import { getLegacyHostRedirectResponse } from '#worker/app-legacy-redirect.ts'
-import { isRuntimeWorkerOwnedRequest } from '#worker/runtime-worker-routing.ts'
+import { isAppEdgeRequest, fetchAppEdge } from '#worker/front-door/app-edge.ts'
 import {
 	isNamespacedAppEndpointPath,
 	isNamespacedPackageInvocationEndpointPath,
@@ -69,27 +69,10 @@ import { runWithDynamicWorkerEvaluationBudget } from '#worker/dynamic-worker-eva
 // Immutable caching is only safe when asset URLs are versioned by a real
 // commit sha. In local dev the build id falls back to a constant ('dev'), so
 // an immutable header would pin browsers to a stale bundle across rebuilds.
-type LegacyMcpFetch = Parameters<typeof handleMcpRequest>[0]['fetchMcp']
-let legacyMcpFetchMemo: Promise<LegacyMcpFetch> | null = null
+import { fetchLegacyMcp } from './mcp/index.ts'
 
-/**
- * The legacy MCP lane routes through the `MCP` Durable Object stub via the
- * agents SDK. Loading `./mcp/index.ts` statically would evaluate the agents
- * and MCP server SDKs during Worker startup; the first legacy request pays
- * for it instead and the served fetch is cached for the isolate.
- */
-function loadLegacyMcpFetch(): Promise<LegacyMcpFetch> {
-	legacyMcpFetchMemo ??= import('./mcp/index.ts')
-		.then(
-			({ MCP }) =>
-				MCP.serve(mcpResourcePath, { binding: 'MCP_OBJECT' })
-					.fetch as LegacyMcpFetch,
-		)
-		.catch((error: unknown) => {
-			legacyMcpFetchMemo = null
-			throw error
-		})
-	return legacyMcpFetchMemo
+function loadLegacyMcpFetch() {
+	return Promise.resolve(fetchLegacyMcp)
 }
 
 function shouldApplyLongLivedAssetCaching(pathname: string, env: Env) {
@@ -520,14 +503,7 @@ async function fetchWithDynamicWorkerBudget(
 	})
 	if (nonCanonicalHost) return nonCanonicalHost
 
-	// Package runtime lane extraction (ADR 0016): when the runtime Worker
-	// service binding is configured, runtime-owned requests (package-app
-	// origin, inline package apps, package invocation API) are forwarded
-	// wholesale to the `kody-runtime` Worker. Without the binding (tests,
-	// single-worker local dev) the in-process handlers below keep serving.
-	if (env.RUNTIME_WORKER && isRuntimeWorkerOwnedRequest(request, env)) {
-		return env.RUNTIME_WORKER.fetch(request)
-	}
+	if (isAppEdgeRequest(request, env)) return fetchAppEdge(request, env, ctx)
 
 	return serveAnonymousHtmlFromCache(request, env, ctx, () =>
 		handleOriginAppFetch(request, env, ctx, url),

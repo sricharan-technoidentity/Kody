@@ -1,4 +1,4 @@
-import { WorkerEntrypoint } from 'cloudflare:workers'
+import { WorkerEntrypoint } from '#worker/front-door/host-context.ts'
 import { recordUsage } from './record-usage.ts'
 
 export const dynamicWorkerCpuEventType = 'dynamic_worker_cpu'
@@ -8,7 +8,7 @@ export const dynamicWorkerCpuEventType = 'dynamic_worker_cpu'
  * carry this tail. Bump it when the tail's WorkerCode contract changes so
  * cached isolates pick up the new tail instead of keeping the old one.
  */
-export const dynamicWorkerUsageTailLoaderIdSuffix = '-cpu1'
+export { dynamicWorkerUsageTailLoaderIdSuffix } from '#worker/dynamic-worker-compatibility.ts'
 
 export type DynamicWorkerUsageTailProps = {
 	userId: string

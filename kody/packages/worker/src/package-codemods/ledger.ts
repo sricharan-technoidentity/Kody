@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	maxRestorableTextColumnBytes,
 	truncateToUtf8Bytes,
@@ -176,7 +177,7 @@ function mapItemRow(row: Record<string, unknown>): PackageCodemodRunItemRecord {
 }
 
 export async function createPackageCodemodRun(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		codemodId: string
@@ -235,7 +236,7 @@ export async function createPackageCodemodRun(
  * number of rows changed.
  */
 export async function updatePackageCodemodRunStatus(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		status: PackageCodemodRunStatus
@@ -265,7 +266,7 @@ export async function updatePackageCodemodRunStatus(
  * in `running` forever. Returns the number of runs marked.
  */
 export async function markAbandonedPackageCodemodRuns(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		updatedBefore: string
 		updatedAt?: string
@@ -284,7 +285,7 @@ export async function markAbandonedPackageCodemodRuns(
 }
 
 export async function getPackageCodemodRunById(
-	db: D1Database,
+	db: SqlDatabase,
 	runId: string,
 	options?: { userId?: string },
 ): Promise<PackageCodemodRunRecord | null> {
@@ -311,7 +312,7 @@ export async function getPackageCodemodRunById(
 }
 
 export async function listPackageCodemodRuns(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		codemodId?: string
 		scopeUserId?: string | null
@@ -349,7 +350,7 @@ export async function listPackageCodemodRuns(
 }
 
 export async function insertPackageCodemodRunItem(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		runId: string
@@ -424,7 +425,7 @@ export async function insertPackageCodemodRunItem(
 }
 
 export async function updatePackageCodemodRunItem(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		status?: string
@@ -488,7 +489,7 @@ export async function updatePackageCodemodRunItem(
 }
 
 export async function listPackageCodemodRunItems(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		runId: string
 		afterId?: string | null
@@ -522,7 +523,7 @@ export async function listPackageCodemodRunItems(
 }
 
 export async function getPackageCodemodRunItemById(
-	db: D1Database,
+	db: SqlDatabase,
 	itemId: string,
 	options?: { userId?: string },
 ): Promise<PackageCodemodRunItemRecord | null> {

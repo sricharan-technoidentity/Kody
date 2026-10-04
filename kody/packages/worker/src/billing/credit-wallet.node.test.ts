@@ -1,8 +1,9 @@
-import { DatabaseSync } from 'node:sqlite'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { createInMemoryRunLogUsageEnv } from '#worker/test-support/run-log-usage.ts'
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { onTestFinished, expect, test, vi } from 'vitest'
 import { utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 import {
 	grantAdminCreditsToUser,
@@ -10,7 +11,6 @@ import {
 	setAdminCreditEligibility,
 } from '#worker/admin/credit-grants.ts'
 import { updateAdminUserPlan } from '#worker/admin/users-data.ts'
-import { ensureRbacTestSchema } from '#worker/test-support/workers-seed.ts'
 import {
 	assertWithinComputeInclude,
 	consumeDailyEntitlement,
@@ -30,14 +30,13 @@ import {
 	readCreditWallet,
 	updateCreditWalletSettings,
 } from './credit-wallet.ts'
-import { ensureCreditWalletTestSchema } from './test-schema.ts'
 
-let sqlite: DatabaseSync
-let env: Env
-beforeEach(() => {
-	sqlite = new DatabaseSync(':memory:')
-	env = {
-		APP_DB: createD1FromSqlite(sqlite),
+async function createBillingHarness() {
+	const sqlite = await createTestPg()
+	const env = {
+		APP_DB: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+		APP_DB_FOR_USER: (userId: string) =>
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
 		COOKIE_SECRET: 'billing-test-cookie-secret',
 		...createInMemoryUserMeterEnv().env,
 		...createInMemoryRunLogUsageEnv().env,
@@ -51,85 +50,126 @@ beforeEach(() => {
 			}),
 		},
 	} as unknown as Env
-})
-afterEach(() => {
-	sqlite.close()
-	vi.unstubAllGlobals()
-})
+
+	onTestFinished(() => {
+		vi.unstubAllGlobals()
+	})
+	async function seedUser(input: {
+		label: string
+		plan?: string
+		stripePlan?: string | null
+		creditsEligible?: boolean
+		stripeCustomerId?: string | null
+	}) {
+		const email = `${input.label}-${crypto.randomUUID()}@example.com`
+		const stableUserId = await createStableUserIdFromEmail(email)
+		await env.APP_DB.prepare(
+			`INSERT INTO users (
+			username, email, password_hash, email_verified_at, stable_user_id, plan,
+			stripe_customer_id, stripe_plan, stripe_credits_eligible
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+			.bind(
+				`${input.label}-${crypto.randomUUID().slice(0, 8)}`,
+				email,
+				'test-password-hash',
+				now.toISOString(),
+				stableUserId,
+				input.plan ?? 'free',
+				input.stripeCustomerId ?? null,
+				input.stripePlan ?? null,
+				input.creditsEligible ? 1 : 0,
+			)
+			.run()
+		return { email, stableUserId }
+	}
+	async function setRollup(input: {
+		userId: string
+		metric: 'dynamic_worker_day' | 'durable_object_rows_read'
+		count: number
+		month?: string
+	}) {
+		await pgQuery(sqlite).run(
+			`INSERT INTO usage_rollups (user_id, metric, month, event_count)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (user_id, metric, month) DO UPDATE SET event_count = excluded.event_count`,
+			input.userId,
+			input.metric,
+			input.month ?? month,
+			input.count,
+		)
+	}
+	async function entitlementFor(user: { email: string; stableUserId: string }) {
+		return getUserEntitlement(env.APP_DB, {
+			userId: user.stableUserId,
+			email: user.email,
+		})
+	}
+	async function topUp(input: {
+		userId: string
+		cents: number
+		reference?: string
+	}) {
+		return applyCreditPayment({
+			db: env.APP_DB,
+			userId: input.userId,
+			kind: 'top_up',
+			amountCents: input.cents,
+			stripeReference: input.reference ?? `cs_${crypto.randomUUID()}`,
+			paymentMethodId: 'pm_saved',
+			now,
+		})
+	}
+	function consume(
+		user: { email: string; stableUserId: string },
+		resource: Parameters<typeof consumeDailyEntitlement>[0]['resource'],
+	) {
+		return consumeDailyEntitlement({
+			db: env.APP_DB,
+			env,
+			userId: user.stableUserId,
+			email: user.email,
+			resource,
+			now,
+		})
+	}
+	async function expectStopped(
+		user: { email: string; stableUserId: string },
+		resource: Parameters<typeof consumeDailyEntitlement>[0]['resource'],
+		expected: { resource: string; limit: number; current: number },
+	) {
+		const error = await consume(user, resource).then(
+			() => null,
+			(caught: unknown) => caught,
+		)
+		expect(isComputeOverageLimitError(error)).toBe(true)
+		if (!isComputeOverageLimitError(error)) return
+		expect(error.details).toMatchObject({
+			code: 'compute_overage_include_reached',
+			plan: 'pro',
+			creditsStatus: 'add_credits',
+			...expected,
+		})
+		expect(error.message).toContain('/account/usage#credits')
+	}
+	return {
+		env,
+		sqlite,
+		seedUser,
+		setRollup,
+		entitlementFor,
+		topUp,
+		consume,
+		expectStopped,
+	}
+}
 
 const now = new Date('2026-09-27T12:00:00.000Z')
 const month = utcMonthKey(now)
 
-async function seedUser(input: {
-	label: string
-	plan?: string
-	stripePlan?: string | null
-	creditsEligible?: boolean
-	stripeCustomerId?: string | null
-}) {
-	await ensureCreditWalletTestSchema(env.APP_DB)
-	const email = `${input.label}-${crypto.randomUUID()}@example.com`
-	const stableUserId = await createStableUserIdFromEmail(email)
-	await env.APP_DB.prepare(
-		`INSERT INTO users (
-			username, email, password_hash, email_verified_at, stable_user_id, plan,
-			stripe_customer_id, stripe_plan, stripe_credits_eligible
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-	)
-		.bind(
-			`${input.label}-${crypto.randomUUID().slice(0, 8)}`,
-			email,
-			'test-password-hash',
-			now.toISOString(),
-			stableUserId,
-			input.plan ?? 'free',
-			input.stripeCustomerId ?? null,
-			input.stripePlan ?? null,
-			input.creditsEligible ? 1 : 0,
-		)
-		.run()
-	return { email, stableUserId }
-}
-
-async function setRollup(input: {
-	userId: string
-	metric: 'dynamic_worker_day' | 'durable_object_rows_read'
-	count: number
-	month?: string
-}) {
-	await env.APP_DB.prepare(
-		`INSERT INTO usage_rollups (user_id, metric, month, event_count)
-		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT (user_id, metric, month) DO UPDATE SET event_count = excluded.event_count`,
-	)
-		.bind(input.userId, input.metric, input.month ?? month, input.count)
-		.run()
-}
-
-async function entitlementFor(user: { email: string; stableUserId: string }) {
-	return getUserEntitlement(env.APP_DB, {
-		userId: user.stableUserId,
-		email: user.email,
-	})
-}
-
-async function topUp(input: {
-	userId: string
-	cents: number
-	reference?: string
-}) {
-	return applyCreditPayment({
-		db: env.APP_DB,
-		userId: input.userId,
-		kind: 'top_up',
-		amountCents: input.cents,
-		stripeReference: input.reference ?? `cs_${crypto.randomUUID()}`,
-		paymentMethodId: 'pm_saved',
-		now,
-	})
-}
-
 test('wallet eligibility: only the purchasable Pro gets a wallet; retired plans and Free never unlock', async () => {
+	const { seedUser, entitlementFor, topUp } = await createBillingHarness()
+
 	const pro = await seedUser({
 		label: 'credits-pro',
 		stripePlan: 'pro',
@@ -171,6 +211,9 @@ test('wallet eligibility: only the purchasable Pro gets a wallet; retired plans 
 })
 
 test('credits carry rates past the include up to 50×; stock stays Max; at $0 rates stop at the include', async () => {
+	const { env, seedUser, setRollup, entitlementFor, topUp } =
+		await createBillingHarness()
+
 	const user = await seedUser({
 		label: 'credits-unlock',
 		stripePlan: 'pro',
@@ -291,6 +334,9 @@ test('credits carry rates past the include up to 50×; stock stays Max; at $0 ra
 })
 
 test('debits charge only usage above the include, are idempotent, and never back-charge an empty wallet', async () => {
+	const { env, seedUser, setRollup, entitlementFor, topUp } =
+		await createBillingHarness()
+
 	const user = await seedUser({
 		label: 'credits-debit',
 		stripePlan: 'pro',
@@ -366,40 +412,6 @@ test('debits charge only usage above the include, are idempotent, and never back
 	)
 })
 
-function consume(
-	user: { email: string; stableUserId: string },
-	resource: Parameters<typeof consumeDailyEntitlement>[0]['resource'],
-) {
-	return consumeDailyEntitlement({
-		db: env.APP_DB,
-		env,
-		userId: user.stableUserId,
-		email: user.email,
-		resource,
-		now,
-	})
-}
-
-async function expectStopped(
-	user: { email: string; stableUserId: string },
-	resource: Parameters<typeof consumeDailyEntitlement>[0]['resource'],
-	expected: { resource: string; limit: number; current: number },
-) {
-	const error = await consume(user, resource).then(
-		() => null,
-		(caught: unknown) => caught,
-	)
-	expect(isComputeOverageLimitError(error)).toBe(true)
-	if (!isComputeOverageLimitError(error)) return
-	expect(error.details).toMatchObject({
-		code: 'compute_overage_include_reached',
-		plan: 'pro',
-		creditsStatus: 'add_credits',
-		...expected,
-	})
-	expect(error.message).toContain('/account/usage#credits')
-}
-
 const pastIncludeStopped = [
 	'execute_calls_per_day',
 	'job_runs_per_day',
@@ -407,6 +419,9 @@ const pastIncludeStopped = [
 ] as const
 
 test('include → credits → stop: an empty Pro wallet runs free within the include and stops past it', async () => {
+	const { env, seedUser, setRollup, entitlementFor, consume, expectStopped } =
+		await createBillingHarness()
+
 	// Within the include (exactly at 350 / 5B): free, and nothing is debited.
 	const within = await seedUser({
 		label: 'credits-stop-within',
@@ -525,6 +540,9 @@ test('include → credits → stop: an empty Pro wallet runs free within the inc
 })
 
 test('include → credits → stop: credits pay past the include, and the stop returns when they run out', async () => {
+	const { env, seedUser, setRollup, topUp, consume, expectStopped } =
+		await createBillingHarness()
+
 	// Funded and past the include: runs, and the debit lane charges credits.
 	const funded = await seedUser({
 		label: 'credits-stop-funded',
@@ -598,6 +616,9 @@ test('include → credits → stop: credits pay past the include, and the stop r
 })
 
 test('plans without a wallet are never stopped past the monthly include', async () => {
+	const { env, seedUser, setRollup, entitlementFor, consume } =
+		await createBillingHarness()
+
 	const free = await seedUser({ label: 'credits-stop-free' })
 	const retiredStandard = await seedUser({
 		label: 'credits-stop-retired-standard',
@@ -649,6 +670,8 @@ test('plans without a wallet are never stopped past the monthly include', async 
 })
 
 test('retired plans with a balance are never debited', async () => {
+	const { env, seedUser, setRollup, topUp } = await createBillingHarness()
+
 	const user = await seedUser({
 		label: 'credits-retired-debit',
 		stripePlan: 'standard',
@@ -666,6 +689,9 @@ test('retired plans with a balance are never debited', async () => {
 })
 
 test('gift overlay usage above credits include is not back-charged on resubscribe', async () => {
+	const { env, seedUser, setRollup, entitlementFor, topUp } =
+		await createBillingHarness()
+
 	const user = await seedUser({
 		label: 'credits-gift-resub',
 		stripePlan: 'pro',
@@ -727,6 +753,8 @@ test('gift overlay usage above credits include is not back-charged on resubscrib
 })
 
 test('a replayed top-up credits once', async () => {
+	const { env, seedUser, topUp } = await createBillingHarness()
+
 	const user = await seedUser({
 		label: 'credits-replay',
 		stripePlan: 'pro',
@@ -751,6 +779,8 @@ test('a replayed top-up credits once', async () => {
 })
 
 test('admins can grant credits to any account, including themselves, with an audited ledger row', async () => {
+	const { env, seedUser } = await createBillingHarness()
+
 	const admin = await seedUser({
 		label: 'credits-admin',
 		stripePlan: 'pro',
@@ -827,6 +857,9 @@ test('admins can grant credits to any account, including themselves, with an aud
 })
 
 test('admin eligibility unlocks a manual Pro wallet without Stripe, survives Stripe refreshes, and clearing it holds the balance', async () => {
+	const { env, seedUser, setRollup, entitlementFor } =
+		await createBillingHarness()
+
 	const admin = await seedUser({ label: 'credits-eligibility-admin' })
 	const user = await seedUser({ label: 'credits-manual-pro', plan: 'pro' })
 	const userId = user.stableUserId
@@ -950,8 +983,11 @@ test('admin eligibility unlocks a manual Pro wallet without Stripe, survives Str
 })
 
 test('granting manual Pro after admin eligibility still forgives locked-period usage', async () => {
+	const { env, seedUser, setRollup, entitlementFor, topUp } =
+		await createBillingHarness()
+
 	const user = await seedUser({ label: 'credits-eligible-then-pro' })
-	await ensureRbacTestSchema(env.APP_DB)
+
 	const userId = user.stableUserId
 	await topUp({ userId, cents: 1_000 })
 	await setRollup({ userId, metric: 'dynamic_worker_day', count: 900 })
@@ -985,6 +1021,8 @@ test('granting manual Pro after admin eligibility still forgives locked-period u
 })
 
 test('admin eligibility does not unlock a wallet outside an effective Pro plan', async () => {
+	const { env, seedUser, entitlementFor, topUp } = await createBillingHarness()
+
 	const manualMax = await seedUser({
 		label: 'credits-eligible-max',
 		plan: 'max',
@@ -1018,6 +1056,8 @@ test('admin eligibility does not unlock a wallet outside an effective Pro plan',
 })
 
 test('auto-refill charges the saved card at the threshold and stops at the monthly cap', async () => {
+	const { env, seedUser, entitlementFor, topUp } = await createBillingHarness()
+
 	const user = await seedUser({
 		label: 'credits-refill',
 		stripePlan: 'pro',
@@ -1117,6 +1157,9 @@ test('auto-refill charges the saved card at the threshold and stops at the month
 })
 
 test('funding an empty wallet forgives usage from before the top-up', async () => {
+	const { env, seedUser, setRollup, entitlementFor, topUp } =
+		await createBillingHarness()
+
 	const user = await seedUser({
 		label: 'credits-refund-gap',
 		stripePlan: 'pro',
@@ -1146,6 +1189,9 @@ test('funding an empty wallet forgives usage from before the top-up', async () =
 })
 
 test('the bounded debit sweep resumes from its cursor and wraps at the tail', async () => {
+	const { env, seedUser, setRollup, entitlementFor, topUp } =
+		await createBillingHarness()
+
 	const users = [
 		await seedUser({
 			label: 'credits-cursor-a',
@@ -1201,6 +1247,8 @@ test('the bounded debit sweep resumes from its cursor and wraps at the tail', as
 })
 
 test('gift and referral Pro overlays keep retired Pro ceilings without a wallet', async () => {
+	const { env, seedUser } = await createBillingHarness()
+
 	const overlay = await seedUser({
 		label: 'credits-overlay',
 		stripeCustomerId: `cus_${crypto.randomUUID().slice(0, 8)}`,
@@ -1242,6 +1290,8 @@ test('gift and referral Pro overlays keep retired Pro ceilings without a wallet'
 })
 
 test('saving credit settings before any top-up creates the wallet and keeps the settings', async () => {
+	const { env, seedUser, topUp } = await createBillingHarness()
+
 	const user = await seedUser({
 		label: 'credits-settings-first',
 		stripePlan: 'pro',
@@ -1270,6 +1320,8 @@ test('saving credit settings before any top-up creates the wallet and keeps the 
 })
 
 test('base entitlement never pairs an overlay plan with Stripe-only eligibility', async () => {
+	const { env, seedUser, entitlementFor, topUp } = await createBillingHarness()
+
 	const overlay = await seedUser({ label: 'credits-base-overlay' })
 	await env.APP_DB.prepare(
 		`UPDATE users SET referral_standard_credit_expires_at = ? WHERE stable_user_id = ?`,

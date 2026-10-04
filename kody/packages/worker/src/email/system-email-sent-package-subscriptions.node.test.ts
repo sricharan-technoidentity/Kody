@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	buildSystemEmailSentEvent,
@@ -45,7 +46,7 @@ test('system email sent dispatch fans the sent snapshot through admin package fa
 
 	const result = await dispatchSystemEmailSentSubscriptionEvent({
 		env: {
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 			APP_BASE_URL: 'https://kody.example.com',
 		},

@@ -1,0 +1,50 @@
+{
+	"checkedAt": "2026-10-04T17:17:09.525Z",
+	"results": [
+		{
+			"service": "postgres",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		},
+		{
+			"service": "dynamodb",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		},
+		{
+			"service": "s3",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		},
+		{
+			"service": "kms",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		},
+		{
+			"service": "runtime",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		},
+		{
+			"service": "interpreter",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		},
+		{
+			"service": "identity",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		},
+		{
+			"service": "embeddings",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		},
+		{
+			"service": "ses",
+			"status": "pending",
+			"evidence": "No separate AWS sandbox configuration supplied."
+		}
+	]
+}

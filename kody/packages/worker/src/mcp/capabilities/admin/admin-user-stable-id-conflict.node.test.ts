@@ -1,27 +1,27 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
 import {
 	auditEventSummaries,
 	logAuditEventSpy,
 } from '#worker/test-support/audit-log-spy.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { adminUserStableIdConflictCapability } from './admin-user-stable-id-conflict.ts'
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(
+async function createMigratedDb() {
+	const sqlite = await createTestPg()
+
+	return {
 		sqlite,
-		new URL('../../../../migrations/', import.meta.url),
-	)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+		db: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	}
 }
 
-function seedUser(
-	sqlite: DatabaseSync,
+async function seedUser(
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
 	input: {
 		email: string
 		username: string
@@ -30,7 +30,7 @@ function seedUser(
 		createdAt: string
 	},
 ) {
-	sqlite.exec(`
+	await sqlite.exec(`
 		INSERT INTO users (
 			username,
 			email,
@@ -49,7 +49,7 @@ function seedUser(
 	`)
 }
 
-function createContext(db: D1Database, roles: Array<string>) {
+function createContext(db: SqlDatabase, roles: Array<string>) {
 	return {
 		env: { APP_DB: db } as Env,
 		callerContext: createMcpCallerContext({
@@ -65,7 +65,7 @@ function createContext(db: D1Database, roles: Array<string>) {
 }
 
 test('adminUserStableIdConflict reports collisions without content and denies non-admins', async () => {
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	const userCtx = createContext(db, ['user'])
 	await expect(
 		adminUserStableIdConflictCapability.handler(
@@ -91,7 +91,7 @@ test('adminUserStableIdConflict reports collisions without content and denies no
 
 	const sameEmail = 'same@example.com'
 	const sameCreatedAt = '2026-01-02T00:00:00.000Z'
-	seedUser(sqlite, {
+	await seedUser(sqlite, {
 		email: sameEmail,
 		username: 'same-user',
 		stableUserId: await createStableUserIdFromEmail(sameEmail),
@@ -107,7 +107,7 @@ test('adminUserStableIdConflict reports collisions without content and denies no
 	const victimEmail = 'victim@example.com'
 	const squatterCreatedAt = '2026-03-04T05:06:07.000Z'
 	const squatterStableUserId = await createStableUserIdFromEmail(victimEmail)
-	seedUser(sqlite, {
+	await seedUser(sqlite, {
 		email: 'attacker@example.com',
 		username: 'squatter',
 		stableUserId: squatterStableUserId,

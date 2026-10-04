@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Admin credit grants: house-funded wallet top-ups for any account,
  * including the signed-in admin. Shared by the admin users page and the
@@ -51,7 +52,7 @@ type CreditGrantTargetRow = UserEntitlementRow & {
 }
 
 async function loadCreditGrantTarget(
-	db: D1Database,
+	db: SqlDatabase,
 	target: AdminUserTarget,
 ): Promise<CreditGrantTargetRow | null> {
 	const columns = `id, stable_user_id, username, ${userEntitlementColumnsSql()}`
@@ -79,7 +80,7 @@ async function loadCreditGrantTarget(
 }
 
 async function loadGranterUsernames(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserIds: ReadonlyArray<string>,
 ): Promise<Map<string, string>> {
 	const unique = [...new Set(stableUserIds)]

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	AccountDeletionCleanupError,
@@ -108,7 +109,7 @@ test('deleteUserAccount enumerates job vectors through JOBS and deletes through 
 		purged: true,
 	}))
 	const env = createSuccessfulDeletionEnv(
-		db as unknown as D1Database,
+		db as unknown as SqlDatabase,
 		{
 			CAPABILITY_VECTOR_INDEX: { deleteByIds: deleteVectorsMock },
 			JOBS: {
@@ -636,9 +637,11 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		CAPABILITY_VECTOR_INDEX: {
 			deleteByIds: deleteVectorsMock,
 		},
-		STORAGE_RUNNER: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({ clearStorage: clearStorageMock }),
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				(() => ({ clearStorage: clearStorageMock }))(
+					JSON.stringify([bucket.userId, bucket.storageId]),
+				),
 		},
 		RUN_STATE: { forUser: () => ({ clear: clearRunLogMock }) },
 		USER_METERS: {
@@ -659,9 +662,8 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 				},
 			}),
 		},
-		MAILBOX: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({
+		MAILBOX_STORE: {
+			forUser: (_userId: string) => ({
 				listBlobReferences: listBlobReferencesMock,
 				purge: purgeMailboxMock,
 			}),
@@ -669,13 +671,11 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		JOBS: createJobsBindingStub(db, {
 			purgeUser: purgeJobManagerMock as unknown,
 		}),
-		REPO_SESSION: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({ purgeSession: purgeRepoSessionMock }),
-		},
-		MCP_CLIENT_HUB: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({ purgeForAccountDeletion: purgeMcpClientHubMock }),
+		REPO_SESSIONS: () => ({ purgeSession: purgeRepoSessionMock }),
+		MCP_CLIENTS: {
+			forUser: (_userId: string) => ({
+				purgeForAccountDeletion: purgeMcpClientHubMock,
+			}),
 		},
 		MCP_OBJECT: {
 			idFromString: (id: string) => id as unknown as DurableObjectId,
@@ -683,9 +683,10 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 				purgeForAccountDeletion: purgeMcpAgentSessionMock,
 			}),
 		},
-		PACKAGE_REALTIME_SESSION: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({ fetch: doFetchMock }),
+		REALTIME_SESSIONS: {
+			purge: async () => {
+				await doFetchMock()
+			},
 		},
 	})
 	await insertRepoSession(env, {
@@ -1022,9 +1023,8 @@ test('account deletion preserves Mailbox references and retry marker when R2 del
 			},
 			delete: deleteEmailBlob,
 		} as unknown as R2Bucket,
-		MAILBOX: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({
+		MAILBOX_STORE: {
+			forUser: (_userId: string) => ({
 				listBlobReferences,
 				purge: purgeMailbox,
 			}),
@@ -1061,9 +1061,8 @@ test('account deletion preserves Mailbox references and retry marker when R2 del
 	const purgeAfterUnrelatedFailure = vi.fn(async () => ({ ok: true as const }))
 	const unrelatedFailureEnv = createSuccessfulDeletionEnv(unrelatedDb, {
 		OAUTH_PROVIDER: undefined,
-		MAILBOX: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({
+		MAILBOX_STORE: {
+			forUser: (_userId: string) => ({
 				listBlobReferences: async () => ({
 					references: [],
 					nextStartAfter: null,

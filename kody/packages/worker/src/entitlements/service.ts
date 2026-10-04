@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	utcDayKey,
 	utcMonthKey,
@@ -47,7 +48,7 @@ import {
 /** Env surface for authoritative entitlement usage readers. */
 export type EntitlementUsageEnv = UserMeterEnv &
 	RepoSessionIndexEnv &
-	Pick<Env, 'RUN_STATE' | 'MAILBOX' | 'JOBS'>
+	Pick<Env, 'RUN_STATE' | 'MAILBOX_STORE' | 'JOBS'>
 
 const stableUserIdPattern = /^[a-f0-9]{64}$/i
 
@@ -155,7 +156,7 @@ export function isPayingForCreditsPro(row: UserEntitlementRow): boolean {
  * zero balance.
  */
 export async function readCreditWalletBalanceMicroUsd(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ): Promise<number> {
 	const row = await db
@@ -173,7 +174,7 @@ export async function readCreditWalletBalanceMicroUsd(
  * {@link resolveUserEntitlementFromRow}.
  */
 export async function resolveBaseUserEntitlement(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	row: Pick<
 		UserEntitlementRow,
@@ -212,7 +213,7 @@ export async function resolveBaseUserEntitlement(input: {
  * extra query.
  */
 export async function resolveUserEntitlementFromRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	row: UserEntitlementRow
 	now?: Date
@@ -258,7 +259,7 @@ export async function resolveUserEntitlementFromRow(input: {
  * the purchasable Pro with a positive balance.
  */
 export async function getUserEntitlement(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; email: string | null | undefined },
 ): Promise<UserEntitlement> {
 	const email = input.email?.trim().toLowerCase()
@@ -289,7 +290,7 @@ export async function getUserEntitlement(
  * plan CHECK constraint.
  */
 export async function getUserPlan(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; email: string | null | undefined },
 ): Promise<PlanName> {
 	return (await getUserEntitlement(db, input)).plan
@@ -308,7 +309,7 @@ export type StableUserAccount = {
  * quota counter write itself stays atomic and uncached; only the plan-limit
  * resolution tolerates staleness, so a plan change takes effect for quota
  * checks within {@link entitlementLookupCacheTtlMs} instead of immediately.
- * Keyed by the `D1Database` binding so test databases never share entries.
+ * Keyed by the `SqlDatabase` binding so test databases never share entries.
  */
 const entitlementLookupCacheTtlMs = 60_000
 const entitlementLookupCacheMaxEntries = 1_000
@@ -320,12 +321,12 @@ type EntitlementLookupCacheEntry<T> = {
 
 function createEntitlementLookupCache<T>() {
 	const cachesByDb = new WeakMap<
-		D1Database,
+		SqlDatabase,
 		Map<string, EntitlementLookupCacheEntry<T>>
 	>()
 	return {
 		async getOrCreate(
-			db: D1Database,
+			db: SqlDatabase,
 			key: string,
 			create: () => Promise<T>,
 		): Promise<T> {
@@ -368,7 +369,7 @@ const cachedStableUserAccounts =
  * {@link getUserEntitlement}.
  */
 export async function getCachedUserEntitlement(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; email: string | null | undefined },
 ): Promise<UserEntitlement> {
 	const email = input.email?.trim().toLowerCase()
@@ -387,7 +388,7 @@ export async function getCachedUserEntitlement(
  * interactive plan displays should keep calling {@link getUserPlan}.
  */
 export async function getCachedUserPlan(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; email: string | null | undefined },
 ): Promise<PlanName> {
 	return (await getCachedUserEntitlement(db, input)).plan
@@ -398,7 +399,7 @@ export async function getCachedUserPlan(
  * for per-fetch account reverse-resolution in the fetch gateway.
  */
 export async function findCachedUserAccountByStableUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ): Promise<StableUserAccount | null> {
 	const trimmed = normalizeStableUserId(stableUserId)
@@ -419,7 +420,7 @@ export async function findCachedUserAccountByStableUserId(
  * and interactive surfaces already carry the email.
  */
 export async function findUserAccountByStableUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ): Promise<StableUserAccount | null> {
 	const trimmed = normalizeStableUserId(stableUserId)
@@ -542,7 +543,7 @@ export async function readWeeklyEntitlementResourceUsage(input: {
 	return result.count
 }
 
-async function countRows(db: D1Database, sql: string, params: Array<unknown>) {
+async function countRows(db: SqlDatabase, sql: string, params: Array<unknown>) {
 	const row = await db
 		.prepare(sql)
 		.bind(...params)
@@ -624,7 +625,7 @@ function isMissingStorageByteSurfaceError(error: unknown) {
 }
 
 async function sumStorageBytes(
-	db: D1Database,
+	db: SqlDatabase,
 	sql: string,
 	params: Array<unknown>,
 ) {
@@ -645,7 +646,7 @@ async function sumStorageBytes(
  * the stored point-read counter below.
  */
 export async function calculateUserD1StorageBytes(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	/**
 	 * Jobs-data access for the jobs-worker database (ADR 0016). Job rows no
@@ -765,7 +766,7 @@ export async function calculateUserD1StorageBytes(input: {
  * contexts (no `users` row) must never materialize durable UserMeter state.
  */
 async function userAccountRowExists(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<boolean> {
 	const row = await input.db
@@ -793,7 +794,7 @@ async function userAccountRowExists(input: {
  * `deferred` is never a failure and is not counted as `updated`.
  */
 export async function reconcileUserD1StorageBytes(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	now?: Date
 	/** Required because UserMeter is the storage-usage authority. */
@@ -857,7 +858,7 @@ export async function reconcileUserD1StorageBytes(input: {
  * when the tail is reached. No per-user cursor state exists.
  */
 export async function listUsersForD1StorageReconciliation(input: {
-	db: D1Database
+	db: SqlDatabase
 	limit: number
 }): Promise<Array<{ userId: string }>> {
 	const cursorRow = await input.db
@@ -894,7 +895,7 @@ export async function listUsersForD1StorageReconciliation(input: {
 
 /** Advance the reconcile-lane keyset cursor past the processed page. */
 export async function advanceD1StorageReconciliationCursor(input: {
-	db: D1Database
+	db: SqlDatabase
 	lastUserId: string
 	now?: Date
 }) {
@@ -909,7 +910,7 @@ export async function advanceD1StorageReconciliationCursor(input: {
 }
 
 export async function readEntitlementResourceUsage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	resource: EntitlementResource
 	now: Date
@@ -1000,7 +1001,7 @@ export async function readEntitlementResourceUsage(input: {
  * the authoritative DO byte count.
  */
 export async function readStorageBytesFromUserMeter(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: EntitlementUsageEnv
 	userId: string
 	now: Date
@@ -1031,7 +1032,7 @@ export async function readStorageBytesFromUserMeter(input: {
  * everything else via the legacy D1 helpers.
  */
 export async function readCurrentEntitlementResourceUsage(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: EntitlementUsageEnv
 	userId: string
 	resource: EntitlementResource
@@ -1103,7 +1104,7 @@ const storageBytesBootstrapMaxAttempts = 2
  * throws immediately when absent — failing closed for real users.
  */
 export async function assertWithinStorageBytesEntitlement(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	email: string | null | undefined
 	requested?: number
@@ -1210,7 +1211,7 @@ export async function assertWithinStorageBytesEntitlement(input: {
 }
 
 export type AssertWithinEntitlementInput = {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	/**
 	 * Real account email of the acting user. Plan lookup requires the email +
@@ -1276,7 +1277,7 @@ export async function assertWithinEntitlement(
 }
 
 export type ConsumeDailyEntitlementInput = {
-	db: D1Database
+	db: SqlDatabase
 	/** Must expose `USER_METERS` (sole daily counter authority). */
 	env: UserMeterEnv
 	userId: string
@@ -1398,7 +1399,7 @@ const cachedMonthlyComputeUsage =
  * top-up in another isolate resumes work right away.
  */
 async function assertWithinPastIncludeCredits(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	entitlement: UserEntitlement
 	now: Date
@@ -1442,7 +1443,7 @@ async function assertWithinPastIncludeCredits(input: {
  * the same check inside {@link consumeDailyEntitlement}.
  */
 export async function assertWithinComputeInclude(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	now?: Date
 }) {

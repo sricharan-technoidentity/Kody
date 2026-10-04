@@ -4,22 +4,18 @@ import {
 	ToolDispatcher,
 	type ExecuteResult,
 	type ResolvedProvider,
-} from '@cloudflare/codemode'
+} from '../node_modules/.kody-generated/codemode-host.mjs'
 import {
 	getErrorCauseChain,
 	getErrorMessage,
 } from '@kody-internal/shared/error-message.ts'
 import { type ContentBlock } from '@modelcontextprotocol/sdk/types.js'
-import { exports as workerExports } from 'cloudflare:workers'
-import {
-	dynamicWorkerUsageTailLoaderIdSuffix,
-	type DynamicWorkerUsageTailProps,
-} from '#worker/usage/dynamic-worker-cpu.ts'
+import type { DynamicWorkerUsageTailProps } from '#worker/usage/dynamic-worker-cpu.ts'
 import {
 	outboundFetchTimeoutMsForExecutor,
 	retrieverOutboundFetchDeniedMessage,
 	type FetchGatewayProps,
-} from '#mcp/fetch-gateway.ts'
+} from '#worker/egress/proxy.ts'
 import {
 	readBaseUrlHostname,
 	type RawFetchHostSink,
@@ -75,7 +71,10 @@ import {
 	takeSecretAuthorityFromCapabilityArgs,
 } from '#mcp/secrets/secret-authority.ts'
 import { parseUnboundRuntimeHelperMessage } from '#worker/package-runtime/unbound-runtime-helpers.ts'
-import { createDynamicWorkerCompatibilityOptions } from '#worker/dynamic-worker-compatibility.ts'
+import {
+	createDynamicWorkerCompatibilityOptions,
+	dynamicWorkerUsageTailLoaderIdSuffix,
+} from '#worker/dynamic-worker-compatibility.ts'
 import {
 	getDynamicWorkerEvaluationContext,
 	isDynamicWorkerCapacityErrorMessage,
@@ -111,7 +110,12 @@ import {
 	type EvaluationSideEffectTracker,
 } from '#mcp/evaluation-side-effects.ts'
 
-type WorkerLoopbackExports = Exclude<typeof workerExports, undefined>
+type WorkerLoopbackExports = {
+	KodyFetchGateway(input: { props: FetchGatewayProps }): Fetcher
+	DynamicWorkerUsageTail?(input: {
+		props: DynamicWorkerUsageTailProps
+	}): Fetcher
+}
 
 export { runWithDynamicWorkerEvaluationBudget } from '#worker/dynamic-worker-evaluation-budget.ts'
 
@@ -582,12 +586,8 @@ export function createExecuteExecutor(input: {
 	waitUntil?: (promise: Promise<unknown>) => void
 }) {
 	const allowOutboundFetch = input.allowOutboundFetch !== false
-	const loopbackExports = input.exports ?? workerExports
-	if (!loopbackExports?.KodyFetchGateway) {
-		throw new Error(
-			'KodyFetchGateway export is required for execute-time fetch.',
-		)
-	}
+	if (!input.env.RUNNER_LOADER)
+		throw new Error('RUNNER_LOADER is required for sandbox execution.')
 	const timeout =
 		input.timeoutMs === null
 			? maxSupportedExecutorTimeoutMs
@@ -598,21 +598,12 @@ export function createExecuteExecutor(input: {
 		allowOutboundFetch,
 	}
 	return createStableDynamicWorkerExecutor({
-		loader: input.env.LOADER,
+		loader: input.env.RUNNER_LOADER.forContext(
+			gatewayProps,
+		) as unknown as Env['LOADER'],
 		timeout,
 		signal: input.signal,
-		globalOutbound: loopbackExports.KodyFetchGateway({
-			props: gatewayProps,
-		}),
-		// Tails only run where Analytics Engine is bound (deployed Workers).
-		// Open-source workerd reports zero CPU, and a local tail would outlive
-		// the run with a D1 write per invocation.
-		...('DynamicWorkerUsageTail' in loopbackExports && input.env.USAGE_EVENTS
-			? {
-					createUsageTail: (props: DynamicWorkerUsageTailProps) =>
-						loopbackExports.DynamicWorkerUsageTail({ props }),
-				}
-			: {}),
+		globalOutbound: null,
 		modules: input.modules,
 		gatewayProps,
 		usageEnv: input.env,

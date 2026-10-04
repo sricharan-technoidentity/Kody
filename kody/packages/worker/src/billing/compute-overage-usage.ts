@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 
 export const computeOverageUsageMetrics = [
@@ -18,7 +19,7 @@ function nonNegativeCount(value: number | null | undefined): number {
 }
 
 export async function readMonthlyComputeUsage(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	month: string
 }): Promise<MonthlyComputeUsage> {

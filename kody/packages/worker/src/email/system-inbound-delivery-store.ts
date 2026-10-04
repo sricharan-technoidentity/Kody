@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import PostalMime from 'postal-mime'
 import { emailRawMimeKey } from './blob-keys.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
@@ -44,7 +45,10 @@ type DeliveryRow = {
 	detail_json: string
 }
 
-async function assertSystemDelivery(db: D1Database, delivery: InboundDelivery) {
+async function assertSystemDelivery(
+	db: SqlDatabase,
+	delivery: InboundDelivery,
+) {
 	await assertSystemEmailGraphAuthority(db)
 	if (delivery.userId !== systemEmailOwnerId) {
 		throw new Error('System inbound delivery writes require system:email.')
@@ -60,7 +64,7 @@ export function systemInboundDedupeExpiry(now: Date) {
 }
 
 export async function getSystemInboundDelivery(input: {
-	db: D1Database
+	db: SqlDatabase
 	deliveryId: string
 }) {
 	await assertSystemEmailGraphAuthority(input.db)
@@ -77,7 +81,7 @@ export async function getSystemInboundDelivery(input: {
 }
 
 export async function getSystemInboundDeliveryWindow(input: {
-	db: D1Database
+	db: SqlDatabase
 	fingerprint: string
 	now: Date
 }) {
@@ -99,7 +103,7 @@ export async function getSystemInboundDeliveryWindow(input: {
 }
 
 export async function claimSystemInboundDeliveryWindow(input: {
-	db: D1Database
+	db: SqlDatabase
 	delivery: InboundDelivery
 	now: Date
 }) {
@@ -165,7 +169,7 @@ export async function claimSystemInboundDeliveryWindow(input: {
 }
 
 async function getSystemInboundDeliveryPointer(input: {
-	db: D1Database
+	db: SqlDatabase
 	eventId: string
 	provider: string
 }) {
@@ -183,7 +187,7 @@ async function getSystemInboundDeliveryPointer(input: {
 }
 
 export async function chargeSystemInboundDeliveryOnce(input: {
-	db: D1Database
+	db: SqlDatabase
 	delivery: InboundDelivery
 	localPart: SystemEmailLocal
 	limit: number
@@ -208,9 +212,9 @@ export async function chargeSystemInboundDeliveryOnce(input: {
 					local_part, day, count, updated_at, operation_token
 				) VALUES (?, ?, 1, ?, ?)
 				ON CONFLICT(local_part, day) DO UPDATE SET
-					count = count + 1, updated_at = excluded.updated_at,
+					count = system_email_daily_counters.count + 1, updated_at = excluded.updated_at,
 					operation_token = excluded.operation_token
-				WHERE count + 1 <= ?
+				WHERE system_email_daily_counters.count + 1 <= ?
 					AND NOT EXISTS (
 						SELECT 1 FROM system_email_delivery_events WHERE id = ?
 					)`,
@@ -226,7 +230,7 @@ export async function chargeSystemInboundDeliveryOnce(input: {
 			],
 			dedicated: input.db
 				.prepare(
-					`INSERT OR IGNORE INTO system_email_delivery_events (
+					`INSERT INTO system_email_delivery_events (
 					id, message_id, inbox_id, event_type, provider, provider_event_id,
 					detail_json, created_at, state, fingerprint, dedupe_expires_at,
 					updated_at
@@ -270,7 +274,7 @@ export async function chargeSystemInboundDeliveryOnce(input: {
 }
 
 export async function claimSystemInboundDeliveryStorage(input: {
-	db: D1Database
+	db: SqlDatabase
 	delivery: InboundDelivery
 	expectedAttachmentCount: number
 	usageStartedAt?: string
@@ -290,13 +294,9 @@ export async function claimSystemInboundDeliveryStorage(input: {
 			.prepare(
 				`UPDATE system_email_delivery_events
 				SET event_type = 'receive_started', message_id = NULL,
-					detail_json = json_set(
-						detail_json, '$.state', 'storing', '$.storageLease', ?,
-						'$.storageLeaseAt', ?, '$.expectedAttachmentCount', ?,
-						'$.usageStartedAt', COALESCE(
-							json_extract(detail_json, '$.usageStartedAt'), ?
-						)
-					),
+					detail_json = (jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set((detail_json)::jsonb, '{state}', COALESCE(to_jsonb(('storing')::text), 'null'::jsonb)), '{storageLease}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{storageLeaseAt}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{expectedAttachmentCount}', COALESCE(to_jsonb((?)::bigint), 'null'::jsonb)), '{usageStartedAt}', COALESCE(to_jsonb((COALESCE(
+							((detail_json)::jsonb ->> 'usageStartedAt'), ?
+						))::text), 'null'::jsonb)))::text,
 					state = 'storing', storage_lease = ?, storage_lease_at = ?,
 					expected_attachment_count = ?,
 					usage_started_at = COALESCE(usage_started_at, ?),
@@ -309,9 +309,7 @@ export async function claimSystemInboundDeliveryStorage(input: {
 					)
 					OR (state = 'received' AND NOT EXISTS (
 						SELECT 1 FROM system_email_messages
-						WHERE id = json_extract(
-							system_email_delivery_events.detail_json, '$.messageId'
-						)
+						WHERE id = ((system_email_delivery_events.detail_json)::jsonb ->> 'messageId')
 					))
 				)`,
 			)
@@ -340,7 +338,7 @@ export async function claimSystemInboundDeliveryStorage(input: {
 }
 
 export async function releaseSystemInboundDeliveryStorage(input: {
-	db: D1Database
+	db: SqlDatabase
 	delivery: InboundDelivery
 }) {
 	await assertSystemDelivery(input.db, input.delivery)
@@ -351,10 +349,7 @@ export async function releaseSystemInboundDeliveryStorage(input: {
 		dedicated: input.db
 			.prepare(
 				`UPDATE system_email_delivery_events
-				SET detail_json = json_remove(
-						json_remove(json_set(detail_json, '$.state', 'pending'),
-							'$.storageLease'), '$.storageLeaseAt'
-					),
+				SET detail_json = (((((((jsonb_set((detail_json)::jsonb, '{state}', COALESCE(to_jsonb(('pending')::text), 'null'::jsonb)))::text)::jsonb - 'storageLease'))::text)::jsonb - 'storageLeaseAt'))::text,
 					state = 'pending', storage_lease = NULL, storage_lease_at = NULL,
 					updated_at = ?
 				WHERE id = ? AND state = 'storing' AND storage_lease = ?`,
@@ -368,7 +363,7 @@ export async function releaseSystemInboundDeliveryStorage(input: {
 }
 
 export async function markSystemInboundDeliveryRejected(input: {
-	db: D1Database
+	db: SqlDatabase
 	delivery: InboundDelivery
 	reason: string
 }) {
@@ -391,7 +386,7 @@ export async function markSystemInboundDeliveryRejected(input: {
 					storage_lease = NULL, storage_lease_at = NULL, updated_at = ?
 				WHERE id = ? AND event_type = 'receive_started'
 					AND state = ? AND fingerprint = ?
-					AND ((? IS NULL AND storage_lease IS NULL) OR storage_lease = ?)`,
+					AND ((?::text IS NULL AND storage_lease IS NULL) OR storage_lease = ?)`,
 			)
 			.bind(
 				JSON.stringify(detail),
@@ -424,7 +419,7 @@ export async function markSystemInboundDeliveryRejected(input: {
 }
 
 export async function markSystemInboundDeliveryReceived(input: {
-	db: D1Database
+	db: SqlDatabase
 	delivery: InboundDelivery
 	usageDurationMs: number
 	usageMonth: string
@@ -486,7 +481,7 @@ export async function markSystemInboundDeliveryReceived(input: {
 }
 
 export async function pruneSystemExpiredInboundDedupePointers(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	limit?: number
 }) {
@@ -530,7 +525,7 @@ function parsedAttachmentSize(
 }
 
 async function deferSystemReconciliation(input: {
-	db: D1Database
+	db: SqlDatabase
 	deliveryId: string
 	now: Date
 }) {
@@ -544,7 +539,7 @@ async function deferSystemReconciliation(input: {
 		dedicated: input.db
 			.prepare(
 				`UPDATE system_email_delivery_events
-				SET detail_json = json_set(detail_json, '$.reconcileAfter', ?),
+				SET detail_json = (jsonb_set((detail_json)::jsonb, '{reconcileAfter}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)))::text,
 					reconcile_after = ?, updated_at = ?
 				WHERE id = ? AND event_type = 'receive_started'`,
 			)
@@ -553,7 +548,7 @@ async function deferSystemReconciliation(input: {
 }
 
 async function recoverSystemDelivery(input: {
-	db: D1Database
+	db: SqlDatabase
 	blobs: R2Bucket
 	delivery: InboundDelivery
 	now: Date
@@ -633,7 +628,7 @@ async function recoverSystemDelivery(input: {
 }
 
 export async function reconcileSystemStaleInboundDeliveries(input: {
-	db: D1Database
+	db: SqlDatabase
 	blobs: R2Bucket
 	now?: Date
 	deadlineMs?: number
@@ -731,10 +726,7 @@ export async function reconcileSystemStaleInboundDeliveries(input: {
 				.prepare(
 					`UPDATE system_email_delivery_events
 					SET state = 'cleaning', cleanup_lease = ?, cleanup_lease_at = ?,
-						detail_json = json_set(
-							detail_json, '$.state', 'cleaning', '$.cleanupLease', ?,
-							'$.cleanupLeaseAt', ?
-						), updated_at = ?
+						detail_json = (jsonb_set(jsonb_set(jsonb_set((detail_json)::jsonb, '{state}', COALESCE(to_jsonb(('cleaning')::text), 'null'::jsonb)), '{cleanupLease}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)), '{cleanupLeaseAt}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)))::text, updated_at = ?
 					WHERE id = ? AND (
 						state = 'pending'
 						OR (
@@ -789,14 +781,7 @@ export async function reconcileSystemStaleInboundDeliveries(input: {
 					`UPDATE system_email_delivery_events
 					SET state = 'orphan-cleaned', cleanup_lease = NULL,
 						cleanup_lease_at = NULL, cleanup_retry_at = ?,
-						detail_json = json_remove(
-							json_remove(
-								json_set(
-									detail_json, '$.state', 'orphan-cleaned',
-									'$.cleanupRetryAt', ?
-								), '$.cleanupLease'
-							), '$.cleanupLeaseAt'
-						), updated_at = ?
+						detail_json = (((((((jsonb_set(jsonb_set((detail_json)::jsonb, '{state}', COALESCE(to_jsonb(('orphan-cleaned')::text), 'null'::jsonb)), '{cleanupRetryAt}', COALESCE(to_jsonb((?)::text), 'null'::jsonb)))::text)::jsonb - 'cleanupLease'))::text)::jsonb - 'cleanupLeaseAt'))::text, updated_at = ?
 					WHERE id = ? AND state = 'cleaning' AND cleanup_lease = ?`,
 				)
 				.bind(

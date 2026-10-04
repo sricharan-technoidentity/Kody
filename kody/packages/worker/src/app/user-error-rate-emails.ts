@@ -146,6 +146,7 @@ async function sendOneUserErrorRateEmail(input: {
 	try {
 		sendResult = await sendCloudflareEmail(
 			{
+				ses: input.env.SES_MAIL,
 				accountId: input.env.CLOUDFLARE_ACCOUNT_ID,
 				apiBaseUrl: input.env.CLOUDFLARE_API_BASE_URL,
 				apiToken: input.env.CLOUDFLARE_API_TOKEN,

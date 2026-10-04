@@ -1,4 +1,5 @@
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 
 export type EntitySourceArtifactsPushSubscriptionRow = {
 	source_id: string
@@ -23,7 +24,7 @@ function mapRow(
 }
 
 export async function getArtifactsPushSubscriptionBySourceId(
-	db: D1Database,
+	db: SqlDatabase,
 	sourceId: string,
 ): Promise<EntitySourceArtifactsPushSubscriptionRow | null> {
 	try {
@@ -39,9 +40,10 @@ export async function getArtifactsPushSubscriptionBySourceId(
 	} catch (error) {
 		if (
 			error instanceof Error &&
-			error.message.includes(
-				'no such table: entity_source_artifacts_push_subscriptions',
-			)
+			((error as { code?: string }).code === '42P01' ||
+				error.message.includes(
+					'no such table: entity_source_artifacts_push_subscriptions',
+				))
 		) {
 			return null
 		}
@@ -50,10 +52,10 @@ export async function getArtifactsPushSubscriptionBySourceId(
 }
 
 export async function upsertArtifactsPushSubscription(
-	db: D1Database,
+	db: SqlDatabase,
 	row: EntitySourceArtifactsPushSubscriptionRow,
 ): Promise<void> {
-	await runD1WithRetry(() =>
+	await runSqlWithRetry(() =>
 		db
 			.prepare(
 				`INSERT INTO entity_source_artifacts_push_subscriptions (
@@ -78,11 +80,11 @@ export async function upsertArtifactsPushSubscription(
 }
 
 export async function deleteArtifactsPushSubscriptionBySourceId(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { sourceId: string; userId: string },
 ): Promise<boolean> {
 	try {
-		const result = await runD1WithRetry(() =>
+		const result = await runSqlWithRetry(() =>
 			db
 				.prepare(
 					`DELETE FROM entity_source_artifacts_push_subscriptions
@@ -95,9 +97,10 @@ export async function deleteArtifactsPushSubscriptionBySourceId(
 	} catch (error) {
 		if (
 			error instanceof Error &&
-			error.message.includes(
-				'no such table: entity_source_artifacts_push_subscriptions',
-			)
+			((error as { code?: string }).code === '42P01' ||
+				error.message.includes(
+					'no such table: entity_source_artifacts_push_subscriptions',
+				))
 		) {
 			return false
 		}

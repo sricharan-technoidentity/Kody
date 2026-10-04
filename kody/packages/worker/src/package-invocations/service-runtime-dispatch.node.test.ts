@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createRecordingTemporal } from '#worker/test-support/aws/recording-temporal.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
@@ -71,7 +72,7 @@ vi.mock('#worker/run-records/package-subscriptions.ts', () => ({
 }))
 
 vi.mock('#worker/identity/background-mcp-user.ts', () => ({
-	resolveBackgroundMcpUser: async (_db: D1Database, userId: string) => ({
+	resolveBackgroundMcpUser: async (_db: SqlDatabase, userId: string) => ({
 		userId,
 		email: 'owner@example.com',
 		username: 'owner',

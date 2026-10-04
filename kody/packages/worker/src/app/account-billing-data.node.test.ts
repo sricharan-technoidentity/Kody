@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleError } from '#worker/test-support/console-spies.ts'
 
@@ -67,7 +68,7 @@ function createBillingTestDb(input: {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 test('loadAccountBillingData refreshes Stripe status and degrades when refresh is unavailable', async () => {

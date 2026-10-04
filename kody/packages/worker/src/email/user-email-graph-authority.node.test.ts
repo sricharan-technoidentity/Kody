@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import {
 	assertUserEmailGraphAuthority,
@@ -20,7 +21,7 @@ function dbWithMarker(
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 test('USER writes require the authority marker while system writes are unaffected', async () => {

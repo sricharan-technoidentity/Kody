@@ -4,7 +4,7 @@ import { secretAuthorityArgName } from '#mcp/secrets/secret-authority.ts'
 import { createDynamicWorkerCompatibilityOptions } from '#worker/dynamic-worker-compatibility.ts'
 import { buildPackageStorageId } from '#worker/storage-ids.ts'
 import { createPackageStorageAccessDeniedMessage } from '#worker/storage-runner.ts'
-import type * as CloudflareWorkers from 'cloudflare:workers'
+import type * as CloudflareWorkers from '#worker/front-door/host-context.ts'
 import type * as ModuleGraph from './module-graph.ts'
 import type * as PublishedBundleArtifacts from './published-bundle-artifacts.ts'
 import type * as McpAuthUserContext from '#worker/mcp-auth-user-context.ts'
@@ -412,7 +412,7 @@ const packageAppRuntimeMock = vi.hoisted(() => ({
 	})),
 }))
 
-vi.mock('cloudflare:workers', async (importOriginal) => {
+vi.mock('#worker/front-door/host-context.ts', async (importOriginal) => {
 	const actual = await importOriginal<typeof CloudflareWorkers>()
 	return {
 		...actual,
@@ -532,17 +532,14 @@ function createPackageAppTestEnv() {
 	const getEntrypoint = vi.fn(() => ({
 		fetch: vi.fn(async () => new Response('ok')),
 	}))
+	const loader = {
+		load: vi.fn(() => ({ getEntrypoint })),
+		get: vi.fn(() => ({ getEntrypoint })),
+	}
 	return {
 		env: {
 			APP_DB: {},
-			APP_LOADER: {
-				load: vi.fn(() => ({
-					getEntrypoint,
-				})),
-				get: vi.fn(() => ({
-					getEntrypoint,
-				})),
-			},
+			RUNNER_LOADER: { forContext: () => loader },
 		} as unknown as Env,
 		getEntrypoint,
 	}
@@ -677,7 +674,7 @@ test('buildPackageAppWorker loads published app artifacts with artifactName null
 	expect(
 		packageAppRuntimeMock.persistPublishedBundleArtifact,
 	).not.toHaveBeenCalled()
-	const loader = env.APP_LOADER as unknown as {
+	const loader = env.RUNNER_LOADER!.forContext({} as never) as unknown as {
 		get: ReturnType<typeof vi.fn>
 	}
 	const factory = loader.get.mock.calls[0]?.[1] as
@@ -741,7 +738,7 @@ test('buildPackageAppWorker acquires a fresh stub per request while reusing the 
 	await buildPackageAppWorker(buildInput)
 	await buildPackageAppWorker(buildInput)
 
-	const loader = env.APP_LOADER as unknown as {
+	const loader = env.RUNNER_LOADER!.forContext({} as never) as unknown as {
 		get: ReturnType<typeof vi.fn>
 		load: ReturnType<typeof vi.fn>
 	}
@@ -836,7 +833,7 @@ test('buildPackageAppWorker acquires the loader stub before claiming the day', a
 		.spyOn(usageModule, 'recordUniqueDynamicWorkerDay')
 		.mockResolvedValue(undefined)
 	const { env } = createPackageAppTestEnv()
-	const loader = env.APP_LOADER as unknown as {
+	const loader = env.RUNNER_LOADER!.forContext({} as never) as unknown as {
 		get: ReturnType<typeof vi.fn>
 	}
 	loader.get.mockImplementation(() => {
@@ -1017,7 +1014,7 @@ test('package app worker exposes its public mount and records fetch query and re
 		},
 	})
 
-	const loader = env.APP_LOADER as unknown as {
+	const loader = env.RUNNER_LOADER!.forContext({} as never) as unknown as {
 		get: ReturnType<typeof vi.fn>
 	}
 	const factory = loader.get.mock.calls[0]?.[1] as
@@ -1123,7 +1120,9 @@ test('package app worker exposes the fingerprinted client module URL when kody.a
 			entryPoint: 'client.ts',
 		}),
 	)
-	const loader = env.APP_LOADER as unknown as { get: ReturnType<typeof vi.fn> }
+	const loader = env.RUNNER_LOADER!.forContext({} as never) as unknown as {
+		get: ReturnType<typeof vi.fn>
+	}
 	const factory = loader.get.mock.calls[0]?.[1] as
 		| (() => { env: Record<string, unknown> })
 		| undefined
@@ -1750,19 +1749,19 @@ test('buildPackageAppWorker passes packageStorage grant ids from root, static, a
 		} as never,
 	})
 
-	expect(packageAppRuntimeMock.packageAppRuntimeBridge).toHaveBeenCalledWith({
-		props: expect.objectContaining({
-			packageId: 'root-package',
-			packageStorageGrantIds: expect.arrayContaining([
-				'root-package',
-				'static-dep-package',
-				'dynamic-dep-package',
-			]),
-		}),
-	})
-	const bridgeProps = packageAppRuntimeMock.packageAppRuntimeBridge.mock
-		.calls[0]?.[0] as {
-		props: { packageStorageGrantIds: Array<string> }
+	const options = (
+		env.RUNNER_LOADER!.forContext({} as never).get as ReturnType<typeof vi.fn>
+	).mock.calls[0]?.[1]()
+	const bridge = options.env.KODY_RUNTIME as {
+		ctx: { props: { packageId: string; packageStorageGrantIds: Array<string> } }
 	}
-	expect(bridgeProps.props.packageStorageGrantIds).toHaveLength(3)
+	expect(bridge.ctx.props.packageId).toBe('root-package')
+	expect(bridge.ctx.props.packageStorageGrantIds).toEqual(
+		expect.arrayContaining([
+			'root-package',
+			'static-dep-package',
+			'dynamic-dep-package',
+		]),
+	)
+	expect(bridge.ctx.props.packageStorageGrantIds).toHaveLength(3)
 })

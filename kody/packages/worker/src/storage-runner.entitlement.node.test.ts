@@ -64,15 +64,15 @@ function createEstimateEnv(
 				throw new Error('APP_DB should not be queried when email is absent')
 			},
 		},
-		STORAGE_RUNNER: {
-			idFromName: (name: string) => name,
-			get: (name: string) => {
-				const parts = JSON.parse(name) as [string, string]
-				const storageId = parts[1]
-				return {
-					getEstimatedBytes: () => getEstimatedBytes(storageId),
-				}
-			},
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				((name: string) => {
+					const parts = JSON.parse(name) as [string, string]
+					const storageId = parts[1]
+					return {
+						getEstimatedBytes: () => getEstimatedBytes(storageId),
+					}
+				})(JSON.stringify([bucket.userId, bucket.storageId])),
 		},
 	} as unknown as Env
 }

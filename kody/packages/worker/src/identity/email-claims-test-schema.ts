@@ -1,9 +1,10 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Local D1 workers-unit suites do not apply migrations. Suites that create
  * accounts through `allocateSignupIdentity` / `claimAccountEmail` need these
  * tables (migration 0045).
  */
-export async function ensureEmailClaimsTestSchema(db: D1Database) {
+export async function ensureEmailClaimsTestSchema(db: SqlDatabase) {
 	await db
 		.prepare(
 			`CREATE TABLE IF NOT EXISTS user_email_claims (

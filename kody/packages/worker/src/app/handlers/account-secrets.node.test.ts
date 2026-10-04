@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as AllowedHosts from '#mcp/secrets/allowed-hosts.ts'
 import type * as IntegrationsService from '#worker/integrations/service.ts'
@@ -212,7 +213,7 @@ const { createAccountSecretsApiHandler } = await import('./account-secrets.ts')
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		COOKIE_SECRET: 'secret',
 	} as Env
 }

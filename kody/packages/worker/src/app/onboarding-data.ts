@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	buildDiscoveryPrompt,
 	buildFirstWinPrompt,
@@ -32,7 +33,7 @@ export {
 
 type OnboardingEnv = {
 	APP_BASE_URL?: string | null
-	APP_DB?: D1Database
+	APP_DB?: SqlDatabase
 	OAUTH_PROVIDER?: OAuthGrantListHelpers
 }
 

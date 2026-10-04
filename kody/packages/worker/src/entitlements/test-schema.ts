@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { ensureUserStorageBucketsTestSchema } from '#worker/storage-buckets/test-schema.ts'
 import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
 
@@ -11,7 +12,7 @@ import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
  * StorageRunner writes register ownership through that table, and `referrals`
  * for the invoice-gated Standard credit program.
  */
-export async function ensureEntitlementTestSchema(db: D1Database) {
+export async function ensureEntitlementTestSchema(db: SqlDatabase) {
 	await ensureUsersTestSchema({
 		db,
 		columns: [
@@ -51,7 +52,7 @@ export async function ensureEntitlementTestSchema(db: D1Database) {
 	await ensureReferralProgramTestSchema(db)
 }
 
-export async function ensureReferralProgramTestSchema(db: D1Database) {
+export async function ensureReferralProgramTestSchema(db: SqlDatabase) {
 	await db
 		.prepare(
 			`CREATE TABLE IF NOT EXISTS referrals (

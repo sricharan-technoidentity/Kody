@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Derived D1 reverse index: outbound provider message id → owning message.
  * Mailbox is authoritative; this table exists only so contextless provider
@@ -50,7 +51,7 @@ function mapIndexRow(
 }
 
 export async function getOutboundProviderIndexRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	provider?: string
 	providerMessageId: string
 }): Promise<EmailOutboundProviderIndexRow | null> {
@@ -69,7 +70,7 @@ export async function getOutboundProviderIndexRow(input: {
 }
 
 export async function upsertOutboundProviderIndexRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	provider?: string
 	providerMessageId: string
 	userId: string
@@ -103,7 +104,7 @@ export async function upsertOutboundProviderIndexRow(input: {
 }
 
 export async function deleteOutboundProviderIndexByMessageId(input: {
-	db: D1Database
+	db: SqlDatabase
 	messageId: string
 }): Promise<number> {
 	const result = await input.db
@@ -117,7 +118,7 @@ export async function deleteOutboundProviderIndexByMessageId(input: {
 }
 
 export async function deleteOutboundProviderIndexByMessageIds(input: {
-	db: D1Database
+	db: SqlDatabase
 	messageIds: ReadonlyArray<string>
 }): Promise<number> {
 	if (input.messageIds.length === 0) return 0
@@ -147,7 +148,7 @@ export async function deleteOutboundProviderIndexByMessageIds(input: {
  * Read-only structural report over the thin reverse index.
  */
 export async function loadOutboundProviderIndexHealthReport(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId?: string
 }): Promise<OutboundProviderIndexHealthReport> {
 	const userId = input.userId ?? null
@@ -167,7 +168,7 @@ export async function loadOutboundProviderIndexHealthReport(input: {
 					END
 				), 0) AS malformed_count
 			FROM email_outbound_provider_index
-			WHERE ?1 IS NULL OR user_id = ?1`,
+			WHERE ?1::text IS NULL OR user_id = ?1`,
 		)
 		.bind(userId)
 		.first<{

@@ -242,7 +242,7 @@ test('account deletion reports missing Durable Object / blob bindings and remain
 	await expect(
 		deleteUserAccount({
 			env: createSuccessfulDeletionEnv(missingMailboxDb, {
-				MAILBOX: undefined,
+				MAILBOX_STORE: undefined,
 			}),
 			dbUserId: 1,
 			mcpUserId: 'user-aaa',
@@ -250,9 +250,7 @@ test('account deletion reports missing Durable Object / blob bindings and remain
 	).rejects.toMatchObject({
 		name: 'AccountDeletionInventoryError',
 		inventoryErrors: [
-			expect.stringContaining(
-				'MAILBOX Durable Object binding is not configured',
-			),
+			expect.stringContaining('MAILBOX_STORE Aurora service is not configured'),
 		],
 	})
 	expect(missingMailboxRows.users).toEqual([
@@ -282,14 +280,14 @@ test('account deletion reports missing Durable Object / blob bindings and remain
 	])
 })
 
-test('deleteUserAccount fails closed when REPO_SESSION_INDEX is missing', async () => {
+test('deleteUserAccount fails closed when REPO_SESSION_CATALOG is missing', async () => {
 	const { db, rows } = createTestDb({
 		users: [{ id: 1, email: 'a@example.com', stable_user_id: 'user-aaa' }],
 		mcp_memories: [{ id: 'memory-a', user_id: 'user-aaa' }],
 	})
 	const env = createSuccessfulDeletionEnv(db)
 	const envWithoutIndex = { ...env }
-	delete envWithoutIndex.REPO_SESSION_INDEX
+	delete envWithoutIndex.REPO_SESSION_CATALOG
 	await expect(
 		deleteUserAccount({
 			env: envWithoutIndex,
@@ -325,9 +323,11 @@ test('deleteUserAccount fails closed when preflight inventory cannot be read', a
 				APP_DB: db,
 				USER_METERS: userMeter.env.USER_METERS,
 				CAPABILITY_VECTOR_INDEX: { deleteByIds: deleteVectors },
-				STORAGE_RUNNER: {
-					idFromName: (name: string) => name as unknown as DurableObjectId,
-					get: () => ({ clearStorage }),
+				STORAGE_CELLS: {
+					forBucket: (bucket: { userId: string; storageId: string }) =>
+						(() => ({ clearStorage }))(
+							JSON.stringify([bucket.userId, bucket.storageId]),
+						),
 				},
 			} as unknown as Parameters<typeof deleteUserAccount>[0]['env'],
 			dbUserId: 1,
@@ -497,14 +497,14 @@ test('account deletion empties the user run records and leaves other users untou
 		],
 	})
 	const env = createSuccessfulDeletionEnv(db, {
-		STORAGE_RUNNER: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: (id: DurableObjectId) => ({
-				clearStorage: async () => {
-					clearedStorageIds.push(String(id))
-					return { ok: true as const }
-				},
-			}),
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				((id: DurableObjectId) => ({
+					clearStorage: async () => {
+						clearedStorageIds.push(String(id))
+						return { ok: true as const }
+					},
+				}))(JSON.stringify([bucket.userId, bucket.storageId])),
 		},
 		RUN_RECORDS: runRecords.records,
 	})
@@ -540,7 +540,7 @@ test('account deletion empties the user run records and leaves other users untou
 test('account deletion purges a StorageRunner known only via user_storage_buckets', async () => {
 	const userId = 'user-bucket-only'
 	const clearStorage = vi.fn(async () => ({ ok: true as const }))
-	const idFromName = vi.fn((name: string) => name as unknown as DurableObjectId)
+	const forBucket = vi.fn(() => ({ clearStorage }))
 	const { db } = createTestDb({
 		users: [{ id: 1, email: 'bucket@example.com', stable_user_id: userId }],
 		user_storage_buckets: [
@@ -554,9 +554,8 @@ test('account deletion purges a StorageRunner known only via user_storage_bucket
 
 	const result = await deleteUserAccount({
 		env: createSuccessfulDeletionEnv(db, {
-			STORAGE_RUNNER: {
-				idFromName,
-				get: () => ({ clearStorage }),
+			STORAGE_CELLS: {
+				forBucket,
 			},
 		}),
 		dbUserId: 1,
@@ -565,7 +564,7 @@ test('account deletion purges a StorageRunner known only via user_storage_bucket
 
 	expect(result.clearedDurableObjects.storageRunners).toBe(1)
 	expect(clearStorage).toHaveBeenCalledTimes(1)
-	expect(idFromName).toHaveBeenCalledWith(
-		JSON.stringify([userId, 'exec:adhoc-only']),
+	expect(forBucket).toHaveBeenCalledWith(
+		expect.objectContaining({ userId, storageId: 'exec:adhoc-only' }),
 	)
 })

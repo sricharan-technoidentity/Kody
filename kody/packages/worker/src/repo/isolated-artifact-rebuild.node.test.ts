@@ -28,7 +28,7 @@ test('createIsolatedArtifactRebuildRunner returns null without bindings', () => 
 	expect(createIsolatedArtifactRebuildRunner({} as Env)).toBeNull()
 	expect(
 		createIsolatedArtifactRebuildRunner({
-			REPO_SESSION: {},
+			REPO_SESSIONS: {},
 		} as unknown as Env),
 	).toBeNull()
 	expect(
@@ -48,10 +48,9 @@ test('runner touches staging TTL, fans out one target chunk per throwaway DO, an
 		ok: true,
 		message: 'rebuilt',
 	}))
-	const idFromName = vi.fn((name: string) => ({ name }))
 	const getStub = vi.fn(() => ({ runIsolatedArtifactRebuild }))
 	const runner = createIsolatedArtifactRebuildRunner({
-		REPO_SESSION: { idFromName, get: getStub },
+		REPO_SESSIONS: getStub,
 		BUNDLE_ARTIFACTS_KV: { put, get, delete: del },
 	} as unknown as Env)
 	expect(runner).not.toBeNull()
@@ -81,7 +80,7 @@ test('runner touches staging TTL, fans out one target chunk per throwaway DO, an
 		baseUrl: 'https://kody.test',
 	})
 	expect(outcome.ok).toBe(true)
-	expect(idFromName).toHaveBeenCalledWith(
+	expect(getStub).toHaveBeenCalledWith(
 		expect.stringMatching(/^isolated-artifact-rebuild-user-1-/),
 	)
 	expect(runIsolatedArtifactRebuild).toHaveBeenCalledWith({

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as PackageInvocationServiceModule from './service.ts'
 import {
@@ -150,7 +151,7 @@ async function createEnv(
 					},
 				}
 			},
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: {
 			get: async () => null,
 			put: async () => undefined,

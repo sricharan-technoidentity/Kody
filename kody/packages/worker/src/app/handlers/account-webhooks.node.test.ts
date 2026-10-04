@@ -1,11 +1,11 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
 	createAccountWebhooksApiHandler,
 	createAccountWebhooksHandler,
 } from '#app/handlers/account-webhooks.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { type AccountWebhooksLoaderData } from '#universal/loader-data.ts'
 
@@ -106,25 +106,15 @@ vi.mock('#worker/package-registry/source.ts', () => ({
 	})),
 }))
 
-function createEnv() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE webhook_endpoints (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			package_id TEXT NOT NULL,
-			webhook_name TEXT NOT NULL,
-			url_secret_hash TEXT NOT NULL,
-			url_secret_encrypted TEXT,
-			previous_url_secret_hash TEXT,
-			previous_url_secret_expires_at TEXT,
-			enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-			created_at TEXT NOT NULL,
-			rotated_at TEXT NOT NULL
-		);
-	`)
+async function createEnv() {
+	const sqlite = await createTestPg()
+
 	return {
-		APP_DB: createD1FromSqlite(sqlite),
+		APP_DB: createPgDatabase({
+			connection: sqlite,
+			role: 'kody_writer',
+			userId: await createStableUserIdFromEmail('owner@example.com'),
+		}),
 		SECRET_KMS: testSecretKms,
 		SENTRY_ENVIRONMENT: 'test',
 	} as unknown as Env
@@ -149,7 +139,7 @@ const owner = {
 
 test('account webhooks page embeds every package’s declared webhooks (never a URL) and redirects anonymous visitors', async () => {
 	const userId = await createStableUserIdFromEmail(owner.email)
-	const handler = createAccountWebhooksHandler(createEnv())
+	const handler = createAccountWebhooksHandler(await createEnv())
 	mockModule.requireAuthenticatedPageUser.mockResolvedValue({
 		...owner,
 		mcpUser: { userId },
@@ -192,7 +182,7 @@ test('account webhooks API lists across packages and is read-only: mutations bel
 		...owner,
 		mcpUser: { userId },
 	})
-	const handler = createAccountWebhooksApiHandler(createEnv())
+	const handler = createAccountWebhooksApiHandler(await createEnv())
 	const apiUrl = 'https://kody.example/account/webhooks.json'
 
 	const listed = await runHandler(

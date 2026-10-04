@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { DynamicCallableWorkflowBase } from './package-workflows-test-harness.ts'
 vi.mock('#worker/temporal/package-workflow.ts', () => ({
 	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
@@ -38,7 +39,7 @@ vi.mock('#mcp/run-kody-registry.ts', () => ({
 }))
 
 const backgroundUserMocks = vi.hoisted(() => ({
-	resolveBackgroundMcpUser: vi.fn(async (_db: D1Database, userId: string) => ({
+	resolveBackgroundMcpUser: vi.fn(async (_db: SqlDatabase, userId: string) => ({
 		userId,
 		email: `${userId}@example.com`,
 		username: userId,
@@ -47,7 +48,7 @@ const backgroundUserMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('#worker/identity/background-mcp-user.ts', () => ({
-	resolveBackgroundMcpUser: (db: D1Database, userId: string) =>
+	resolveBackgroundMcpUser: (db: SqlDatabase, userId: string) =>
 		backgroundUserMocks.resolveBackgroundMcpUser(db, userId),
 }))
 
@@ -673,7 +674,7 @@ test('suspended owners fail inline and package workflow steps once without retri
 		).toMatchObject({ status: 'errored', lastError: accountSuspendedMessage })
 		backgroundUserMocks.resolveBackgroundMcpUser.mockReset()
 		backgroundUserMocks.resolveBackgroundMcpUser.mockImplementation(
-			async (_db: D1Database, userId: string) => ({
+			async (_db: SqlDatabase, userId: string) => ({
 				userId,
 				email: `${userId}@example.com`,
 				username: userId,

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	readCurrentEntitlementResourceUsage,
 	type EntitlementUsageEnv,
@@ -146,7 +147,7 @@ export async function dismissOnboardingChecklist(input: {
 	)
 }
 
-async function readDismissedAtColumn(db: D1Database, userId: string) {
+async function readDismissedAtColumn(db: SqlDatabase, userId: string) {
 	const row = await db
 		.prepare(
 			`SELECT onboarding_checklist_dismissed_at
@@ -161,7 +162,7 @@ async function readDismissedAtColumn(db: D1Database, userId: string) {
 }
 
 async function writeDismissedAtColumn(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	dismissedAt: string,
 ) {

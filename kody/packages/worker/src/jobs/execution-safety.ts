@@ -1,5 +1,5 @@
 import { errorCauseChainIncludes } from '@kody-internal/shared/error-message.ts'
-import { isRetryableD1LockError } from '#worker/d1-retry.ts'
+import { isRetryableSqlError } from '#worker/sql-retry.ts'
 import { isDurableObjectIsolateResetMessage } from '#worker/sentry-options.ts'
 import { isStorageEstimateReadError } from '#worker/storage-estimate-error.ts'
 import {
@@ -34,7 +34,7 @@ export function buildScheduledJobIdempotencyKey(input: {
 export function isTransientJobExecutionError(error: unknown) {
 	return (
 		error instanceof TransientJobExecutionError ||
-		isRetryableD1LockError(error) ||
+		isRetryableSqlError(error) ||
 		errorCauseChainIncludes(error, isDurableObjectIsolateResetMessage) ||
 		isStorageEstimateReadError(error)
 	)

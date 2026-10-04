@@ -1,38 +1,17 @@
-import { createTestDb } from '#worker/test-support/aws/test-db.ts'
-import { createTestRunRecords } from '#worker/test-support/run-records.ts'
-import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import { createRunnerTestEnv } from '#worker/test-support/runner.ts'
+import { buildKodyModuleBundle } from '#worker/package-runtime/module-graph.ts'
+import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 import { expect, test, vi } from 'vitest'
-import { metaGetCurrentUserCapability } from '#mcp/capabilities/meta/meta-get-current-user.ts'
-import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
 import { runSavedPackageModuleOnce } from './module-execution.ts'
-import type * as ModuleArtifacts from './module-artifacts.ts'
-import type * as RunKodyRegistry from '#mcp/run-kody-registry.ts'
-
-const mocks = vi.hoisted(() => ({
-	ensureModuleArtifact: vi.fn(),
-	runBundledModuleWithRegistry: vi.fn(),
-}))
-
-vi.mock('./module-artifacts.ts', async (importOriginal) => ({
-	...(await importOriginal<typeof ModuleArtifacts>()),
-	ensureModuleArtifact: mocks.ensureModuleArtifact,
-}))
-
-vi.mock('#mcp/run-kody-registry.ts', async (importOriginal) => ({
-	...(await importOriginal<typeof RunKodyRegistry>()),
-	runBundledModuleWithRegistry: mocks.runBundledModuleWithRegistry,
-}))
 
 test('subscription execution exposes the owner account identity to metaGetCurrentUser', async () => {
 	const userId = 'a'.repeat(64)
 	const email = 'subscription-owner@example.com'
 	const displayName = 'Subscription Owner'
-	await using database = await createTestDb({ userId })
-	const env = {
-		APP_DB: database.db,
-		...createTestRunRecords().env,
-		...createInMemoryUserMeterEnv().env,
-	} as unknown as Env
+	silenceIncidentalRuntimeWarnings()
+	const harness = await createRunnerTestEnv()
+	await using cleanup = { [Symbol.asyncDispose]: harness.close }
+	const { env } = harness
 	await env.APP_DB.prepare(
 		`INSERT INTO users (
 			username,
@@ -51,7 +30,16 @@ test('subscription execution exposes the owner account identity to metaGetCurren
 		)
 		.run()
 
-	mocks.ensureModuleArtifact.mockResolvedValue({
+	const bundle = await buildKodyModuleBundle({
+		env,
+		baseUrl: 'https://kody.dev',
+		userId,
+		entryPoint: 'entry.ts',
+		sourceFiles: {
+			'entry.ts': `import {kody} from 'kody:runtime'; export default async function main() { return kody.metaGetCurrentUser({}) }`,
+		},
+	})
+	const preloadedModuleArtifact = {
 		artifact: {
 			version: 1,
 			kind: 'module',
@@ -59,11 +47,8 @@ test('subscription execution exposes the owner account identity to metaGetCurren
 			sourceId: 'source-1',
 			publishedCommit: 'commit-1',
 			entryPoint: 'src/email-message-received.ts',
-			mainModule: 'dist/subscription.js',
-			modules: {
-				'dist/subscription.js':
-					'export default async function main() { return null }',
-			},
+			mainModule: bundle.mainModule,
+			modules: bundle.modules,
 			dependencies: [],
 			packageContext: {
 				packageId: 'package-1',
@@ -85,19 +70,11 @@ test('subscription execution exposes the owner account identity to metaGetCurren
 			created_at: '2026-08-08T00:00:00.000Z',
 			updated_at: '2026-08-08T00:00:00.000Z',
 		},
-	})
-	mocks.runBundledModuleWithRegistry.mockImplementation(
-		async (_env: Env, callerContext: McpCallerContext) => ({
-			result: await metaGetCurrentUserCapability.handler(
-				{},
-				{ env, callerContext },
-			),
-			logs: [],
-		}),
-	)
+	}
 
 	const outcome = await runSavedPackageModuleOnce({
 		env,
+		preloadedModuleArtifact: preloadedModuleArtifact as never,
 		baseUrl: 'https://kody.dev',
 		actor: {
 			tokenId: 'internal:email-subscriptions',
@@ -148,4 +125,4 @@ test('subscription execution exposes the owner account identity to metaGetCurren
 			},
 		},
 	})
-})
+}, 60_000)

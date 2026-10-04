@@ -1,13 +1,13 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
 import {
 	auditEventSummaries,
 	logAuditEventSpy,
 } from '#worker/test-support/audit-log-spy.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { adminReservedUsernameAddCapability } from './admin-reserved-username-add.ts'
 import { adminReservedUsernameListCapability } from './admin-reserved-username-list.ts'
@@ -31,13 +31,13 @@ function createMemoryKv(initial?: Record<string, string>) {
 	} as unknown as KVNamespace & { store: Map<string, string> }
 }
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(
+async function createMigratedDb() {
+	const sqlite = await createTestPg()
+
+	return {
 		sqlite,
-		new URL('../../../../migrations/', import.meta.url),
-	)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+		db: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	}
 }
 
 function createContext(
@@ -47,7 +47,7 @@ function createContext(
 	const adminStableUserId = testStableUserIdFromEmail('admin@example.com')
 	return {
 		env: {
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			...envOverrides,
 		} as Env,
 		callerContext: createMcpCallerContext({
@@ -64,7 +64,7 @@ function createContext(
 }
 
 test('admin reserved username capabilities: admin-only, audit, permanent refusal, conflicts', async () => {
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	const kv = createMemoryKv()
 	const userCtx = createContext(['user'], {
 		APP_DB: db,
@@ -96,7 +96,7 @@ test('admin reserved username capabilities: admin-only, audit, permanent refusal
 
 	const holderEmail = 'holder@example.com'
 	const holderStableId = testStableUserIdFromEmail(holderEmail)
-	sqlite.exec(`
+	await sqlite.exec(`
 		INSERT INTO users (username, email, stable_user_id, password_hash)
 		VALUES (
 			'brandnew',

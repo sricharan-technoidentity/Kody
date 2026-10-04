@@ -10,7 +10,7 @@ type FakeWorkerOptions = Record<string, unknown>
 
 function createExecutorTestEnv(loader: Env['LOADER']) {
 	return {
-		LOADER: loader,
+		RUNNER_LOADER: { forContext: () => loader },
 		APP_COMMIT_SHA: 'commit-for-test',
 	} as Env
 }

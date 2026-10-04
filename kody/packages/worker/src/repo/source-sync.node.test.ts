@@ -1,3 +1,4 @@
+import { type SqlStatement } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { type ArtifactBootstrapAccess } from './artifacts.ts'
 
@@ -88,11 +89,11 @@ function createSyncEnv() {
 		env: {
 			APP_DB: {
 				prepare() {
-					return {} as D1PreparedStatement
+					return {} as SqlStatement
 				},
 			},
 			BUNDLE_ARTIFACTS_KV: createBundleArtifactsKv(),
-			REPO_SESSION: {},
+			REPO_SESSIONS: {},
 			CLOUDFLARE_ACCOUNT_ID: 'account-1',
 			CLOUDFLARE_API_TOKEN: 'token-1',
 		} as unknown as Env,

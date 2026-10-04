@@ -1,6 +1,9 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import {
 	createAuthCookie,
@@ -11,8 +14,6 @@ import { createAccountSecretProvidersApiHandler } from '#app/handlers/account-se
 import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
 import { enableSecretProvidersForTests } from '#mcp/secrets/secret-providers/flag.ts'
 import { grantSecretProviderToPackage } from '#mcp/secrets/secret-providers/service.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 
@@ -23,11 +24,11 @@ const ownerEmail = 'one@example.com'
 const ownerStableId = testStableUserIdFromEmail(ownerEmail)
 
 async function seedUser(
-	sqlite: DatabaseSync,
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
 	input: { id: number; email: string; username: string },
 ) {
 	const passwordHash = await createPasswordHash('test-password')
-	sqlite.exec(`
+	await sqlite.exec(`
 		INSERT INTO users (
 			id, username, email, stable_user_id, password_hash, email_verified_at
 		) VALUES (
@@ -41,27 +42,24 @@ async function seedUser(
 	`)
 }
 
-function seedPackage(
-	sqlite: DatabaseSync,
+async function seedPackage(
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
 	input: { id: string; userId: string; kodyId: string },
 ) {
-	sqlite
-		.prepare(
-			`INSERT INTO saved_packages (
+	await pgQuery(sqlite).run(
+		`INSERT INTO saved_packages (
 				id, user_id, name, kody_id, description, source_id
 			) VALUES (?, ?, ?, ?, ?, ?)`,
-		)
-		.run(
-			input.id,
-			input.userId,
-			input.kodyId,
-			input.kodyId,
-			'',
-			`source-${input.id}`,
-		)
+		input.id,
+		input.userId,
+		input.kodyId,
+		input.kodyId,
+		'',
+		`source-${input.id}`,
+	)
 }
 
-function createAppEnv(db: D1Database) {
+function createAppEnv(db: SqlDatabase) {
 	return {
 		APP_DB: db,
 		APP_BASE_URL: 'http://example.com',
@@ -92,34 +90,37 @@ const ownerSession: AuthSession = {
 
 test('secret providers API lists grants and revokes them on the website', async () => {
 	setAuthSessionSecret(testCookieSecret)
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../../migrations/', import.meta.url))
-	const db = createD1FromSqlite(sqlite)
+	const sqlite = await createTestPg()
+
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: ownerStableId,
+	})
 	const env = createAppEnv(db)
 	await seedUser(sqlite, { id: 1, email: ownerEmail, username: 'one' })
-	seedPackage(sqlite, {
+	await seedPackage(sqlite, {
 		id: 'pkg-provider',
 		userId: ownerStableId,
 		kodyId: 'op',
 	})
-	seedPackage(sqlite, {
+	await seedPackage(sqlite, {
 		id: 'pkg-consumer',
 		userId: ownerStableId,
 		kodyId: 'deploy',
 	})
-	sqlite
-		.prepare(
-			`INSERT INTO secret_provider_bindings (
+	await pgQuery(sqlite).run(
+		`INSERT INTO secret_provider_bindings (
 				user_id, provider_id, package_id, door_secret_name, config_json
 			) VALUES (?, ?, ?, ?, '{}')`,
-		)
-		.run(
-			ownerStableId,
-			'1password',
-			'pkg-provider',
-			'onePasswordServiceAccountToken',
-		)
-	await enableSecretProvidersForTests(db)
+		ownerStableId,
+		'1password',
+		'pkg-provider',
+		'onePasswordServiceAccountToken',
+	)
+	await enableSecretProvidersForTests(
+		createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	)
 	await grantSecretProviderToPackage({
 		env,
 		userId: ownerStableId,
@@ -189,9 +190,13 @@ test('secret providers API lists grants and revokes them on the website', async 
 
 test('secret providers API is 404 when the flag is off', async () => {
 	setAuthSessionSecret(testCookieSecret)
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../../migrations/', import.meta.url))
-	const db = createD1FromSqlite(sqlite)
+	const sqlite = await createTestPg()
+
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: ownerStableId,
+	})
 	await seedUser(sqlite, { id: 1, email: ownerEmail, username: 'one' })
 	const handler = createAccountSecretProvidersApiHandler(createAppEnv(db))
 	const cookie = await createAuthCookie(ownerSession, false)

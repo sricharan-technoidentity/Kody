@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 import { maxRawMimeBytes } from './parser.ts'
@@ -70,7 +71,7 @@ export function isSystemEmailLocal(
 }
 
 export async function ensureSystemEmailInbox(input: {
-	db: D1Database
+	db: SqlDatabase
 	localPart: SystemEmailLocal
 	domain: string
 }): Promise<ProvisionedSystemEmailInbox | null> {
@@ -161,7 +162,7 @@ export function systemEmailDayKey(now = new Date()) {
 }
 
 export async function consumeSystemEmailDailyReceive(input: {
-	db: D1Database
+	db: SqlDatabase
 	localPart: SystemEmailLocal
 	now?: Date
 	limit?: number
@@ -174,9 +175,9 @@ export async function consumeSystemEmailDailyReceive(input: {
 				local_part, day, count, updated_at
 			) VALUES (?, ?, 1, ?)
 			ON CONFLICT(local_part, day) DO UPDATE SET
-				count = count + 1,
+				count = system_email_daily_counters.count + 1,
 				updated_at = excluded.updated_at
-			WHERE count < ?
+			WHERE system_email_daily_counters.count < ?
 			RETURNING count`,
 		)
 		.bind(input.localPart, systemEmailDayKey(now), now.toISOString(), limit)
@@ -191,7 +192,7 @@ export async function consumeSystemEmailDailyReceive(input: {
  * (day key) as the matching `consumeSystemEmailDailyReceive` call.
  */
 export async function refundSystemEmailDailyReceive(input: {
-	db: D1Database
+	db: SqlDatabase
 	localPart: SystemEmailLocal
 	now?: Date
 }): Promise<void> {
@@ -199,7 +200,7 @@ export async function refundSystemEmailDailyReceive(input: {
 	await input.db
 		.prepare(
 			`UPDATE system_email_daily_counters
-			SET count = MAX(0, count - 1),
+			SET count = GREATEST(0, count - 1),
 				updated_at = ?
 			WHERE local_part = ?
 				AND day = ?`,
@@ -218,7 +219,7 @@ function systemEmailSendCounterKey(localPart: SystemEmailLocal) {
 }
 
 export async function consumeSystemEmailDailySend(input: {
-	db: D1Database
+	db: SqlDatabase
 	localPart: SystemEmailLocal
 	now?: Date
 	limit?: number
@@ -231,9 +232,9 @@ export async function consumeSystemEmailDailySend(input: {
 				local_part, day, count, updated_at
 			) VALUES (?, ?, 1, ?)
 			ON CONFLICT(local_part, day) DO UPDATE SET
-				count = count + 1,
+				count = system_email_daily_counters.count + 1,
 				updated_at = excluded.updated_at
-			WHERE count < ?
+			WHERE system_email_daily_counters.count < ?
 			RETURNING count`,
 		)
 		.bind(
@@ -252,7 +253,7 @@ export async function consumeSystemEmailDailySend(input: {
  * `now` (day key) as the matching consume call.
  */
 export async function refundSystemEmailDailySend(input: {
-	db: D1Database
+	db: SqlDatabase
 	localPart: SystemEmailLocal
 	now?: Date
 }): Promise<void> {
@@ -260,7 +261,7 @@ export async function refundSystemEmailDailySend(input: {
 	await input.db
 		.prepare(
 			`UPDATE system_email_daily_counters
-			SET count = MAX(0, count - 1),
+			SET count = GREATEST(0, count - 1),
 				updated_at = ?
 			WHERE local_part = ?
 				AND day = ?`,
@@ -274,7 +275,7 @@ export async function refundSystemEmailDailySend(input: {
 }
 
 export async function countStoredSystemEmailMessages(input: {
-	db: D1Database
+	db: SqlDatabase
 }) {
 	await assertSystemEmailGraphAuthority(input.db)
 	const row = await input.db
@@ -293,7 +294,7 @@ type SystemEmailMessageCursor = {
 }
 
 async function listSystemEmailMessages(input: {
-	db: D1Database
+	db: SqlDatabase
 	before?: string
 	/**
 	 * Keyset cursor (last row examined in the newest-first ordering) so batches
@@ -334,7 +335,7 @@ async function listSystemEmailMessages(input: {
 }
 
 async function deleteSystemEmailMessagesByIds(input: {
-	db: D1Database
+	db: SqlDatabase
 	blobs: R2Bucket
 	messageIds: ReadonlyArray<string>
 }) {
@@ -443,7 +444,7 @@ export type SystemEmailRetentionResult = {
 }
 
 export async function pruneSystemEmailRetention(input: {
-	db: D1Database
+	db: SqlDatabase
 	/** EMAIL_BLOBS bucket; raw-MIME blobs are deleted before their rows. */
 	blobs: R2Bucket
 	now?: Date

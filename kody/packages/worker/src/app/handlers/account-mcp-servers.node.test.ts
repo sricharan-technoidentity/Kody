@@ -1,5 +1,6 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
-import type * as CloudflareWorkers from 'cloudflare:workers'
+import type * as CloudflareWorkers from '#worker/front-door/host-context.ts'
 
 const mockModule = vi.hoisted(() => ({
 	waitUntil: vi.fn(),
@@ -119,7 +120,7 @@ const mockModule = vi.hoisted(() => ({
 	})),
 }))
 
-vi.mock('cloudflare:workers', async (importOriginal) => {
+vi.mock('#worker/front-door/host-context.ts', async (importOriginal) => {
 	const actual = await importOriginal<typeof CloudflareWorkers>()
 	return {
 		...actual,
@@ -222,7 +223,7 @@ const {
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env
 }
 

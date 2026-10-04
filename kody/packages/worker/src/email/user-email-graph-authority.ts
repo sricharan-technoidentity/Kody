@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 
 export type UserEmailGraphAuthorityMarker = {
@@ -7,7 +8,7 @@ export type UserEmailGraphAuthorityMarker = {
 }
 
 export async function loadUserEmailGraphAuthorityMarker(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<UserEmailGraphAuthorityMarker | null> {
 	const row = await db
 		.prepare(
@@ -30,7 +31,7 @@ export async function loadUserEmailGraphAuthorityMarker(
 }
 
 export async function assertUserEmailGraphAuthority(input: {
-	db: D1Database
+	db: SqlDatabase
 	ownerId: string
 }) {
 	if (input.ownerId === systemEmailOwnerId) return

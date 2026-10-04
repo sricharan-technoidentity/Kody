@@ -1,7 +1,8 @@
-import { type CloudflareOptions } from '@sentry/cloudflare'
+import { type NodeOptions } from '#worker/front-door/telemetry.ts'
 import { type ErrorEvent, type EventHint } from '@sentry/core'
 import { getErrorCauseChain } from '@kody-internal/shared/error-message.ts'
-import { isRetryableD1LockSentryEvent } from './d1-retry.ts'
+import { isHistoricalPlatformTransientMessage } from '@kody-internal/shared/historical-platform-errors.ts'
+import { isRetryableSqlSentryEvent } from './sql-retry.ts'
 import { isCimdUnknownClientSentryMessage } from './oauth-cimd-error.ts'
 import {
 	isComputeOverageLimitError,
@@ -19,11 +20,19 @@ function sentryEventMessages(event: ErrorEvent) {
 }
 
 /**
- * Shared Sentry options for the Cloudflare Worker and Durable Objects.
+ * Shared Sentry options for the Node front door and activities.
  * `dsn` may be undefined when Sentry is not configured (local dev / opt-out).
  */
-export function filterRetryableD1LockSentryEvent(event: ErrorEvent) {
-	if (!isRetryableD1LockSentryEvent(event)) return event
+export function filterTransientSqlSentryEvent(event: ErrorEvent) {
+	if (
+		!isRetryableSqlSentryEvent(event) &&
+		!sentryEventMessages(event).some(
+			(message) =>
+				typeof message === 'string' &&
+				isHistoricalPlatformTransientMessage(message),
+		)
+	)
+		return event
 	return null
 }
 
@@ -246,7 +255,7 @@ export const durableObjectInstanceInactiveCloseMessage =
  * `Internal error in Durable Object storage caused object to be reset; reference = <id>`.
  * D1 bindings can surface the same DO-storage reset under optional `Error:` /
  * `D1_ERROR:` prefixes (KODY-82). Same class as D1's `Internal error in D1 DB
- * storage caused object to be reset` (see `d1-retry.ts`): not an application
+ * storage caused object to be reset` (see `historical-platform-errors.ts`): not an application
  * defect — DO storage hit an internal fault. Require `reference =` and this
  * exact phrasing so bare / unrelated "Durable Object storage …" messages stay
  * Sentry-visible. Reference ids use the same alphabet as D1: alphanumeric,
@@ -265,7 +274,7 @@ function normalizeDurableObjectIsolateResetMessage(message: string) {
 /**
  * Strip the same optional platform prefixes D1 bindings attach (`Error:` then
  * `D1_ERROR:`) before matching the anchored DO-storage reset sentence. Same
- * order as `stripD1ErrorPrefixes` in `d1-retry.ts`.
+ * order as `stripD1ErrorPrefixes` in `historical-platform-errors.ts`.
  */
 function normalizeDurableObjectStorageObjectResetMessage(message: string) {
 	return message
@@ -532,7 +541,7 @@ export function filterSentryEvent(event: ErrorEvent, hint?: EventHint) {
 	// Marker first: primary mechanism for user-authored failures.
 	if (filterUserCodeErrorSentryEvent(event, hint) === null) return null
 	if (filterEntitlementLimitErrorSentryEvent(event, hint) === null) return null
-	if (filterRetryableD1LockSentryEvent(event) === null) return null
+	if (filterTransientSqlSentryEvent(event) === null) return null
 	// String-match backstops for paths that cannot yet be marked.
 	if (filterUserModuleBundlerFailureSentryEvent(event) === null) return null
 	if (filterExecutorSandboxTimeoutSentryEvent(event) === null) return null
@@ -550,7 +559,7 @@ export function filterSentryEvent(event: ErrorEvent, hint?: EventHint) {
 	return event
 }
 
-export function buildSentryOptions(env: Env): CloudflareOptions {
+export function buildSentryOptions(env: Env): NodeOptions {
 	const dsn = env.SENTRY_DSN?.trim()
 	const environment = env.SENTRY_ENVIRONMENT?.trim() || 'development'
 	const release = env.APP_COMMIT_SHA?.trim()
@@ -618,9 +627,7 @@ export function buildSentryOptions(env: Env): CloudflareOptions {
 /**
  * Top-level Worker: skip Sentry wrapper overhead when no DSN is configured.
  */
-export function getWorkerSentryOptions(
-	env: Env,
-): CloudflareOptions | undefined {
+export function getWorkerSentryOptions(env: Env): NodeOptions | undefined {
 	const options = buildSentryOptions(env)
 	return options.dsn ? options : undefined
 }

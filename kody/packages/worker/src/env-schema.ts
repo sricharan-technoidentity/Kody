@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	createSchema,
 	fail,
@@ -11,21 +12,14 @@ import { type RunRecords } from '#worker/run-records/run-log-types.ts'
 import { type RunState } from '#worker/run-records/run-state-types.ts'
 import { type KodyTemporal } from '#worker/temporal/client.ts'
 
-const d1DatabaseSchema = createSchema<unknown, D1Database>((value, context) => {
-	if (value) {
-		return { value: value as D1Database }
-	}
-	return fail('Missing APP_DB binding for database access.', context.path)
-})
-
-function requiredDurableObjectNamespaceSchema(message: string) {
-	return createSchema<unknown, DurableObjectNamespace>((value, context) => {
+const d1DatabaseSchema = createSchema<unknown, SqlDatabase>(
+	(value, context) => {
 		if (value) {
-			return { value: value as DurableObjectNamespace }
+			return { value: value as SqlDatabase }
 		}
-		return fail(message, context.path)
-	})
-}
+		return fail('Missing APP_DB binding for database access.', context.path)
+	},
+)
 
 const optionalSendEmailSchema = createSchema<unknown, SendEmail | undefined>(
 	(value, _context) => {
@@ -207,15 +201,6 @@ export const EnvSchema = object({
 	// Highlight worker service binding. Optional: tests and single-worker
 	// local fallback to plaintext tokens when the binding is absent.
 	HIGHLIGHT: optionalFetcherSchema,
-	STORAGE_RUNNER: requiredDurableObjectNamespaceSchema(
-		'Missing STORAGE_RUNNER binding for durable execute and job storage.',
-	),
-	PACKAGE_REALTIME_SESSION: requiredDurableObjectNamespaceSchema(
-		'Missing PACKAGE_REALTIME_SESSION binding for package realtime websocket sessions.',
-	),
-	MCP_CLIENT_HUB: requiredDurableObjectNamespaceSchema(
-		'Missing MCP_CLIENT_HUB binding for user-added MCP server connections.',
-	),
 	RUNTIME_WORKER: optionalFetcherSchema,
 	USER_METERS: optionalUserMetersSchema,
 	RUN_RECORDS: optionalRunRecordsSchema,
@@ -385,3 +370,51 @@ export const EnvSchema = object({
 })
 
 export type AppEnv = InferOutput<typeof EnvSchema>
+
+/** AWS-backed application bindings. Legacy protocol names describe adapters, not services. */
+export interface AwsEnv extends AppEnv {
+	REQUEST_USER_ID?: string
+	ACCOUNT_SUBJECT_READER?: (
+		userId: string,
+	) => import('./aws/pg-database.ts').PgDatabase
+	ACCOUNT_SUBJECT_PURGER?: (
+		userId: string,
+	) => import('./aws/pg-database.ts').PgDatabase
+	RECORD_FLAG_EXPOSURES?: (
+		input: import('./feature-flags/exposure.ts').ExposureInput,
+	) => Promise<void>
+	/** Unused legacy binding shapes retained for P8's dead-code sweep. */
+	CAPABILITY_VECTOR_INDEX?: VectorizeIndex
+	MCP_OBJECT?: DurableObjectNamespace
+	MAILBOX?: DurableObjectNamespace
+	STORAGE_RUNNER?: DurableObjectNamespace
+	MCP_CLIENT_HUB?: DurableObjectNamespace
+	PACKAGE_REALTIME_SESSION?: DurableObjectNamespace
+	USER_METER?: DurableObjectNamespace
+	REPO_SESSION_INDEX?: DurableObjectNamespace
+	STRIPE_PLAN_REFRESH?: DurableObjectNamespace
+	REPO_SESSION?: DurableObjectNamespace
+
+	OAUTH_KV: KVNamespace
+	COMMUNITY_ASSETS: R2Bucket
+	EMAIL_BLOBS: R2Bucket
+	REPO_SESSION_BLOBS: R2Bucket
+	AUDIT_DB: SqlDatabase
+	ASSETS: Fetcher
+	AUTH_RATE_LIMITER: RateLimit
+	SENTRY_TUNNEL_RATE_LIMITER: RateLimit
+	LOADER: WorkerLoader
+	APP_LOADER: WorkerLoader
+	IMAGES: ImagesBinding
+	APP_DB_READER?: import('./aws/pg-database.ts').PgDatabase
+	APP_DB_FOR_USER?: (
+		userId: string,
+	) => import('./aws/pg-database.ts').PgDatabase
+	COMMUNITY_DB?: import('./aws/pg-database.ts').PgDatabase
+	ANALYTICS_DB?: import('./aws/pg-database.ts').PgDatabase
+	SEARCH_INDEX?: ReturnType<
+		typeof import('./aws/pg-search-index.ts').createPgSearchIndex
+	>
+	BACKUP_MANIFEST_SIGNING_KEY_ID?: string
+	BACKUP_MANIFEST_VERIFYING_PUBLIC_KEY_SPKI_BASE64?: string
+}

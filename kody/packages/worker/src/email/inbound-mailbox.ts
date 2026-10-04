@@ -13,7 +13,7 @@ export type InboundMailboxEnv = Pick<
 	| 'APP_BASE_URL'
 	| 'USAGE_EVENTS'
 	| 'USER_METERS'
-	| 'MAILBOX'
+	| 'MAILBOX_STORE'
 	| 'EMAIL_EVENTS'
 > &
 	EmailReportingEnv

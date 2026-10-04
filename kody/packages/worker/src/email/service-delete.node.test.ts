@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { systemEmailOwnerId } from './email-owner.ts'
 
@@ -37,7 +38,7 @@ function createEnv() {
 		return { first }
 	})
 	const env = {
-		APP_DB: { prepare } as unknown as D1Database,
+		APP_DB: { prepare } as unknown as SqlDatabase,
 	} as Env
 	return { env, preparedSql }
 }

@@ -1,7 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { expect, test } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
 import {
 	classifyVerificationDeliveryFailure,
 	lookupTransactionalEmailDelivery,
@@ -13,20 +12,13 @@ import {
 } from './verification-delivery.ts'
 
 async function createDeliveryTestDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureUsersTestSchema({ db, columns: ['email_verified_at'] })
-	await db
-		.prepare(
-			`CREATE TABLE transactional_email_delivery_index (
-				provider_message_id TEXT PRIMARY KEY NOT NULL,
-				user_id INTEGER NOT NULL,
-				kind TEXT NOT NULL,
-				recipient TEXT NOT NULL,
-				created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-			)`,
-		)
-		.run()
+	const sqlite = await createTestPg()
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: 'a'.repeat(64),
+	})
+
 	await db
 		.prepare(
 			`INSERT INTO users (username, email, password_hash, stable_user_id)

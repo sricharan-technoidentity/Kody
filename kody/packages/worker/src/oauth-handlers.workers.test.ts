@@ -1,5 +1,6 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import {
 	type AuthRequest,
 	type ClientInfo,
@@ -181,7 +182,7 @@ async function createDatabase(
 		async exec() {
 			return
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function mockJobDoNamespace(id: string): DurableObjectNamespace {
@@ -197,10 +198,10 @@ function mockJobDoNamespace(id: string): DurableObjectNamespace {
 
 function createEnv(
 	helpers: OAuthHelpers,
-	appDb?: D1Database,
+	appDb?: SqlDatabase,
 	cookieSecretValue: string = cookieSecret,
 ) {
-	const resolvedDb = appDb ?? ({} as D1Database)
+	const resolvedDb = appDb ?? ({} as SqlDatabase)
 	return {
 		OAUTH_PROVIDER: helpers,
 		APP_DB: resolvedDb,

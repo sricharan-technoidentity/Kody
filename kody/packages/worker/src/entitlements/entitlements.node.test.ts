@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import {
@@ -197,7 +198,7 @@ function createEntitlementsTestDb(
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	return { db, queries }
 }
@@ -557,7 +558,7 @@ test('getCachedUserPlan caches per db binding and never caches failures', async 
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	await expect(
 		getCachedUserPlan(flaky, { userId, email: plannedEmail }),
 	).rejects.toThrow('D1 blip')

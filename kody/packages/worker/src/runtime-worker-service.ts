@@ -1,4 +1,4 @@
-import { exports as workerExports } from 'cloudflare:workers'
+import { exports as workerExports } from '#worker/front-door/host-context.ts'
 import { type RuntimeWorkerServiceContract } from '@kody-internal/shared/runtime-worker.ts'
 
 export const packageAppRuntimeBridgeMissingMessage =

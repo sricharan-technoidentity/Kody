@@ -6,7 +6,10 @@ export async function loadAdminFeatureFlagsData(
 	env: Env,
 ): Promise<AdminFeatureFlagsLoaderData> {
 	const featureFlags = await listFeatureFlagsForAdmin(env.APP_DB)
-	await attachFeatureFlagMetricReadouts(env, featureFlags)
+	await attachFeatureFlagMetricReadouts(
+		{ ...env, APP_DB: env.ANALYTICS_DB ?? env.APP_DB },
+		featureFlags,
+	)
 	return {
 		ok: true,
 		featureFlags,

@@ -1,8 +1,10 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Mirrors the `usage_rollups` schema for `*.workers.test.ts` suites, which
  * run against a local D1 database without applying migrations.
  */
-export async function ensureUsageRollupsTestSchema(db: D1Database) {
+export async function ensureUsageRollupsTestSchema(db: SqlDatabase) {
+	if ((db as unknown as { dialect?: string }).dialect === 'postgres') return
 	const statements = [
 		`DROP TABLE IF EXISTS usage_rollups;`,
 		`CREATE TABLE usage_rollups (

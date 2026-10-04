@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Durable one-gift-per-user Standard overlay. Triggered when known connected
  * agent ecosystems first reach 2. Callers pass that count; this module does
@@ -39,7 +40,7 @@ type GiftUserRow = {
  * `/onboarding.json` does not hide an already-granted gift.
  */
 export async function maybeEvaluateSecondAgentStandardGift(input: {
-	db?: D1Database
+	db?: SqlDatabase
 	stableUserId: string
 	ecosystemCount: number
 	listingFailed?: boolean
@@ -69,7 +70,7 @@ export async function maybeEvaluateSecondAgentStandardGift(input: {
 }
 
 export async function loadSecondAgentStandardGift(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 	now: Date = new Date(),
 ): Promise<SecondAgentStandardGiftState> {
@@ -98,7 +99,7 @@ export async function loadSecondAgentStandardGift(
  * expires_at or Stripe.
  */
 export async function evaluateSecondAgentStandardGift(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	ecosystemCount: number
 	now?: Date

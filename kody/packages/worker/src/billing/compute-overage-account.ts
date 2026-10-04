@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 import {
 	buildComputeOverageHowToReduce,
@@ -32,7 +33,7 @@ export type ComputeOverageUsageRow = {
 }
 
 export async function readAccountComputeOverage(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	plan: PlanName
 	ladder: EntitlementLadder

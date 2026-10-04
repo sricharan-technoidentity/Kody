@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { CommunityActionError } from '#worker/community/errors.ts'
 import { createCommunityFeatureApiPostHandler } from './community-feature.ts'
@@ -28,7 +29,7 @@ vi.mock('#worker/audit-log.ts', async (importOriginal) => {
 	}
 })
 
-const env = { APP_DB: {} as D1Database } as Env
+const env = { APP_DB: {} as SqlDatabase } as Env
 
 function buildFeatureRequest(body: unknown) {
 	return {

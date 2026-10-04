@@ -1,7 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import type * as RepoChecks from '#worker/repo/checks.ts'
 import {
 	createPackageCodemodRun,
@@ -96,17 +96,17 @@ function createKv() {
 	}
 }
 
-function createEngineDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return createD1FromSqlite(sqlite)
+async function createEngineDb() {
+	const sqlite = await createTestPg()
+
+	return createPgDatabase({ connection: sqlite, role: 'kody_admin' })
 }
 
-function createEnv() {
+async function createEnv() {
 	const kv = createKv()
 	return {
 		env: {
-			APP_DB: createEngineDb(),
+			APP_DB: await createEngineDb(),
 			BUNDLE_ARTIFACTS_KV: kv.namespace,
 			APP_BASE_URL: 'https://example.com',
 		} as Env,
@@ -230,7 +230,7 @@ function resetMocks() {
 
 test('package codemod engine covers lifecycle, drift, isolation, snapshot keys, and gates', async () => {
 	resetMocks()
-	const { env, kv } = createEnv()
+	const { env, kv } = await createEnv()
 
 	const pkgAmbient = savedPackage({
 		id: 'pkg-ambient',
@@ -270,7 +270,7 @@ test('package codemod engine covers lifecycle, drift, isolation, snapshot keys, 
 	})
 
 	mocks.listSavedPackagesByUserId.mockImplementation(
-		async (_db: D1Database, input: { userId: string }) => {
+		async (_db: SqlDatabase, input: { userId: string }) => {
 			if (input.userId === 'user-1') {
 				return [pkgAmbient, pkgClean, pkgDrift, pkgUnpublished, pkgFail]
 			}
@@ -565,7 +565,7 @@ test('package codemod engine covers lifecycle, drift, isolation, snapshot keys, 
 
 test('package codemod engine enforces resume scope, binary paging, fleet progress, and publish failure id reuse', async () => {
 	resetMocks()
-	const { env, kv } = createEnv()
+	const { env, kv } = await createEnv()
 
 	const pkgA = savedPackage({
 		id: 'a',
@@ -637,7 +637,7 @@ test('package codemod engine enforces resume scope, binary paging, fleet progres
 
 	mocks.listSavedPackagesPage.mockImplementation(
 		async (
-			_db: D1Database,
+			_db: SqlDatabase,
 			input: { afterId: string | null; limit: number },
 		) => {
 			const start = input.afterId
@@ -749,7 +749,7 @@ test('package codemod engine enforces resume scope, binary paging, fleet progres
 
 test('package codemod revert skips when HEAD no longer matches applied afterCommit', async () => {
 	resetMocks()
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	const pkg = savedPackage({
 		id: 'pkg-revert-drift',
 		userId: 'user-1',
@@ -809,7 +809,7 @@ test('package codemod revert skips when HEAD no longer matches applied afterComm
 
 test('fleet apply on a locked package commits HEAD without promoting published_commit', async () => {
 	resetMocks()
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	const pkg = {
 		...savedPackage({
 			id: 'pkg-locked',
@@ -864,9 +864,9 @@ test('fleet apply on a locked package commits HEAD without promoting published_c
 })
 
 test('package codemod ledger bounds stored JSON/text columns', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	const db = createD1FromSqlite(sqlite)
+	const sqlite = await createTestPg()
+
+	const db = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
 	const { createPackageCodemodRun, insertPackageCodemodRunItem } =
 		await import('./ledger.ts')
 	await createPackageCodemodRun(db, {
@@ -928,7 +928,7 @@ test('package codemod ledger bounds stored JSON/text columns', async () => {
 
 test('package codemod engine rejects resume steps with mismatched filters', async () => {
 	resetMocks()
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	mocks.listSavedPackagesByUserId.mockResolvedValue([
 		savedPackage({
 			id: 'pkg-a',
@@ -1001,7 +1001,7 @@ test('package codemod engine rejects resume steps with mismatched filters', asyn
 
 test('omitted continuation filters keep a canary fleet apply on the stored package set', async () => {
 	resetMocks()
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	const pkgCanary = savedPackage({
 		id: 'pkg-canary',
 		userId: 'user-1',
@@ -1017,7 +1017,7 @@ test('omitted continuation filters keep a canary fleet apply on the stored packa
 	const fleet = [pkgCanary, pkgOutside]
 	mocks.listSavedPackagesPage.mockImplementation(
 		async (
-			_db: D1Database,
+			_db: SqlDatabase,
 			input: { afterId: string | null; limit: number },
 		) => {
 			if (input.afterId == null) return fleet
@@ -1067,7 +1067,7 @@ test('omitted continuation filters keep a canary fleet apply on the stored packa
 
 test('package codemod revert page ceiling and user-scoped SQL filter for sparse ownership', async () => {
 	resetMocks()
-	const { env } = createEnv()
+	const { env } = await createEnv()
 
 	await createPackageCodemodRun(env.APP_DB, {
 		id: 'prior-fleet',
@@ -1174,7 +1174,7 @@ test('package codemod revert page ceiling and user-scoped SQL filter for sparse 
 
 test('package codemod fleet revert applies packageIds filters and leaves others applied', async () => {
 	resetMocks()
-	const { env, kv } = createEnv()
+	const { env, kv } = await createEnv()
 
 	await createPackageCodemodRun(env.APP_DB, {
 		id: 'prior-canary-apply',
@@ -1242,7 +1242,7 @@ test('package codemod fleet revert applies packageIds filters and leaves others 
 	}
 
 	mocks.listSavedPackagesByUserId.mockImplementation(
-		async (_db: D1Database, input: { userId: string }) =>
+		async (_db: SqlDatabase, input: { userId: string }) =>
 			priorItems
 				.filter((prior) => prior.userId === input.userId)
 				.map((prior) =>
@@ -1308,7 +1308,7 @@ test('package codemod fleet revert applies packageIds filters and leaves others 
 
 test('package codemod step-level throw marks the run failed instead of leaving it running', async () => {
 	resetMocks()
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	mocks.listSavedPackagesPage.mockRejectedValue(new Error('paging boom'))
 
 	await expect(
@@ -1331,7 +1331,7 @@ test('package codemod step-level throw marks the run failed instead of leaving i
 
 test('package codemod continuation steps heartbeat the run and reopen abandoned runs', async () => {
 	resetMocks()
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	const pkgA = savedPackage({
 		id: 'hb-a',
 		userId: 'user-1',
@@ -1385,7 +1385,7 @@ test('package codemod continuation steps heartbeat the run and reopen abandoned 
 
 test('package codemod step rejects a cursor without a runId', async () => {
 	resetMocks()
-	const { env } = createEnv()
+	const { env } = await createEnv()
 	mocks.listSavedPackagesByUserId.mockResolvedValue([])
 
 	await expect(

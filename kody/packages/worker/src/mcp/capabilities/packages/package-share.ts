@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { z } from 'zod'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { defineDomainCapability } from '#mcp/capabilities/define-domain-capability.ts'
@@ -38,7 +39,7 @@ import {
 } from './package-share-shared.ts'
 
 async function resolveOwnerSavedPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	ownerUserId: string
 	packageId?: string
 	name?: string
@@ -71,14 +72,14 @@ async function resolveOwnerSavedPackage(input: {
 }
 
 async function hydrateGrants(
-	db: D1Database,
+	db: SqlDatabase,
 	grants: Array<PackageShareGrantRow>,
 ): Promise<Array<PackageShareGrantView>> {
 	return await hydratePackageShareGrantViews(db, grants)
 }
 
 async function inboundShareGrantLookup(
-	db: D1Database,
+	db: SqlDatabase,
 	user: ReturnType<typeof requireMcpUser>,
 ) {
 	return {

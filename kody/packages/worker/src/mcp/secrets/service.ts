@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	earliestSecretExpiresAt,
 	isSecretExpired,
@@ -846,7 +847,7 @@ export async function listPackageSecretsByPackageIds(input: {
 }
 
 async function getAccessibleBuckets(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: SecretScope | null
 	storageContext: StorageContext | null
@@ -868,7 +869,7 @@ async function getAccessibleBuckets(input: {
 }
 
 async function listAccessibleBucketsForScope(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: SecretScope
 	storageContext: StorageContext | null
@@ -891,7 +892,7 @@ async function listAccessibleBucketsForScope(input: {
 }
 
 async function getExistingBucketForScope(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: SecretScope
 	storageContext: StorageContext | null
@@ -907,7 +908,7 @@ async function getExistingBucketForScope(input: {
 }
 
 async function getOrCreateSecretBucket(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: SecretScope
 	storageContext: StorageContext | null

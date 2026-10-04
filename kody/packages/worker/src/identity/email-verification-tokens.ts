@@ -58,7 +58,7 @@ export async function insertEmailVerificationToken(input: {
 }
 
 export async function discardEmailVerificationToken(
-	db: D1Database,
+	db: SqlDatabase,
 	tokenHash: string,
 ) {
 	await db

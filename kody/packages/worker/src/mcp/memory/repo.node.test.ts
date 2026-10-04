@@ -1,65 +1,59 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
+
 import { expect, test } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+
 import { listMemoriesByUserIdPage } from './repo.ts'
 
-function createMemoryDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE mcp_memories (
-			id TEXT PRIMARY KEY NOT NULL,
-			user_id TEXT NOT NULL,
-			category TEXT,
-			status TEXT NOT NULL DEFAULT 'active',
-			subject TEXT NOT NULL,
-			summary TEXT NOT NULL,
-			details TEXT NOT NULL DEFAULT '',
-			tags_json TEXT NOT NULL DEFAULT '[]',
-			source_uris_json TEXT NOT NULL DEFAULT '[]',
-			dedupe_key TEXT,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			last_accessed_at TEXT,
-			deleted_at TEXT
-		)
-	`)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+async function createMemoryDb() {
+	const database = await createTestDb({ userId: 'user-1' })
+	const sqlite = database.pg
+
+	return {
+		sqlite,
+		db: database.db,
+		[Symbol.asyncDispose]: database[Symbol.asyncDispose],
+	}
 }
 
-function insertMemory(
-	sqlite: DatabaseSync,
+async function insertMemory(
+	sqlite: Awaited<ReturnType<typeof createTestDb>>['pg'],
 	row: { id: string; userId: string; status: string; subject: string },
 ) {
-	sqlite
-		.prepare(
-			`INSERT INTO mcp_memories (
+	await pgQuery(sqlite).run(
+		`INSERT INTO mcp_memories (
 				id, user_id, status, subject, summary, details, created_at, updated_at
 			) VALUES (?, ?, ?, ?, ?, '', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
-		)
-		.run(row.id, row.userId, row.status, row.subject, row.subject)
+		row.id,
+		row.userId,
+		row.status,
+		row.subject,
+		row.subject,
+	)
 }
 
 test('listMemoriesByUserIdPage is user-scoped, status-filtered, and keyset-paged', async () => {
-	const { sqlite, db } = createMemoryDb()
-	insertMemory(sqlite, {
+	await using harness = await createMemoryDb()
+	const { sqlite, db } = harness
+	await insertMemory(sqlite, {
 		id: 'mem-a',
 		userId: 'user-1',
 		status: 'active',
 		subject: 'Owned active',
 	})
-	insertMemory(sqlite, {
+	await insertMemory(sqlite, {
 		id: 'mem-b',
 		userId: 'user-1',
 		status: 'deleted',
 		subject: 'Owned deleted',
 	})
-	insertMemory(sqlite, {
+	await insertMemory(sqlite, {
 		id: 'mem-c',
 		userId: 'user-1',
 		status: 'archived',
 		subject: 'Owned archived',
 	})
-	insertMemory(sqlite, {
+	await insertMemory(sqlite, {
 		id: 'mem-other',
 		userId: 'user-2',
 		status: 'active',

@@ -1,6 +1,5 @@
 import { type ArtifactBootstrapAccess } from './artifacts.ts'
 import { type PublishedPackageArtifactBuildTarget } from '#worker/package-runtime/published-bundle-artifacts.ts'
-import { repoSessionDurableObjectName } from '#worker/user-scoped-durable-object-name.ts'
 import {
 	type IsolatedArtifactRebuildOutcome,
 	type IsolatedArtifactRebuildRequest,
@@ -205,14 +204,41 @@ export type RepoSessionRpc = {
 	}) => Promise<RepoExternalPublishResult>
 }
 
+export const repoSessionMethods = new Set<keyof RepoSessionRpc>([
+	'getEstimatedBytes',
+	'openSession',
+	'getSessionInfo',
+	'discardSession',
+	'purgeSession',
+	'cleanupSessionBranch',
+	'readFile',
+	'writeFile',
+	'search',
+	'tree',
+	'applyEdits',
+	'applyPatch',
+	'sessionStatus',
+	'sessionDiff',
+	'sessionLog',
+	'sessionCommit',
+	'restoreFiles',
+	'bootstrapSource',
+	'runChecks',
+	'runIsolatedCheckPhase',
+	'getCheckStatus',
+	'listPublishedPackageArtifactTargets',
+	'stagePublishedPackageArtifactRebuild',
+	'runIsolatedArtifactRebuild',
+	'rebuildPublishedPackageArtifact',
+	'rebaseSession',
+	'publishSession',
+	'publishFromExternalRef',
+])
+
 export function repoSessionRpc(env: Env, sessionId: string): RepoSessionRpc {
-	const namespace = (
-		env as Env & { REPO_SESSION?: DurableObjectNamespace | undefined }
-	).REPO_SESSION
-	if (!namespace) {
-		throw new Error('REPO_SESSION binding is not configured.')
-	}
-	return namespace.get(
-		namespace.idFromName(repoSessionDurableObjectName(sessionId)),
-	) as unknown as RepoSessionRpc
+	const sessions = (
+		env as Env & { REPO_SESSIONS?: (sessionId: string) => RepoSessionRpc }
+	).REPO_SESSIONS
+	if (!sessions) throw new Error('REPO_SESSIONS is not configured.')
+	return sessions(sessionId)
 }

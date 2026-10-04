@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	createAuthCookie,
@@ -39,7 +40,7 @@ function createAppEnv(
 	meter = createInMemoryUserMeterEnv(),
 ) {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		COOKIE_SECRET: testCookieSecret,
 		SENTRY_ENVIRONMENT: 'test',
 		OAUTH_PROVIDER: helpers,

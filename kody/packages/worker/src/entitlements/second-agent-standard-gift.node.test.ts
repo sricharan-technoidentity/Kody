@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
@@ -35,7 +36,7 @@ async function createGiftTestDb(input: {
 		],
 	)
 	return {
-		db: database.forUser(stableUserId).db as unknown as D1Database,
+		db: database.forUser(stableUserId).db as unknown as SqlDatabase,
 		stableUserId,
 	}
 }
@@ -195,7 +196,7 @@ test('maybeEvaluate skips writes without prepare and keeps an existing gift belo
 	const warn = vi.spyOn(console, 'warn')
 	await expect(
 		maybeEvaluateSecondAgentStandardGift({
-			db: {} as D1Database,
+			db: {} as SqlDatabase,
 			stableUserId: 'user-1',
 			ecosystemCount: 2,
 		}),

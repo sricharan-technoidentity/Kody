@@ -1,5 +1,5 @@
 import { resolveTransactionalSenderReplyTo } from '@kody-internal/shared/transactional-sender-reply-to.ts'
-import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
+import { sendSesEmail } from './ses.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { normalizeEmailAddress } from './address.ts'
 import { getSystemEmailDomain } from './platform-address.ts'
@@ -15,12 +15,7 @@ import { buildSystemEmailSentEvent } from './system-email-sent-subscription-even
 
 type SystemOutboundEnv = Pick<
 	Env,
-	| 'APP_DB'
-	| 'APP_BASE_URL'
-	| 'BUNDLE_ARTIFACTS_KV'
-	| 'CLOUDFLARE_ACCOUNT_ID'
-	| 'CLOUDFLARE_API_BASE_URL'
-	| 'CLOUDFLARE_API_TOKEN'
+	'APP_DB' | 'APP_BASE_URL' | 'BUNDLE_ARTIFACTS_KV' | 'SES_MAIL'
 > & { SYSTEM_EMAIL_DOMAIN?: string | null }
 
 /**
@@ -155,24 +150,18 @@ export async function sendSystemEmail(input: {
 		)
 	}
 
-	let result: Awaited<ReturnType<typeof sendCloudflareEmail>>
+	let result: Awaited<ReturnType<typeof sendSesEmail>>
 	try {
-		result = await sendCloudflareEmail(
-			{
-				accountId: input.env.CLOUDFLARE_ACCOUNT_ID,
-				apiBaseUrl: input.env.CLOUDFLARE_API_BASE_URL,
-				apiToken: input.env.CLOUDFLARE_API_TOKEN,
-			},
-			{
-				to: to.length === 1 ? to[0]! : to,
-				from,
-				subject,
-				html: html ?? htmlFromText(text ?? ''),
-				text: text ?? undefined,
-				...(replyTo ? { replyTo } : {}),
-				...(input.headers ? { headers: input.headers } : {}),
-			},
-		)
+		result = await sendSesEmail(input.env, {
+			to: to.length === 1 ? to[0]! : to,
+			from,
+			subject,
+			html: html ?? htmlFromText(text ?? ''),
+			text: text ?? undefined,
+			replyTo: replyTo ?? undefined,
+			headers: input.headers,
+			attachments: undefined,
+		})
 	} catch (error) {
 		await refundSystemEmailDailySend({
 			db: input.env.APP_DB,
@@ -180,18 +169,6 @@ export async function sendSystemEmail(input: {
 			now,
 		})
 		throw error
-	}
-	if (!result.ok) {
-		await refundSystemEmailDailySend({
-			db: input.env.APP_DB,
-			localPart,
-			now,
-		})
-		throw new Error(
-			result.skipped
-				? 'System email was skipped because no Cloudflare Email credentials are configured.'
-				: (result.error ?? 'System email send failed.'),
-		)
 	}
 	const providerMessageId = result.messageId ?? null
 	const resolvedHtml = html ?? htmlFromText(text ?? '')

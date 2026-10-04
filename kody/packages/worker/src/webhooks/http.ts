@@ -10,6 +10,10 @@ import {
 } from '#worker/account/account-suspension.ts'
 import { checkRateLimit } from '#app/rate-limit.ts'
 import { findPublicUserIdentityByUsername } from '#worker/identity/user-lookup.ts'
+import {
+	getAccountEnv,
+	getAccountWriterFactory,
+} from '#worker/identity/token-owner-db.ts'
 import { resolveSecret } from '#mcp/secrets/service.ts'
 import { jsonResponse } from '#worker/json-response.ts'
 import { listPackageWebhooks } from '#worker/package-registry/manifest.ts'
@@ -345,6 +349,18 @@ export async function handleWebhookIngressRequest(
 
 	const receivedAt = new Date().toISOString()
 	const waitUntil = waitUntilFrom(ctx)
+	// The webhook URL identifies its owner before browser authentication. Resolve
+	// only public identity metadata, then use that owner's RLS scope. The secret
+	// gate below still authorizes delivery and conceals private endpoint details.
+	if (getAccountWriterFactory(env) && env.COMMUNITY_DB) {
+		const owner = await env.COMMUNITY_DB.prepare(
+			'SELECT stable_user_id FROM users WHERE username = ?',
+		)
+			.bind(route.username)
+			.first<{ stable_user_id: string }>()
+		if (!owner) return notFoundResponse()
+		env = getAccountEnv(env, owner.stable_user_id)
+	}
 	const routeUser = await findPublicUserIdentityByUsername({
 		db: env.APP_DB,
 		username: route.username,

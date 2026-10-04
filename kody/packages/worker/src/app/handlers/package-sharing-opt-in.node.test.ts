@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
 import { packageShareGrantsFlagKey } from '#universal/feature-flags/registry.ts'
@@ -27,7 +28,7 @@ vi.mock('#worker/feature-flags/service.ts', async (importOriginal) => {
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env
 }
 

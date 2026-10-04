@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type Action } from 'remix/router'
 import { object, parseSafe, string } from 'remix/data-schema'
 import { createDb, passwordResetsTable, usersTable } from '#worker/db.ts'
@@ -107,7 +108,7 @@ export function createPasswordResetRequestHandler(env: Env) {
 			}
 
 			// Only the address is known before sign-in; continue on its owner's writer.
-			const accountDb = await resolveTokenOwnerDb<D1Database | PgDatabase>({
+			const accountDb = await resolveTokenOwnerDb<SqlDatabase | PgDatabase>({
 				db: env.APP_DB,
 				forUser: getAccountWriterFactory(env),
 				kind: 'account_email',
@@ -151,6 +152,7 @@ export function createPasswordResetRequestHandler(env: Env) {
 					try {
 						await sendCloudflareEmail(
 							{
+								ses: env.SES_MAIL,
 								accountId: env.CLOUDFLARE_ACCOUNT_ID,
 								apiBaseUrl: env.CLOUDFLARE_API_BASE_URL,
 								apiToken: env.CLOUDFLARE_API_TOKEN,
@@ -256,7 +258,7 @@ export function createPasswordResetConfirmHandler(env: Env) {
 			}
 
 			const tokenHash = await hashPasswordResetToken(token)
-			const accountDb = await resolveTokenOwnerDb<D1Database | PgDatabase>({
+			const accountDb = await resolveTokenOwnerDb<SqlDatabase | PgDatabase>({
 				db: env.APP_DB,
 				forUser: getAccountWriterFactory(env),
 				kind: 'password_reset',
@@ -370,6 +372,7 @@ export function createPasswordResetConfirmHandler(env: Env) {
 				try {
 					await sendCloudflareEmail(
 						{
+							ses: env.SES_MAIL,
 							accountId: env.CLOUDFLARE_ACCOUNT_ID,
 							apiBaseUrl: env.CLOUDFLARE_API_BASE_URL,
 							apiToken: env.CLOUDFLARE_API_TOKEN,

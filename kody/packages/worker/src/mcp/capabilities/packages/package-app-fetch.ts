@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { bytesToBase64 } from '@kody-internal/shared/base64.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { resolveHostedPackageAppUrl } from '@kody-internal/shared/public-urls.ts'
@@ -260,7 +261,7 @@ function assertRequestBodyWithinLimit(body: string | undefined) {
 }
 
 async function resolveOwnedSavedPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	ownerScope: string
 	packageId?: string

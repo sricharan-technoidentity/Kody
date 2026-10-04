@@ -1,8 +1,7 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { upsertPlatformOauthApp } from '#worker/integrations/platform-apps.ts'
 import {
 	upsertIntegration,
@@ -10,22 +9,27 @@ import {
 } from '#worker/integrations/service.ts'
 import { loadConnectOauthChooser } from './connect-oauth-chooser.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
+async function createEnv(userId = 'user-chooser') {
+	const sqlite = await createTestPg()
 
-function createEnv() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	return { APP_DB: createD1FromSqlite(sqlite) } as Env
+	return {
+		operatorDb: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+		APP_DB: createPgDatabase({
+			connection: sqlite,
+			role: 'kody_writer',
+			userId,
+		}),
+	} as Env & { operatorDb: ReturnType<typeof createPgDatabase> }
 }
 
 test('connect chooser includes saved connections and hides unused built-ins', async () => {
-	const env = createEnv()
+	const env = await createEnv()
 	const platformEnv = {
 		...env,
 		SECRET_KMS: testSecretKms,
 	} as Env
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: env.operatorDb,
 		env: platformEnv,
 		app: {
 			slug: 'google',
@@ -40,7 +44,7 @@ test('connect chooser includes saved connections and hides unused built-ins', as
 		},
 	})
 	await upsertPlatformOauthApp({
-		db: env.APP_DB,
+		db: env.operatorDb,
 		env: platformEnv,
 		app: {
 			slug: 'github',

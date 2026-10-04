@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { html } from 'remix/html-template'
 import { createHtmlResponse } from 'remix/response/html'
@@ -391,7 +391,7 @@ export async function servePackageAppRequest(input: {
 	// remaining in-process path (stateless MCP packageAppFetch → serve).
 	// One contract: local bridge, or RUNTIME_WORKER RPC — never construct here
 	// without either.
-	if (!hasLocalPackageAppRuntimeBridge()) {
+	if (!input.env.RUNNER_LOADER && !hasLocalPackageAppRuntimeBridge()) {
 		const runtime = getRuntimeWorkerService(input.env)
 		if (!runtime) {
 			return createPackageAppErrorResponse({

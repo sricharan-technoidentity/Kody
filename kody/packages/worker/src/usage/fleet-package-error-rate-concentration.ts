@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { chunkArray } from '@kody-internal/shared/chunk.ts'
 import {
 	classifyFleetPackageErrorRateConcentrationKind,
@@ -21,7 +22,7 @@ export type FleetPackageErrorRateConcentrationRow = {
 }
 
 export type FleetPackageErrorRateConcentrationQueryEnv = {
-	APP_DB?: D1Database
+	APP_DB?: SqlDatabase
 	CLOUDFLARE_ACCOUNT_ID?: string
 	CLOUDFLARE_API_TOKEN?: string
 	CLOUDFLARE_API_BASE_URL?: string
@@ -271,7 +272,7 @@ export function parseFleetPackageErrorRateConcentration(
 }
 
 async function resolveNamedOwners(input: {
-	db: D1Database | undefined
+	db: SqlDatabase | undefined
 	owners: Array<RankedOwner>
 	recentErrors: number
 }): Promise<FleetPackageErrorRateConcentration['owners']> {
@@ -359,7 +360,7 @@ function attachOwnerPackages(
 	}
 }
 
-async function loadUsernames(db: D1Database, ownerIds: Array<string>) {
+async function loadUsernames(db: SqlDatabase, ownerIds: Array<string>) {
 	const usernames = new Map<string, string>()
 	for (const chunk of chunkArray(ownerIds, maxSqlBindingsPerChunk)) {
 		if (chunk.length === 0) continue
@@ -382,7 +383,7 @@ async function loadUsernames(db: D1Database, ownerIds: Array<string>) {
 	return usernames
 }
 
-async function loadPackageKodyIds(db: D1Database, packageIds: Array<string>) {
+async function loadPackageKodyIds(db: SqlDatabase, packageIds: Array<string>) {
 	const kodyIds = new Map<string, string>()
 	for (const chunk of chunkArray(packageIds, maxSqlBindingsPerChunk)) {
 		if (chunk.length === 0) continue

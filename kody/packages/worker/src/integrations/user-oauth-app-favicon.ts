@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getDomain } from 'tldts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import {
@@ -281,7 +282,7 @@ export function shouldFetchUserOauthAppFavicon(app: UserOauthApp): boolean {
 }
 
 export async function fillUserOauthAppFavicon(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	userId: string
 	slug: string
@@ -325,7 +326,7 @@ export async function fillUserOauthAppFavicon(input: {
 }
 
 export async function scheduleUserOauthAppFaviconFill(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'APP_DB' | 'COMMUNITY_ASSETS' | 'IMAGES'> | Pick<Env, 'APP_DB'>
 	userId: string
 	slug: string
@@ -360,7 +361,7 @@ export async function scheduleUserOauthAppFaviconFill(input: {
 }
 
 export async function backfillMissingUserOauthAppFavicons(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'APP_DB' | 'COMMUNITY_ASSETS' | 'IMAGES'> | Pick<Env, 'APP_DB'>
 	userId: string
 	apps: Array<UserOauthApp>

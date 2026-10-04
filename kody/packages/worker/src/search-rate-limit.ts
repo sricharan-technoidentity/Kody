@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { checkRateLimit, releaseRateLimit } from '#app/rate-limit.ts'
 import { type PlanName } from '#universal/plans.ts'
 import { getCachedUserPlan } from '#worker/entitlements/service.ts'
@@ -63,7 +64,7 @@ export function searchDailyRateLimitKey(userId: string) {
  * user) so callers do not look it up again.
  */
 export async function consumeSearchRateLimit(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string | null
 	email: string | null | undefined
 }): Promise<PlanName> {

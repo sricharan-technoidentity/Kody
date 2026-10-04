@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { type Action } from 'remix/router'
-import { waitUntil } from 'cloudflare:workers'
+import { waitUntil } from '#worker/front-door/host-context.ts'
 import { getAppBaseUrl } from '#worker/app-base-url.ts'
 import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import {

@@ -1,10 +1,11 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { replaceRepoSessionDueOwner } from '#worker/repo/repo-session-due-owners.ts'
 import { type RepoSessionRow } from '#worker/repo/types.ts'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-catalog.ts'
 import { readRepoSessionStorageBucketCursor } from './repo-session-storage-bucket-cursor.ts'
 import {
 	clearStorageBucketRegistrationDedupeForTests,
@@ -31,7 +32,7 @@ async function createStorageBucketsDb() {
 		({ APP_DB: database.forUser(userId).db }) as unknown as Env
 	return {
 		database,
-		admin: admin as unknown as D1Database,
+		admin: admin as unknown as SqlDatabase,
 		envFor,
 		operatorEnv: {
 			APP_DB: admin,
@@ -176,9 +177,7 @@ test('index-backed storage-bucket reconcile pages owners with a persisted cursor
 			dueAt: '2099-01-01T00:00:00.000Z',
 			now,
 		})
-		await indexEnv.REPO_SESSION_INDEX.get(
-			indexEnv.REPO_SESSION_INDEX.idFromName(userId),
-		).insertSession({
+		await indexEnv.REPO_SESSION_CATALOG(userId).insertSession({
 			ownerId: userId,
 			row: catalogSessionRow({
 				id: `${userId}-active`,
@@ -186,9 +185,7 @@ test('index-backed storage-bucket reconcile pages owners with a persisted cursor
 			}),
 		})
 	}
-	await indexEnv.REPO_SESSION_INDEX.get(
-		indexEnv.REPO_SESSION_INDEX.idFromName('user-a'),
-	).insertSession({
+	await indexEnv.REPO_SESSION_CATALOG('user-a').insertSession({
 		ownerId: 'user-a',
 		row: catalogSessionRow({
 			id: 'user-a-discarded',

@@ -2,7 +2,7 @@ import {
 	resolveProvider,
 	type ResolvedProvider,
 	type ToolProvider,
-} from '@cloudflare/codemode'
+} from '../node_modules/.kody-generated/codemode-host.mjs'
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
 import {
 	createExecuteHelperPrelude,

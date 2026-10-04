@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { planLimits } from '#universal/plans.ts'
@@ -36,7 +37,7 @@ async function createMeterHarness(prefixes: Array<string>) {
 		users.push({
 			email,
 			userId,
-			db: database.forUser(userId).reader as unknown as D1Database,
+			db: database.forUser(userId).reader as unknown as SqlDatabase,
 			meter: meter.forUser(userId),
 		})
 	}
@@ -319,7 +320,7 @@ test('UserMeter storage bytes: cold bootstrap, denial, concurrent reserves, expo
 		...user,
 		userId: 'a'.repeat(64),
 		email: null as unknown as string,
-		db: database.forUser('a'.repeat(64)).reader as unknown as D1Database,
+		db: database.forUser('a'.repeat(64)).reader as unknown as SqlDatabase,
 	}
 	await expect(reserve(missing, 1)).resolves.toBeUndefined()
 	expect(await failure(reserve(missing, storageLimit + 1))).toMatchObject({

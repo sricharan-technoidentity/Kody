@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
@@ -12,7 +13,7 @@ test('findUserAccountByStableUserId resolves the caller through its own reader a
 		 VALUES ($1, 'reverse-lookup', $2, 'x', 'pro', '2026-01-01T00:00:00.000Z')`,
 		[userId, email],
 	)
-	const reader = database.forUser(userId).reader as unknown as D1Database
+	const reader = database.forUser(userId).reader as unknown as SqlDatabase
 
 	expect(await findUserAccountByStableUserId(reader, userId)).toEqual({
 		email,
@@ -22,7 +23,7 @@ test('findUserAccountByStableUserId resolves the caller through its own reader a
 	// RLS: another account's reader cannot resolve this one.
 	expect(
 		await findUserAccountByStableUserId(
-			database.forUser('someone-else').reader as unknown as D1Database,
+			database.forUser('someone-else').reader as unknown as SqlDatabase,
 			userId,
 		),
 	).toBeNull()

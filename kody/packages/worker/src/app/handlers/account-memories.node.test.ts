@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { buildMemoriesExportFilename } from '#universal/memory-export.ts'
 
@@ -99,7 +100,7 @@ const { createAccountMemoriesApiHandler, createAccountMemoriesExportHandler } =
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env
 }
 

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 
@@ -8,7 +9,7 @@ const spanCalls = vi.hoisted(() => ({
 	}>,
 }))
 
-vi.mock('cloudflare:workers', () => ({
+vi.mock('#worker/front-door/host-context.ts', () => ({
 	tracing: {
 		enterSpan(
 			name: string,
@@ -39,7 +40,7 @@ const { createTestDb } = await import('#worker/test-support/aws/test-db.ts')
 /** Rollups land on each user's own RLS writer; assertions read as superuser. */
 const usageDb = await createTestDb()
 const writerFor = (userId: string) =>
-	usageDb.forUser(userId).db as unknown as D1Database
+	usageDb.forUser(userId).db as unknown as SqlDatabase
 async function listRollups(userId: string) {
 	const { rows } = await usageDb.pg.query(
 		`SELECT user_id, metric, month, event_count::int, error_count::int,
@@ -299,7 +300,7 @@ test('recordUsage never throws when bindings are missing, sinks fail, or userId 
 	consoleWarn.mockImplementation(() => {})
 	const userId = `usage-degrade-user-${crypto.randomUUID()}`
 	await using degradeDb = await createTestDb({ userId })
-	const appDb = degradeDb.db as unknown as D1Database
+	const appDb = degradeDb.db as unknown as SqlDatabase
 
 	// No bindings at all (local dev / test without Analytics Engine).
 	await expect(

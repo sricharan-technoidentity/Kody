@@ -1,14 +1,14 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { buildInboundDelivery } from './inbound-delivery.ts'
 import { createUserInboundDeliveryAuthority } from './inbound-delivery-authority.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 import { type MailboxInboundDeliverySnapshot } from './mailbox-inbound-ledger.ts'
 
-function namespace(stub: object) {
+function namespace(mailbox: Record<string, unknown>) {
 	return {
-		idFromName: () => ({}) as DurableObjectId,
-		get: () => stub,
-	} as unknown as DurableObjectNamespace
+		forUser: () => mailbox,
+	} as unknown as import('./mailbox-service.ts').MailboxNamespace
 }
 
 async function createDelivery(userId: string, now: Date) {
@@ -78,9 +78,9 @@ test('dedupe claim precedes UserMeter and a Mailbox retry does not prepare USER 
 	}))
 	const authority = createUserInboundDeliveryAuthority({
 		env: {
-			APP_DB: { prepare } as unknown as D1Database,
+			APP_DB: { prepare } as unknown as SqlDatabase,
 			USER_METERS: { forUser: () => meter } as unknown as Env['USER_METERS'],
-			MAILBOX: namespace(mailbox),
+			MAILBOX_STORE: namespace(mailbox),
 		},
 		userId,
 	})
@@ -125,9 +125,9 @@ test('commitInboundMessageGraph forwards the active storage lease to one owner M
 	const prepare = vi.fn()
 	const authority = createUserInboundDeliveryAuthority({
 		env: {
-			APP_DB: { prepare } as unknown as D1Database,
+			APP_DB: { prepare } as unknown as SqlDatabase,
 			USER_METER: namespace({}),
-			MAILBOX: namespace({ commitInboundMessageGraph }),
+			MAILBOX_STORE: namespace({ commitInboundMessageGraph }),
 		},
 		userId,
 	})
@@ -158,9 +158,9 @@ test('commitInboundMessageGraph rejects a delivery without an active lease', asy
 	const now = new Date('2026-08-02T12:00:00.000Z')
 	const authority = createUserInboundDeliveryAuthority({
 		env: {
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			USER_METER: namespace({}),
-			MAILBOX: namespace({}),
+			MAILBOX_STORE: namespace({}),
 		},
 		userId,
 	})
@@ -179,9 +179,9 @@ test('USER authority refuses the dedicated system email owner', () => {
 	expect(() =>
 		createUserInboundDeliveryAuthority({
 			env: {
-				APP_DB: {} as D1Database,
+				APP_DB: {} as SqlDatabase,
 				USER_METER: namespace({}),
-				MAILBOX: namespace({}),
+				MAILBOX_STORE: namespace({}),
 			},
 			userId: systemEmailOwnerId,
 		}),

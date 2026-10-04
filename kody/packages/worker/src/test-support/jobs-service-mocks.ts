@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { vi } from 'vitest'
 
 export const repoMockModule = {
@@ -23,7 +24,7 @@ export const storageRunnerMockModule = {
 }
 
 export const identityMockModule = {
-	resolveBackgroundMcpUser: vi.fn(async (_db: D1Database, userId: string) => ({
+	resolveBackgroundMcpUser: vi.fn(async (_db: SqlDatabase, userId: string) => ({
 		userId,
 		email: `${userId}@example.com`,
 		username: userId,
@@ -83,7 +84,7 @@ export function backgroundMcpUserMock() {
 	return {
 		resolveBackgroundMcpUser: (...args: Array<unknown>) =>
 			identityMockModule.resolveBackgroundMcpUser(
-				...(args as [D1Database, string]),
+				...(args as [SqlDatabase, string]),
 			),
 	}
 }
@@ -160,7 +161,7 @@ export function resetJobServiceMocks() {
 	})
 	identityMockModule.resolveBackgroundMcpUser.mockReset()
 	identityMockModule.resolveBackgroundMcpUser.mockImplementation(
-		async (_db: D1Database, userId: string) => ({
+		async (_db: SqlDatabase, userId: string) => ({
 			userId,
 			email: `${userId}@example.com`,
 			username: userId,

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Per-user usage metering.
  *
@@ -31,7 +32,7 @@
  * searchable by user and feature without touching the chokepoints themselves.
  */
 
-import * as cloudflareWorkers from 'cloudflare:workers'
+import * as cloudflareWorkers from '#worker/front-door/host-context.ts'
 import {
 	isCoalescedCountUsageEventType,
 	type UsageEventType,
@@ -157,7 +158,7 @@ export function usageEventBlobs(
 
 export type UsageEnv = {
 	USAGE_EVENTS?: AnalyticsEngineDataset
-	APP_DB?: D1Database
+	APP_DB?: SqlDatabase
 }
 
 const usageRollupUpsertStatement = `

@@ -24,7 +24,9 @@ export function mcpClientHubKey(userId: string) {
 
 function getMcpClientHubStub(input: { env: Env; userId: string }) {
 	const key = mcpClientHubDurableObjectName(input.userId)
-	return input.env.MCP_CLIENT_HUB.get(input.env.MCP_CLIENT_HUB.idFromName(key))
+	const clients = input.env.MCP_CLIENTS
+	if (!clients) throw new Error('Missing MCP_CLIENTS Aurora service.')
+	return clients.forUser(key)
 }
 
 async function emitMcpServerConnectionEvents(input: {

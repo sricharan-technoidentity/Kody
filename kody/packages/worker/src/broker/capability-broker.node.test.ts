@@ -1,66 +1,64 @@
-import { createHmac } from 'node:crypto'
 import { expect, test } from 'vitest'
-import { createTargetTestEnv } from '../test-support/aws/target-test-env.ts'
+import { createTargetTestEnv } from '#worker/test-support/aws/target-test-env.ts'
+import { mintRunToken } from '#worker/runner/run-token.ts'
 import { invokeCapability } from './capability-broker.ts'
 
-test('broker verifies every run token and derives the storage bucket from provenance', async () => {
+test('broker verifies each call, derives storage from signed provenance and enforces retriever read-only SQL', async () => {
 	const { env, close } = await createTargetTestEnv({ userId: 'alice' })
 	try {
-		const payload = Buffer.from(
-			JSON.stringify({
-				userId: 'alice',
-				storageId: 'package:pkg',
-				expiresAt: Date.now() + 60_000,
-			}),
-		).toString('base64url')
-		const signature = createHmac(
-			'sha256',
-			process.env.RUN_TOKEN_SIGNING_KEY ??
-				'mock-run-token-signing-key-000000000000',
-		)
-			.update(payload)
-			.digest('base64url')
-		const token = `${payload}.${signature}`
-		const result = await invokeCapability({
-			env,
-			runToken: token,
-			capability: 'storage.sql',
-			arguments: { storageId: 'package:other', sql: 'SELECT 1' },
+		env.kv.put({ pk: 'alice:meters', sk: 'storage_bytes', remaining: 1000000 })
+		const claims = {
+			userId: 'alice',
+			runId: 'run',
+			expiresAt: Date.now() + 60000,
+			retriever: false,
+			provenance: [
+				{ moduleId: 'main', packageId: 'pkg', storageId: 'package:pkg' },
+			],
+		}
+		const token = await mintRunToken(env.RUN_TOKEN_SIGNING_KEY, claims)
+		const call = (sql: string, runToken = token) =>
+			invokeCapability({
+				env,
+				runToken,
+				capability: 'storage.sql',
+				arguments: { storageId: 'package:other', sql },
+			})
+		await call('CREATE TABLE items (value TEXT)')
+		await call("INSERT INTO items VALUES ('hello')")
+		expect(await call('SELECT value FROM items')).toEqual([['hello']])
+		const retriever = await mintRunToken(env.RUN_TOKEN_SIGNING_KEY, {
+			...claims,
+			retriever: true,
 		})
-		expect(result).toBeDefined()
-		expect(env.kv.get('alice:broker', 'last-storage-id')?.value).toBe(
-			'package:pkg',
-		)
+		expect(await call('SELECT value FROM items', retriever)).toEqual([
+			['hello'],
+		])
 		await expect(
-			invokeCapability({
-				env,
-				runToken: `${payload}.tampered`,
-				capability: 'storage.sql',
-				arguments: {},
-			}),
-		).rejects.toThrow('token')
-		const expired = Buffer.from(
-			JSON.stringify({
-				userId: 'alice',
-				storageId: 'package:pkg',
-				expiresAt: 1,
-			}),
-		).toString('base64url')
-		const expiredSignature = createHmac(
-			'sha256',
-			process.env.RUN_TOKEN_SIGNING_KEY ??
-				'mock-run-token-signing-key-000000000000',
-		)
-			.update(expired)
-			.digest('base64url')
+			call(
+				"WITH values_cte AS (SELECT 'bad') INSERT INTO items SELECT * FROM values_cte",
+				retriever,
+			),
+		).rejects.toThrow()
+		await expect(call('SELECT 1', token + 'tampered')).rejects.toThrow('token')
 		await expect(
-			invokeCapability({
-				env,
-				runToken: `${expired}.${expiredSignature}`,
-				capability: 'storage.sql',
-				arguments: {},
-			}),
+			call(
+				'SELECT 1',
+				await mintRunToken(env.RUN_TOKEN_SIGNING_KEY, {
+					...claims,
+					expiresAt: 1,
+				}),
+			),
 		).rejects.toThrow('expired')
+		await expect(
+			call(
+				'SELECT 1',
+				await mintRunToken(env.RUN_TOKEN_SIGNING_KEY, {
+					...claims,
+					userId: 'bob',
+				}),
+			),
+		).rejects.toThrow()
 	} finally {
 		await close()
 	}

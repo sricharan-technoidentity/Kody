@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { vi } from 'vitest'
 import { terminalWorkflowStatusValues } from '#worker/package-runtime/workflow-statuses.ts'
 import { creatingWorkflowProjectionStatus } from '#worker/run-records/workflow-projection.ts'
@@ -427,5 +428,5 @@ export function createWorkflowRunsDatabase(options?: {
 			}
 		},
 	}
-	return db as unknown as D1Database
+	return db as unknown as SqlDatabase
 }

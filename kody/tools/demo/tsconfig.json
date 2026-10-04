@@ -1,0 +1,16 @@
+{
+	"extends": "../../packages/worker/tsconfig-worker-typecheck.json",
+	"compilerOptions": {
+		"composite": false,
+		"types": ["node", "@pitlane/dev/assets"],
+		"lib": ["ES2023", "DOM", "DOM.Iterable", "ESNext.Disposable"],
+		"tsBuildInfoFile": "../../node_modules/.tmp/tsconfig.demo.tsbuildinfo"
+	},
+	"include": [
+		"./*.ts",
+		"../../packages/worker/env.d.ts",
+		"../../packages/worker/workerd-runtime.d.ts",
+		"../../packages/worker/src/**/*.d.ts"
+	],
+	"exclude": ["./*.node.test.ts"]
+}

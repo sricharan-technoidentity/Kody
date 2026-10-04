@@ -3,7 +3,12 @@ import {
 	type IncomingMessage,
 	type ServerResponse,
 } from 'node:http'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { createFakeTokenVault } from '#worker/test-support/aws/fake-token-vault.ts'
+import { type KodyTemporal } from '#worker/temporal/client.ts'
+import { createMcpClients } from './service.ts'
+import { createImportedMcpCredentialVault } from './storage.ts'
 import {
 	Client,
 	StreamableHTTPClientTransport,
@@ -82,6 +87,76 @@ test('modern connect then catalog hang is recoverable on the same server via leg
 	}
 	expect(rpcMethods(stalling.recorded)).toContain('initialize')
 })
+
+test('Aurora remote MCP service uses static credentials privately, starts owner workflow and restores the catalog across calls', async () => {
+	await using database = await createTestDb({ userId: 'alice' })
+	await using modern = await startRecordedServer(createModernOnlyHandler())
+	const signalWithStart = vi.fn(async () => ({}))
+	const signal = vi.fn(async () => {})
+	const temporal = {
+		client: async () => ({
+			workflow: { signalWithStart, getHandle: () => ({ signal }) },
+		}),
+	} as unknown as KodyTemporal
+	const clients = createMcpClients({
+		forUser: (userId) => database.forUser(userId).db,
+		vault: createImportedMcpCredentialVault(
+			createFakeTokenVault(['mcp-client']),
+		),
+		temporal,
+	})
+	const alice = clients.forUser('alice')
+	const result = await alice.addServer({
+		serverId: 'modern',
+		name: 'modern',
+		url: `${modern.origin}/mcp`,
+		callbackUrl: 'https://kody.example/callback',
+		headers: { Authorization: `Bearer ${bearerToken}` },
+	})
+	expect(result.state).toBe('ready')
+	expect(signalWithStart).toHaveBeenCalledWith(
+		'McpServerConnection',
+		expect.objectContaining({
+			workflowId: 'alice:mcp:modern',
+			args: [
+				{
+					userId: 'alice',
+					serverId: 'modern',
+					callbackUrl: 'https://kody.example/callback',
+				},
+			],
+		}),
+	)
+	expect(JSON.stringify(signalWithStart.mock.calls)).not.toContain(bearerToken)
+	expect(
+		(await alice.getSnapshot()).servers[0]?.tools.map((tool) => tool.name),
+	).toEqual(['list_feeds'])
+	expect(await clients.forUser('bob').getSnapshot()).toEqual({
+		servers: [],
+		connectionEvents: [],
+	})
+	await expect(
+		clients
+			.forUser('bob')
+			.callTool({ serverId: 'modern', toolName: 'list_feeds', args: {} }),
+	).rejects.toThrow('not ready')
+	expect(
+		(
+			await alice.callTool({
+				serverId: 'modern',
+				toolName: 'list_feeds',
+				args: {},
+			})
+		).content,
+	).toEqual([{ type: 'text', text: '[]' }])
+	const { results } = await database.db
+		.prepare('SELECT rows_json FROM mcp_client_hubs')
+		.all()
+	expect(JSON.stringify(results)).not.toContain(bearerToken)
+	await alice.removeServer({ serverId: 'modern' })
+	expect(signal).toHaveBeenCalledWith('remove')
+	expect((await alice.getSnapshot()).servers).toEqual([])
+}, 30_000)
 
 async function connectKodyAsClient(
 	origin: string,
@@ -332,7 +407,10 @@ async function dispatchRecordedRequest(input: {
 		httpMethod: input.req.method ?? 'GET',
 		...(rpcMethod ? { rpcMethod } : {}),
 	})
+	const abort = new AbortController()
+	input.res.on('close', () => abort.abort())
 	const request = new Request(url, {
+		signal: abort.signal,
 		method: input.req.method,
 		headers,
 		...(body.length > 0
@@ -344,7 +422,13 @@ async function dispatchRecordedRequest(input: {
 	response.headers.forEach((value, key) => {
 		input.res.setHeader(key, value)
 	})
-	input.res.end(Buffer.from(await response.arrayBuffer()))
+	if (response.body) {
+		for await (const chunk of response.body) {
+			if (input.res.destroyed) break
+			input.res.write(chunk)
+		}
+	}
+	input.res.end()
 }
 
 function rpcMethods(recorded: Array<RecordedRequest>) {

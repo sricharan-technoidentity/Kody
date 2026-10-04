@@ -1,10 +1,10 @@
-import { type JsonSchemaToolDescriptor } from '@cloudflare/codemode'
+import type { JsonSchemaToolDescriptor } from '@cloudflare/codemode'
 import { z, type ZodType } from 'zod'
-import { type PermissionString, type RoleName } from '#universal/permissions.ts'
-import { type FeatureFlagKey } from '#universal/feature-flags/registry.ts'
-import { type CapabilityDomain } from './domain-metadata.ts'
-import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
-import { type McpReportProgress } from '#mcp/progress.ts'
+import type { PermissionString, RoleName } from '#universal/permissions.ts'
+import type { FeatureFlagKey } from '#universal/feature-flags/registry.ts'
+import type { CapabilityDomain } from './domain-metadata.ts'
+import type { McpCallerContext } from '@kody-internal/shared/chat.ts'
+import type { McpReportProgress } from '#mcp/progress.ts'
 
 export const emptyCapabilityInputSchema = z.object({})
 

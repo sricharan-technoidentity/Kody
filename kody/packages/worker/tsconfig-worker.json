@@ -31,7 +31,7 @@
 	},
 	"include": [
 		"./env.d.ts",
-		"./worker-configuration.d.ts",
+		"./workerd-runtime.d.ts",
 		"./src/**/*.d.ts",
 		"../shared/src/**/*.ts",
 		"../mock-servers/**/*.ts",

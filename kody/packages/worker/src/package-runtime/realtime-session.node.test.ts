@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const mockModule = vi.hoisted(() => ({
@@ -52,7 +53,7 @@ const binding = {
 
 test('resolvePackageAppWorkerCacheKey encodes binding identity and published commit state', async () => {
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env
 
 	mockModule.getEntitySourceById.mockReset()
@@ -115,4 +116,104 @@ test('resolvePackageAppWorkerCacheKey encodes binding identity and published com
 			null,
 		]),
 	)
+})
+
+import { createDynamoRealtimeSessions } from '#worker/aws/dynamo-realtime-sessions.ts'
+import { createFakeDynamo } from '#worker/test-support/aws/fake-dynamo.ts'
+import { AccountSuspendedError } from '#worker/account/account-suspension.ts'
+import { packageRealtimeSessionRpc } from './realtime-session.ts'
+import { resolveBackgroundMcpUser } from '#worker/identity/background-mcp-user.ts'
+
+vi.mock('#worker/identity/background-mcp-user.ts', () => ({
+	resolveBackgroundMcpUser: vi.fn(async () => ({})),
+}))
+
+test('realtime state supports list filters, owner isolation, disconnect and deferred transport without claiming delivery', async () => {
+	vi.mocked(resolveBackgroundMcpUser).mockResolvedValue({} as never)
+	const dynamo = createFakeDynamo()
+	const store = createDynamoRealtimeSessions({
+		region: 'us-east-1',
+		tableName: 'sessions',
+		send: dynamo.send,
+	})
+	const env = { APP_DB: {}, REALTIME_SESSIONS: store } as unknown as Env
+	const rpc = packageRealtimeSessionRpc({ ...binding, env })
+	await expect(rpc.listSessions()).resolves.toEqual({ sessions: [] })
+	await expect(rpc.emit('missing', {})).resolves.toEqual({
+		delivered: false,
+		reason: 'session_not_connected',
+	})
+	const session = {
+		id: 'session',
+		facet: 'main',
+		topics: ['updates'],
+		connectedAt: '2026-10-02',
+		lastSeenAt: '2026-10-02',
+	}
+	await store.put(binding, session)
+	await expect(rpc.listSessions({ topic: 'updates' })).resolves.toMatchObject({
+		sessions: [{ session_id: 'session', topics: ['updates'] }],
+	})
+	await expect(rpc.listSessions({ facet: 'other' })).resolves.toEqual({
+		sessions: [],
+	})
+	await expect(
+		packageRealtimeSessionRpc({
+			...binding,
+			userId: 'other',
+			env,
+		}).listSessions(),
+	).resolves.toEqual({ sessions: [] })
+	await expect(rpc.emit('session', {})).resolves.toEqual({
+		delivered: false,
+		reason: 'realtime_transport_deferred',
+	})
+	await expect(rpc.broadcast({ data: {} })).resolves.toEqual({
+		deliveredCount: 0,
+		sessionIds: [],
+	})
+	expect((await rpc.connect(new Request('https://example.com'))).status).toBe(
+		501,
+	)
+	await rpc.disconnect('session')
+	await expect(rpc.listSessions()).resolves.toEqual({ sessions: [] })
+	await store.put(binding, session)
+	await rpc.purge()
+	await expect(rpc.listSessions()).resolves.toEqual({ sessions: [] })
+})
+
+test('suspended realtime owner cannot deliver or connect and stale sessions are removed without package hooks', async () => {
+	const store = createDynamoRealtimeSessions({
+		region: 'us-east-1',
+		tableName: 'sessions',
+		send: createFakeDynamo().send,
+	})
+	const env = { APP_DB: {}, REALTIME_SESSIONS: store } as unknown as Env
+	await store.put(binding, {
+		id: 'session',
+		facet: 'main',
+		topics: [],
+		connectedAt: '2026-10-02',
+		lastSeenAt: '2026-10-02',
+	})
+	vi.mocked(resolveBackgroundMcpUser).mockRejectedValue(
+		new AccountSuspendedError(),
+	)
+	const rpc = packageRealtimeSessionRpc({ ...binding, env })
+	await expect(rpc.emit('session', {})).resolves.toEqual({
+		delivered: false,
+		reason: 'account_suspended',
+	})
+	await expect(rpc.broadcast({ data: {} })).resolves.toEqual({
+		deliveredCount: 0,
+		sessionIds: [],
+	})
+	const response = await rpc.connect(new Request('https://example.com'))
+	expect(response.status).toBe(403)
+	await expect(response.json()).resolves.toMatchObject({
+		error: { code: 'account_suspended' },
+	})
+	expect(await store.list(binding)).toEqual([])
+	expect(mockModule.buildPackageAppWorker).not.toHaveBeenCalled()
+	vi.mocked(resolveBackgroundMcpUser).mockResolvedValue({} as never)
 })

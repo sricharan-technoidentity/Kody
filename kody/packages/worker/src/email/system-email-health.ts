@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 import { assertSystemEmailGraphAuthority } from './system-email-authority.ts'
 
@@ -18,7 +19,7 @@ export type SystemEmailHealth = {
 }
 
 export async function loadSystemEmailHealth(input: {
-	db: D1Database
+	db: SqlDatabase
 }): Promise<SystemEmailHealth> {
 	await assertSystemEmailGraphAuthority(input.db)
 	const row = await input.db

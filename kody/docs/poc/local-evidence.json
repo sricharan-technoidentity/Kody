@@ -1,0 +1,22 @@
+{
+	"checkedAt": "2026-10-04T17:14:04.933Z",
+	"noEnvStartup": true,
+	"defaultCachedCli": true,
+	"reset": true,
+	"walkthroughs": [
+		{
+			"run": "6b7a9687-946d-42e3-a970-07cd0cafbd81",
+			"memoryId": "5c60da58-dfeb-4f98-9695-134a553e543e",
+			"publishedCommit": "a0866f7686a2147803eca774f696099e7f0a178c",
+			"retryWorkflowId": "78d66dbfbec60c3f74aa150451ce5c0c7d4ad25f09f23a30f2f20dd3eb59ac21:wf:retry-6b7a9687-946d-42e3-a970-07cd0cafbd81",
+			"deferredWorkflowId": "78d66dbfbec60c3f74aa150451ce5c0c7d4ad25f09f23a30f2f20dd3eb59ac21:wf:restart-6b7a9687-946d-42e3-a970-07cd0cafbd81"
+		},
+		{
+			"run": "efdee89a-e6b1-4b32-82ed-970d43d86729",
+			"memoryId": "2592f880-28d1-4b9e-b0a7-e38678fa022b",
+			"publishedCommit": "60d7744f53ec0b354e85be295eec359f3c641b08",
+			"retryWorkflowId": "78d66dbfbec60c3f74aa150451ce5c0c7d4ad25f09f23a30f2f20dd3eb59ac21:wf:retry-efdee89a-e6b1-4b32-82ed-970d43d86729",
+			"deferredWorkflowId": "78d66dbfbec60c3f74aa150451ce5c0c7d4ad25f09f23a30f2f20dd3eb59ac21:wf:restart-efdee89a-e6b1-4b32-82ed-970d43d86729"
+		}
+	]
+}

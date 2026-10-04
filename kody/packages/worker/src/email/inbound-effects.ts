@@ -32,7 +32,7 @@ type InboundEffectsEnv = Pick<
 	| 'BUNDLE_ARTIFACTS_KV'
 	| 'APP_BASE_URL'
 	| 'USAGE_EVENTS'
-	| 'MAILBOX'
+	| 'MAILBOX_STORE'
 	| 'USER_METERS'
 >
 

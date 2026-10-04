@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { bytesToBase64 } from '@kody-internal/shared/base64.ts'
 import { isoTimestampDayKey } from '@kody-internal/shared/date-keys.ts'
 import PostalMime from 'postal-mime'
@@ -60,7 +61,7 @@ export async function loadRawMime(input: {
 
 export async function getEmailMessageWithAttachmentsById(input: {
 	env: MailboxEnv
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	messageId: string
 }) {
@@ -100,7 +101,7 @@ export async function getEmailMessageWithAttachmentsById(input: {
 }
 
 export async function storeIdempotentInboundEmail(input: {
-	db: D1Database
+	db: SqlDatabase
 	blobs: R2Bucket
 	delivery: InboundDelivery
 	parsed: ParsedInboundEmail
@@ -343,7 +344,7 @@ export async function loadEmailAttachmentContent(input: {
 
 export async function getEmailAttachmentById(input: {
 	env: MailboxEnv
-	db: D1Database
+	db: SqlDatabase
 	/** EMAIL_BLOBS bucket for messages whose raw MIME lives in R2. */
 	blobs: R2Bucket
 	userId: string
@@ -405,7 +406,7 @@ export const maxDetailedEmailRejectionEventsPerDay = 5
  */
 export async function recordBoundedEmailRejectionEvent(input: {
 	env: MailboxEnv
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	inboxId: string
 	recipient: string
@@ -455,7 +456,7 @@ export async function recordBoundedEmailRejectionEvent(input: {
  */
 export async function setEmailMessageClassification(input: {
 	env: MailboxEnv
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	messageId: string
 	classification: EmailClassification
@@ -495,7 +496,7 @@ export async function setEmailMessageClassification(input: {
  */
 export async function deleteEmailMessage(input: {
 	env: MailboxEnv
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	messageId: string
 }) {
@@ -531,7 +532,7 @@ export async function deleteEmailMessage(input: {
  * read — never a shared-graph scan.
  */
 export async function recordProviderEmailDeliveryEvent(input: {
-	env: MailboxEnv & { APP_DB: D1Database }
+	env: MailboxEnv & { APP_DB: SqlDatabase }
 	reportingEnv?: EmailReportingEnv
 	providerMessageId: string
 	providerEventId: string

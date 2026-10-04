@@ -1,5 +1,6 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
-import type * as CloudflareWorkers from 'cloudflare:workers'
+import type * as CloudflareWorkers from '#worker/front-door/host-context.ts'
 
 const mocks = vi.hoisted(() => ({
 	waitUntil: vi.fn((promise: Promise<unknown>) => {
@@ -11,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 	})),
 }))
 
-vi.mock('cloudflare:workers', async (importOriginal) => {
+vi.mock('#worker/front-door/host-context.ts', async (importOriginal) => {
 	const actual = await importOriginal<typeof CloudflareWorkers>()
 	return {
 		...actual,
@@ -57,7 +58,7 @@ function createEmptyEntitySourcesDb() {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function createArtifactsFetchMock(options: {
@@ -176,7 +177,7 @@ test('ensureEntitySource workflow: fail-closed, bootstrap, recreate missing repo
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	const newJobGetRepoCount = { value: 0 }
 	const newJobFetchMock = createArtifactsFetchMock({
@@ -247,7 +248,7 @@ test('ensureEntitySource workflow: fail-closed, bootstrap, recreate missing repo
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	const recreateGetRepoCount = { value: 0 }
 	const recreateFetchMock = createArtifactsFetchMock({
@@ -305,7 +306,7 @@ test('ensureEntitySource workflow: fail-closed, bootstrap, recreate missing repo
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	const reuseFetchMock = vi
 		.spyOn(globalThis, 'fetch')

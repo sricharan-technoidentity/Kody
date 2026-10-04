@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { secretProvidersFlagKey } from '#universal/feature-flags/registry.ts'
 import { isFeatureEnabled } from '#worker/feature-flags/service.ts'
 import { normalizeStableUserId } from '#worker/user-id.ts'
@@ -13,7 +14,7 @@ export const secretProvidersDisabledMessage =
  * unresolved users are off so placeholders cannot resolve past a kill switch.
  */
 export async function isSecretProvidersEnabled(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId?: number | null
 	stableUserId?: string | null
 }): Promise<boolean> {
@@ -38,7 +39,7 @@ export async function isSecretProvidersEnabled(input: {
 }
 
 export async function assertSecretProvidersEnabled(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId?: number | null
 	stableUserId?: string | null
 }) {
@@ -48,7 +49,7 @@ export async function assertSecretProvidersEnabled(input: {
 }
 
 async function setSecretProvidersEnabledForTests(
-	db: D1Database,
+	db: SqlDatabase,
 	enabled: boolean,
 ) {
 	await db
@@ -61,10 +62,10 @@ async function setSecretProvidersEnabledForTests(
 		.run()
 }
 
-export async function enableSecretProvidersForTests(db: D1Database) {
+export async function enableSecretProvidersForTests(db: SqlDatabase) {
 	await setSecretProvidersEnabledForTests(db, true)
 }
 
-export async function disableSecretProvidersForTests(db: D1Database) {
+export async function disableSecretProvidersForTests(db: SqlDatabase) {
 	await setSecretProvidersEnabledForTests(db, false)
 }

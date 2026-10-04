@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as sourceSafetyPolicyModule from '#worker/repo/source-safety-policy.ts'
 import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
@@ -202,7 +203,7 @@ function createDatabase(
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function buildPackageFiles(kodyId: string, username: string) {
@@ -290,7 +291,7 @@ function setupPersistenceMocks() {
 }
 
 function createHandlerContext(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	email: string
 }) {

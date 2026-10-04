@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { errorCauseChainIncludes } from '@kody-internal/shared/error-message.ts'
 
 export type PublishedBundleArtifactRecord = {
@@ -92,7 +93,7 @@ function mapStaticDependentBundleArtifactRow(
 }
 
 export async function getPublishedBundleArtifactByIdentity(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		sourceId: string
@@ -120,27 +121,43 @@ export async function getPublishedBundleArtifactByIdentity(
 	return row ? mapRow(row) : null
 }
 
+function dependencySql(db: SqlDatabase) {
+	const postgres = 'dialect' in db && db.dialect === 'postgres'
+	return {
+		rows: postgres
+			? 'jsonb_array_elements(artifact.dependencies_json::jsonb)'
+			: 'json_each(artifact.dependencies_json)',
+		commit: postgres
+			? "dependency.value ->> 'publishedCommit'"
+			: "json_extract(dependency.value, '$.publishedCommit')",
+		source: postgres
+			? "dependency.value ->> 'sourceId'"
+			: "json_extract(dependency.value, '$.sourceId')",
+	}
+}
+
 export async function countStaticDependentBundleArtifactPackages(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		sourceId: string
 		currentDependencyCommit: string
 	},
 ): Promise<StaticDependentBundleArtifactCounts> {
+	const json = dependencySql(db)
 	const row = await db
 		.prepare(
 			`WITH matching AS (
 				SELECT
 					p.id AS package_id,
 					CASE
-						WHEN json_extract(dependency.value, '$.publishedCommit') IS NULL
-							OR json_extract(dependency.value, '$.publishedCommit') != ?
+						WHEN ${json.commit} IS NULL
+							OR ${json.commit} != ?
 						THEN 1
 						ELSE 0
 					END AS stale
 				FROM published_bundle_artifacts AS artifact
-				JOIN json_each(artifact.dependencies_json) AS dependency
+				CROSS JOIN ${json.rows} AS dependency
 				JOIN entity_sources AS source
 					ON source.id = artifact.source_id
 					AND source.user_id = artifact.user_id
@@ -151,7 +168,7 @@ export async function countStaticDependentBundleArtifactPackages(
 				WHERE artifact.user_id = ?
 					AND artifact.source_id != ?
 					AND artifact.published_commit = source.published_commit
-					AND json_extract(dependency.value, '$.sourceId') = ?
+					AND ${json.source} = ?
 			)
 			SELECT
 				COUNT(DISTINCT package_id) AS total_packages,
@@ -172,7 +189,7 @@ export async function countStaticDependentBundleArtifactPackages(
 }
 
 export async function listStaticDependentBundleArtifactRows(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		sourceId: string
@@ -181,6 +198,7 @@ export async function listStaticDependentBundleArtifactRows(
 		artifactsPerPackageLimit: number
 	},
 ) {
+	const json = dependencySql(db)
 	const result = await db
 		.prepare(
 			`WITH matching AS (
@@ -193,15 +211,15 @@ export async function listStaticDependentBundleArtifactRows(
 					artifact.artifact_kind,
 					artifact.artifact_name,
 					artifact.entry_point,
-					json_extract(dependency.value, '$.publishedCommit') AS bundled_dependency_commit,
+					${json.commit} AS bundled_dependency_commit,
 					CASE
-						WHEN json_extract(dependency.value, '$.publishedCommit') IS NULL
-							OR json_extract(dependency.value, '$.publishedCommit') != ?
+						WHEN ${json.commit} IS NULL
+							OR ${json.commit} != ?
 						THEN 1
 						ELSE 0
 					END AS stale
 				FROM published_bundle_artifacts AS artifact
-				JOIN json_each(artifact.dependencies_json) AS dependency
+				CROSS JOIN ${json.rows} AS dependency
 				JOIN entity_sources AS source
 					ON source.id = artifact.source_id
 					AND source.user_id = artifact.user_id
@@ -212,7 +230,7 @@ export async function listStaticDependentBundleArtifactRows(
 				WHERE artifact.user_id = ?
 					AND artifact.source_id != ?
 					AND artifact.published_commit = source.published_commit
-					AND json_extract(dependency.value, '$.sourceId') = ?
+					AND ${json.source} = ?
 			),
 			package_rollup AS (
 				SELECT
@@ -292,7 +310,7 @@ export async function listStaticDependentBundleArtifactRows(
 }
 
 export async function listPublishedBundleArtifactsBySourceId(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	sourceId: string,
 ) {
@@ -317,7 +335,7 @@ export function isPublishedBundleArtifactIdentityConflict(error: unknown) {
 }
 
 export async function insertPublishedBundleArtifactRow(
-	db: D1Database,
+	db: SqlDatabase,
 	input: PublishedBundleArtifactUpsertInput,
 ) {
 	const now = new Date().toISOString()
@@ -347,7 +365,7 @@ export async function insertPublishedBundleArtifactRow(
 }
 
 async function getLivePublishedCommit(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; sourceId: string },
 ) {
 	try {
@@ -368,7 +386,7 @@ async function getLivePublishedCommit(
 }
 
 async function isStalePublishedBundleArtifactWrite(
-	db: D1Database,
+	db: SqlDatabase,
 	input: PublishedBundleArtifactUpsertInput,
 ) {
 	const liveCommit = await getLivePublishedCommit(db, input)
@@ -383,7 +401,7 @@ async function isStalePublishedBundleArtifactWrite(
  * longer `entity_sources.published_commit` leaves the live identity alone.
  */
 export async function upsertPublishedBundleArtifactRow(
-	db: D1Database,
+	db: SqlDatabase,
 	input: PublishedBundleArtifactUpsertInput,
 ) {
 	const identity = {
@@ -429,7 +447,7 @@ export async function upsertPublishedBundleArtifactRow(
 }
 
 export async function updatePublishedBundleArtifactRow(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { id: string } & PublishedBundleArtifactUpsertInput,
 ) {
 	const result = await db
@@ -457,7 +475,7 @@ export async function updatePublishedBundleArtifactRow(
 }
 
 export async function deletePublishedBundleArtifactRowsBySourceId(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	sourceId: string,
 ) {

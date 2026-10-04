@@ -1,7 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as AuditLog from '#worker/audit-log.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
@@ -25,26 +25,21 @@ const { adminUserMeterParityCapability } =
 
 const stableUserId = testStableUserIdFromEmail('parity-cap@example.com')
 
-function createCapabilityTestDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE users (
-			id INTEGER PRIMARY KEY,
-			stable_user_id TEXT UNIQUE NOT NULL,
-			username TEXT NOT NULL,
-			email TEXT NOT NULL,
-			deleting_at TEXT,
-			created_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00.000Z',
-			updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00.000Z'
-		);
-		INSERT INTO users (stable_user_id, username, email)
-		VALUES ('${stableUserId}', 'parity-cap', 'parity-cap@example.com');
+async function createCapabilityTestDb() {
+	const sqlite = await createTestPg()
+	await sqlite.exec(`
+
+		INSERT INTO users (stable_user_id, username, email, password_hash)
+		VALUES ('${stableUserId}', 'parity-cap', 'parity-cap@example.com', 'hash');
 	`)
-	return createD1FromSqlite(sqlite)
+	return {
+		db: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+		sqlite,
+	}
 }
 
 test('adminUserMeterParity returns null for missing users and omits lease secrets', async () => {
-	const db = createCapabilityTestDb()
+	const { db, sqlite } = await createCapabilityTestDb()
 	const meter = createInMemoryUserMeterEnv()
 	const meterStub = userMeterRpc({ env: meter.env, userId: stableUserId })
 	// Seed one active authoritative write lease.
@@ -56,6 +51,12 @@ test('adminUserMeterParity returns null for missing users and omits lease secret
 	const ctx = {
 		env: {
 			APP_DB: db,
+			APP_DB_FOR_USER: (userId: string) =>
+				createPgDatabase({
+					connection: sqlite,
+					role: 'kody_reader',
+					userId,
+				}),
 			// Jobs data lives in the jobs worker (ADR 0016); this test has none.
 			JOBS: {
 				sumJobsStorageBytesForUser: async () => 0,

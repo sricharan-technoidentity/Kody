@@ -1,3 +1,4 @@
+import { type MailboxSql } from './mailbox-sql.ts'
 import {
 	assertMailboxCanonicalIsoTimestamp,
 	assertMailboxClassification,
@@ -19,10 +20,10 @@ import {
  * No R2 / alarm side effects — callers own transactions.
  */
 
-export function touchMailboxThread(
-	sql: SqlStorage,
+export async function touchMailboxThread(
+	sql: MailboxSql,
 	input: Omit<MailboxTouchThreadInput, 'ownerId'>,
-): MailboxPartialMutationResult {
+): Promise<MailboxPartialMutationResult> {
 	const threadId = assertMailboxNonEmptyString(input.threadId, 'threadId')
 	const lastMessageAt = assertMailboxCanonicalIsoTimestamp(
 		input.lastMessageAt,
@@ -32,16 +33,16 @@ export function touchMailboxThread(
 		input.updatedAt,
 		'updatedAt',
 	)
-	const existing = sql
-		.exec<{ updated_at: string }>(
+	const existing = (
+		await sql.exec<{ updated_at: string }>(
 			`SELECT updated_at FROM email_threads WHERE id = ? LIMIT 1`,
 			threadId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	if (existing == null) return { status: 'missing' }
 	if (existing.updated_at > updatedAt) return { status: 'stale' }
 
-	sql.exec(
+	await sql.exec(
 		`UPDATE email_threads
 		SET last_message_at = CASE
 				WHEN last_message_at < ? THEN ?
@@ -59,10 +60,10 @@ export function touchMailboxThread(
 	return { status: 'accepted' }
 }
 
-export function updateMailboxMessageDelivery(
-	sql: SqlStorage,
+export async function updateMailboxMessageDelivery(
+	sql: MailboxSql,
 	input: Omit<MailboxUpdateMessageDeliveryInput, 'ownerId'>,
-): MailboxPartialMutationResult {
+): Promise<MailboxPartialMutationResult> {
 	const messageId = assertMailboxNonEmptyString(input.messageId, 'messageId')
 	const processingStatus = assertMailboxProcessingStatus(input.processingStatus)
 	const updatedAt = assertMailboxCanonicalIsoTimestamp(
@@ -73,16 +74,16 @@ export function updateMailboxMessageDelivery(
 		input.sentAt,
 		'sentAt',
 	)
-	const existing = sql
-		.exec<{ updated_at: string }>(
+	const existing = (
+		await sql.exec<{ updated_at: string }>(
 			`SELECT updated_at FROM email_messages WHERE id = ? LIMIT 1`,
 			messageId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	if (existing == null) return { status: 'missing' }
 	if (existing.updated_at > updatedAt) return { status: 'stale' }
 
-	sql.exec(
+	await sql.exec(
 		`UPDATE email_messages
 		SET processing_status = ?,
 			provider_message_id = ?,
@@ -102,26 +103,26 @@ export function updateMailboxMessageDelivery(
 	return { status: 'accepted' }
 }
 
-export function setMailboxMessageClassification(
-	sql: SqlStorage,
+export async function setMailboxMessageClassification(
+	sql: MailboxSql,
 	input: Omit<MailboxSetMessageClassificationInput, 'ownerId'>,
-): MailboxPartialMutationResult {
+): Promise<MailboxPartialMutationResult> {
 	const messageId = assertMailboxNonEmptyString(input.messageId, 'messageId')
 	const classification = assertMailboxClassification(input.classification)
 	const updatedAt = assertMailboxCanonicalIsoTimestamp(
 		input.updatedAt,
 		'updatedAt',
 	)
-	const existing = sql
-		.exec<{ updated_at: string }>(
+	const existing = (
+		await sql.exec<{ updated_at: string }>(
 			`SELECT updated_at FROM email_messages WHERE id = ? LIMIT 1`,
 			messageId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	if (existing == null) return { status: 'missing' }
 	if (existing.updated_at > updatedAt) return { status: 'stale' }
 
-	sql.exec(
+	await sql.exec(
 		`UPDATE email_messages
 		SET classification = ?,
 			classification_reason = ?,
@@ -142,38 +143,41 @@ export function setMailboxMessageClassification(
  * first so retained events cannot reference deleted metadata. Never deletes R2
  * or empty threads.
  */
-export function deleteMailboxMessageMetadata(
-	sql: SqlStorage,
+export async function deleteMailboxMessageMetadata(
+	sql: MailboxSql,
 	input: Omit<MailboxDeleteMessageMetadataInput, 'ownerId'>,
-): MailboxDeleteResult {
+): Promise<MailboxDeleteResult> {
 	const messageId = assertMailboxNonEmptyString(input.messageId, 'messageId')
 	const deletedAt = assertMailboxCanonicalIsoTimestamp(
 		input.deletedAt,
 		'deletedAt',
 	)
-	const existing = sql
-		.exec<{ updated_at: string }>(
+	const existing = (
+		await sql.exec<{ updated_at: string }>(
 			`SELECT updated_at FROM email_messages
 			WHERE id = ?
 			LIMIT 1`,
 			messageId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	if (existing == null) return { status: 'missing' }
 	if (existing.updated_at > deletedAt) return { status: 'stale' }
 
-	sql.exec(
+	await sql.exec(
 		`UPDATE email_delivery_events
 		SET message_id = NULL
 		WHERE message_id = ?`,
 		messageId,
 	)
-	sql.exec(`DELETE FROM email_attachments WHERE message_id = ?`, messageId)
-	sql.exec(
+	await sql.exec(
+		`DELETE FROM email_attachments WHERE message_id = ?`,
+		messageId,
+	)
+	await sql.exec(
 		`DELETE FROM email_message_retention_retries WHERE message_id = ?`,
 		messageId,
 	)
-	sql.exec(
+	await sql.exec(
 		`DELETE FROM email_messages
 		WHERE id = ?
 			AND updated_at <= ?`,
@@ -187,27 +191,27 @@ export function deleteMailboxMessageMetadata(
  * Delete a delivery-event row. SELECT `updated_at` first so missing and stale
  * are distinguishable.
  */
-export function deleteMailboxDeliveryEvent(
-	sql: SqlStorage,
+export async function deleteMailboxDeliveryEvent(
+	sql: MailboxSql,
 	input: Omit<MailboxDeleteDeliveryEventInput, 'ownerId'>,
-): MailboxDeleteResult {
+): Promise<MailboxDeleteResult> {
 	const eventId = assertMailboxNonEmptyString(input.eventId, 'eventId')
 	const deletedAt = assertMailboxCanonicalIsoTimestamp(
 		input.deletedAt,
 		'deletedAt',
 	)
-	const existing = sql
-		.exec<{ updated_at: string }>(
+	const existing = (
+		await sql.exec<{ updated_at: string }>(
 			`SELECT updated_at FROM email_delivery_events
 			WHERE id = ?
 			LIMIT 1`,
 			eventId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	if (existing == null) return { status: 'missing' }
 	if (existing.updated_at > deletedAt) return { status: 'stale' }
 
-	sql.exec(
+	await sql.exec(
 		`DELETE FROM email_delivery_events
 		WHERE id = ?
 			AND updated_at <= ?`,
@@ -221,27 +225,27 @@ export function deleteMailboxDeliveryEvent(
  * Delete a thread only when it has no messages. Stale-safe by
  * `thread.updated_at`. Not-empty / already-absent → `missing` (idempotent).
  */
-export function deleteMailboxThreadIfEmpty(
-	sql: SqlStorage,
+export async function deleteMailboxThreadIfEmpty(
+	sql: MailboxSql,
 	input: Omit<MailboxDeleteThreadIfEmptyInput, 'ownerId'>,
-): MailboxDeleteResult {
+): Promise<MailboxDeleteResult> {
 	const threadId = assertMailboxNonEmptyString(input.threadId, 'threadId')
 	const deletedAt = assertMailboxCanonicalIsoTimestamp(
 		input.deletedAt,
 		'deletedAt',
 	)
-	const existing = sql
-		.exec<{ updated_at: string }>(
+	const existing = (
+		await sql.exec<{ updated_at: string }>(
 			`SELECT updated_at FROM email_threads
 			WHERE id = ?
 			LIMIT 1`,
 			threadId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	if (existing == null) return { status: 'missing' }
 	if (existing.updated_at > deletedAt) return { status: 'stale' }
 
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`DELETE FROM email_threads
 		WHERE id = ?
 			AND updated_at <= ?

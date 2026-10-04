@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { toHex } from '@kody-internal/shared/hex.ts'
 
 /**
@@ -23,7 +24,7 @@ export const agentPackagePopularityMaxAgeDays = 180
 export const agentPackagePopularityTopLimit = 8
 
 export type AgentPackageConversationUseEnv = {
-	APP_DB?: D1Database
+	APP_DB?: SqlDatabase
 }
 
 export type PopularAgentPackageSummary = {
@@ -134,7 +135,7 @@ export async function recordAgentPackageConversationUses(
  * max-age bound are ignored even if they would otherwise fall in the last N.
  */
 export async function listPopularAgentPackagesForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		limit?: number

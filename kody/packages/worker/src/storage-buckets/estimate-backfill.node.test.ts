@@ -1,77 +1,127 @@
-import { expect, test, vi } from 'vitest'
-import { consoleWarn } from '#worker/test-support/console-spies.ts'
+import { createStorageTestEnv } from '#worker/test-support/storage.ts'
+import { expect, test } from 'vitest'
+import {
+	emptyStorageRunnerEstimatedBytes,
+	storageRunnerRpc,
+} from '#worker/storage-runner.ts'
+import { repoSessionRpc } from '#worker/repo/repo-session-rpc.ts'
+import { backfillStorageBucketEstimates } from './estimate-backfill.ts'
+import {
+	clearStorageBucketRegistrationDedupeForTests,
+	listUserStorageBucketEstimates,
+	registerStorageBucket,
+} from './service.ts'
 
-const mockModule = vi.hoisted(() => ({
-	readInventoriedStorageBucketEstimatedBytes: vi.fn(),
-	listStorageBucketsMissingEstimates: vi.fn(),
-	registerMissingRepoSessionStorageBuckets: vi.fn(async () => 0),
-	updateStorageBucketEstimate: vi.fn(async () => true),
-}))
+const testTimeout = 30_000
 
-vi.mock('#worker/storage-runner.ts', () => ({
-	readInventoriedStorageBucketEstimatedBytes: (...args: Array<unknown>) =>
-		mockModule.readInventoriedStorageBucketEstimatedBytes(...args),
-}))
-
-vi.mock('./service.ts', () => ({
-	listStorageBucketsMissingEstimates: (...args: Array<unknown>) =>
-		mockModule.listStorageBucketsMissingEstimates(...args),
-	registerMissingRepoSessionStorageBuckets: (...args: Array<unknown>) =>
-		mockModule.registerMissingRepoSessionStorageBuckets(...args),
-	updateStorageBucketEstimate: (...args: Array<unknown>) =>
-		mockModule.updateStorageBucketEstimate(...args),
-}))
-
-const { backfillStorageBucketEstimates } =
-	await import('./estimate-backfill.ts')
-
-test('backfill tolerates per-bucket probe failures and keeps sweeping peers', async () => {
-	consoleWarn.mockImplementation(() => {})
-	mockModule.listStorageBucketsMissingEstimates.mockResolvedValue([
-		{ userId: 'user-1', storageId: 'package:healthy-a', kind: 'package' },
-		{
-			userId: 'user-1',
-			storageId: 'repo-session:unreachable',
+test(
+	'backfill seeds stored estimates for unmeasured buckets in bounded batches',
+	{ timeout: testTimeout },
+	async () => {
+		await using fixture = await createStorageTestEnv()
+		const env = fixture.env
+		clearStorageBucketRegistrationDedupeForTests()
+		const userId = `usb-backfill-${crypto.randomUUID()}`
+		fixture.scope(userId)
+		const bucketA = `exec:${crypto.randomUUID()}`
+		const bucketB = `package:${crypto.randomUUID()}`
+		const sessionId = crypto.randomUUID()
+		const sessionBucket = `repo-session:${sessionId}`
+		// The probe keeps the bucket unregistered until its first write.
+		await storageRunnerRpc({
+			env,
+			userId,
+			storageId: bucketA,
+		}).getEstimatedBytes()
+		await fixture.seedRepoSession(sessionId)
+		const sessionEstimate = (
+			await repoSessionRpc(env, sessionId).getEstimatedBytes()
+		).estimatedBytes
+		const pending: Array<Promise<unknown>> = []
+		const waitUntil = (promise: Promise<unknown>) => {
+			pending.push(promise)
+		}
+		registerStorageBucket({
+			env,
+			userId,
+			storageId: bucketA,
+			kind: 'execute',
+			waitUntil,
+		})
+		registerStorageBucket({
+			env,
+			userId,
+			storageId: sessionBucket,
 			kind: 'repo_session',
-		},
-		{ userId: 'user-2', storageId: 'exec:healthy-b', kind: 'execute' },
-	])
-	mockModule.readInventoriedStorageBucketEstimatedBytes.mockImplementation(
-		async (input: { storageId: string }) => {
-			if (input.storageId === 'repo-session:unreachable') {
-				throw new Error('estimate read failed after every attempt')
-			}
-			return 2048
-		},
-	)
+			waitUntil,
+		})
+		registerStorageBucket({
+			env,
+			userId,
+			storageId: bucketB,
+			kind: 'package',
+			waitUntil,
+		})
+		await Promise.all(pending)
 
-	const env = { APP_DB: {} } as Env
-	await expect(backfillStorageBucketEstimates({ env })).resolves.toEqual({
-		scanned: 3,
-		updated: 2,
-		failed: 1,
-	})
+		// Registration alone leaves estimates NULL (unmeasured).
+		await expect(
+			listUserStorageBucketEstimates({ env, userId }),
+		).resolves.toEqual(
+			[bucketA, bucketB, sessionBucket]
+				.sort()
+				.map((storageId) => ({
+					storageId,
+					kind: storageId === sessionBucket ? 'repo_session' : undefined,
+					estimatedBytes: null,
+				}))
+				.map((row) => ({
+					...row,
+					kind:
+						row.kind ??
+						(row.storageId.startsWith('exec:') ? 'execute' : 'package'),
+				})),
+		)
 
-	// The failing bucket is logged and left NULL for a later sweep; the two
-	// healthy buckets are persisted.
-	expect(consoleWarn).toHaveBeenCalledWith(
-		'storage-bucket-estimate-backfill-row-failed',
-		'repo-session:unreachable',
-		expect.any(Error),
-	)
-	expect(mockModule.updateStorageBucketEstimate).toHaveBeenCalledTimes(2)
-	expect(mockModule.updateStorageBucketEstimate).toHaveBeenCalledWith(
-		expect.objectContaining({
-			userId: 'user-1',
-			storageId: 'package:healthy-a',
-			estimatedBytes: 2048,
-		}),
-	)
-	expect(mockModule.updateStorageBucketEstimate).toHaveBeenCalledWith(
-		expect.objectContaining({
-			userId: 'user-2',
-			storageId: 'exec:healthy-b',
-			estimatedBytes: 2048,
-		}),
-	)
-})
+		// The bound is respected: batchSize 1 measures exactly one bucket.
+		await expect(
+			backfillStorageBucketEstimates({ env: fixture.operator(), batchSize: 1 }),
+		).resolves.toEqual({ scanned: 1, updated: 1, failed: 0 })
+
+		// The next sweep finishes the rest; both buckets end up measured at
+		// the empty SQLite baseline.
+		await expect(
+			backfillStorageBucketEstimates({ env: fixture.operator() }),
+		).resolves.toEqual({
+			scanned: 2,
+			updated: 2,
+			failed: 0,
+		})
+		await expect(
+			listUserStorageBucketEstimates({ env, userId }),
+		).resolves.toEqual(
+			[bucketA, bucketB, sessionBucket].sort().map((storageId) => ({
+				storageId,
+				kind:
+					storageId === sessionBucket
+						? 'repo_session'
+						: storageId.startsWith('exec:')
+							? 'execute'
+							: 'package',
+				estimatedBytes:
+					storageId === sessionBucket
+						? sessionEstimate
+						: emptyStorageRunnerEstimatedBytes,
+			})),
+		)
+
+		// Converged inventories make the lane a cheap no-op.
+		await expect(
+			backfillStorageBucketEstimates({ env: fixture.operator() }),
+		).resolves.toEqual({
+			scanned: 0,
+			updated: 0,
+			failed: 0,
+		})
+	},
+)

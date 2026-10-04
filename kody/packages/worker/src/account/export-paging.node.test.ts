@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	createAccountExport,
@@ -63,7 +64,7 @@ test('R2 export pages owned payloads in bounded chunks and reports missing objec
 		COOKIE_SECRET: 'test-cookie-secret',
 		EMAIL_BLOBS: { get: getEmailBlob },
 		COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
-		MAILBOX: createMailboxBinding({
+		MAILBOX_STORE: createMailboxBinding({
 			blobReferences: () => [
 				{
 					kind: 'raw_mime',
@@ -191,7 +192,7 @@ test('R2 export performs bounded keyset work independent of mailbox size', async
 			COOKIE_SECRET: 'test-cookie-secret',
 			EMAIL_BLOBS: { get: vi.fn(async () => null) },
 			COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
-			MAILBOX: createMailboxBinding({
+			MAILBOX_STORE: createMailboxBinding({
 				blobReferences: () =>
 					Array.from({ length: 502 }, (_, index) => {
 						const messageId = `mail-${String(index).padStart(4, '0')}`
@@ -335,7 +336,7 @@ test('R2 export cursor keeps stable row identity when inventory mutates', async 
 		COOKIE_SECRET: 'test-cookie-secret',
 		EMAIL_BLOBS: { get },
 		COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
-		MAILBOX: createMailboxBinding({
+		MAILBOX_STORE: createMailboxBinding({
 			blobReferences: () => blobReferences,
 		}),
 	} as unknown as Env
@@ -401,7 +402,7 @@ test('durable object discovery pages high-cardinality storage ids without nested
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	const seen = new Set<string>()
 	let startAfter: string | undefined
 	for (;;) {
@@ -540,16 +541,16 @@ test('account export includes run_records section with runs, ledger, and dedicat
 	})
 	const env = {
 		APP_DB: db,
-		STORAGE_RUNNER: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({
-				exportStorage: async () => ({
-					entries: [],
-					truncated: false,
-					nextStartAfter: null,
-					pageSize: 100,
-				}),
-			}),
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				(() => ({
+					exportStorage: async () => ({
+						entries: [],
+						truncated: false,
+						nextStartAfter: null,
+						pageSize: 100,
+					}),
+				}))(JSON.stringify([bucket.userId, bucket.storageId])),
 		},
 		RUN_RECORDS: runRecords.records,
 		RUN_STATE: {
@@ -872,9 +873,11 @@ test('account export includes mailbox rows, pages them, and warns on truncation'
 	const idFromName = vi.fn((name: string) => name as unknown as DurableObjectId)
 	const env = {
 		APP_DB: db,
-		MAILBOX: {
-			idFromName,
-			get: () => ({ exportMailbox, countMailbox }),
+		MAILBOX_STORE: {
+			forUser: (userId: string) => {
+				idFromName(userId)
+				return { exportMailbox, countMailbox }
+			},
 		},
 	} as unknown as Env
 
@@ -1115,9 +1118,11 @@ test('storage_runner section exports a RunLog-only storage id', async () => {
 	}))
 	const env = {
 		APP_DB: db,
-		STORAGE_RUNNER: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({ exportStorage }),
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				(() => ({ exportStorage }))(
+					JSON.stringify([bucket.userId, bucket.storageId]),
+				),
 		},
 		RUN_RECORDS: await runRecordsWithStorageIds('user-aaa', [
 			'exec:runlog-export-only',
@@ -1177,9 +1182,11 @@ test('storage_runner section reads do not load manifests for D1-known rows', asy
 		}))
 		const env = {
 			APP_DB: db,
-			STORAGE_RUNNER: {
-				idFromName: (name: string) => name as unknown as DurableObjectId,
-				get: () => ({ exportStorage }),
+			STORAGE_CELLS: {
+				forBucket: (bucket: { userId: string; storageId: string }) =>
+					(() => ({ exportStorage }))(
+						JSON.stringify([bucket.userId, bucket.storageId]),
+					),
 			},
 		} as unknown as Env
 

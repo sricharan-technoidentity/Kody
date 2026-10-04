@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcDayKey, utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
 import {
@@ -380,6 +381,7 @@ async function sendThresholdEmailIfNeeded(input: {
 	try {
 		sendResult = await sendCloudflareEmail(
 			{
+				ses: input.env.SES_MAIL,
 				accountId: input.env.CLOUDFLARE_ACCOUNT_ID,
 				apiBaseUrl: input.env.CLOUDFLARE_API_BASE_URL,
 				apiToken: input.env.CLOUDFLARE_API_TOKEN,
@@ -663,7 +665,7 @@ function recentUtcDayKeys(now: Date) {
 }
 
 async function readComputeOverageWarnings(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	entitlement: UserEntitlement
 	now: Date
@@ -713,7 +715,7 @@ async function readComputeOverageWarnings(input: {
 }
 
 export async function listUsersForEntitlementWarningSweep(
-	db: D1Database,
+	db: SqlDatabase,
 	now: Date,
 ) {
 	const currentMonth = utcMonthKey(now)

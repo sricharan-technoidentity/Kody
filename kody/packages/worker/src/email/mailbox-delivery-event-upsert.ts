@@ -1,3 +1,4 @@
+import { type MailboxSql } from './mailbox-sql.ts'
 import { writeMailboxDeliveryEventRow } from './mailbox-delivery-events.ts'
 import { shouldSkipMailboxDeliveryEventWrite } from './mailbox-inbound-bootstrap.ts'
 import {
@@ -8,11 +9,11 @@ import {
 } from './mailbox-types.ts'
 
 /** Normal bounded delivery-event upsert inside the caller's transaction. */
-export function upsertMailboxDeliveryEvents(
-	sql: SqlStorage,
+export async function upsertMailboxDeliveryEvents(
+	sql: MailboxSql,
 	events: Array<MailboxDeliveryEventInput>,
 	options: { restore?: true } = {},
-): MailboxUpsertDeliveryEventsResult {
+): Promise<MailboxUpsertDeliveryEventsResult> {
 	if (!Array.isArray(events) || events.length === 0) {
 		throw new Error('Mailbox upsertDeliveryEvents events must be non-empty.')
 	}
@@ -26,12 +27,15 @@ export function upsertMailboxDeliveryEvents(
 		const eventId = assertMailboxNonEmptyString(event.id, 'event.id')
 		if (
 			!options.restore &&
-			shouldSkipMailboxDeliveryEventWrite(sql, { event })
+			(await shouldSkipMailboxDeliveryEventWrite(sql, { event }))
 		) {
 			results.push({ eventId, inserted: false, accepted: false })
 			continue
 		}
-		results.push({ eventId, ...writeMailboxDeliveryEventRow(sql, event) })
+		results.push({
+			eventId,
+			...(await writeMailboxDeliveryEventRow(sql, event)),
+		})
 	}
 	return { results }
 }

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import {
@@ -152,7 +153,7 @@ async function createHarness() {
 	return Object.assign(db, seeded)
 }
 
-function countingDb(db: D1Database | ReturnType<ShareDb['as']>) {
+function countingDb(db: SqlDatabase | ReturnType<ShareDb['as']>) {
 	const statements: Array<string> = []
 	const reads = { inFlight: 0, maxInFlight: 0 }
 	const counted = new Proxy(db, {

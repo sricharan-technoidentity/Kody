@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { ensureEntitlementTestSchema } from '#worker/entitlements/test-schema.ts'
 import { ensureUsageRollupsTestSchema } from '#worker/usage/test-schema.ts'
 
@@ -6,7 +7,7 @@ import { ensureUsageRollupsTestSchema } from '#worker/usage/test-schema.ts'
  * come with the shared `users` schema) plus `usage_rollups` for
  * `*.workers.test.ts` suites, which run against an empty local D1.
  */
-export async function ensureCreditWalletTestSchema(db: D1Database) {
+export async function ensureCreditWalletTestSchema(db: SqlDatabase) {
 	await ensureEntitlementTestSchema(db)
 	await ensureUsageRollupsTestSchema(db)
 	const statements = [

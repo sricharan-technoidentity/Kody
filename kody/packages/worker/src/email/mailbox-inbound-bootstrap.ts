@@ -1,3 +1,4 @@
+import { type MailboxSqlValue, type MailboxSql } from './mailbox-sql.ts'
 import {
 	mailboxInboundDedupeProvider,
 	mailboxInboundProvider,
@@ -104,24 +105,24 @@ export function isPreClaimAuditSnapshot(
 	return event.id === `email-rejections:${event.inboxId}:${detail.day}`
 }
 
-function readMailboxDeliveryEvent(
-	sql: SqlStorage,
+async function readMailboxDeliveryEvent(
+	sql: MailboxSql,
 	eventId: string,
-): MailboxDeliveryEventRecord | null {
-	const row = sql
-		.exec<Record<string, SqlStorageValue>>(
+): Promise<MailboxDeliveryEventRecord | null> {
+	const row = (
+		await sql.exec<Record<string, MailboxSqlValue>>(
 			`SELECT * FROM email_delivery_events WHERE id = ? LIMIT 1`,
 			eventId,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	return row ? mapMailboxDeliveryEventRow(row) : null
 }
 
 /**
  * Keep bounded pre-claim audits from replacing authoritative Mailbox rows.
  */
-export function shouldSkipMailboxDeliveryEventWrite(
-	sql: SqlStorage,
+export async function shouldSkipMailboxDeliveryEventWrite(
+	sql: MailboxSql,
 	input: {
 		event: MailboxDeliveryEventInput
 	},
@@ -135,6 +136,6 @@ export function shouldSkipMailboxDeliveryEventWrite(
 		return true
 	}
 	if (!preClaimAudit) return false
-	const existing = readMailboxDeliveryEvent(sql, input.event.id)
+	const existing = await readMailboxDeliveryEvent(sql, input.event.id)
 	return existing != null && !isPreClaimAuditSnapshot(existing)
 }

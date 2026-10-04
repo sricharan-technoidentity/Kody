@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 import { resolveUserEntitlementFromRow } from '#worker/entitlements/service.ts'
 import { jobsData } from '#worker/jobs/jobs-data.ts'
@@ -134,7 +135,7 @@ async function readJobActivity(env: Env, userId: string) {
 }
 
 async function readMonthlyExecuteCount(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	now: Date,
 ) {
@@ -160,7 +161,7 @@ async function readMonthlyExecuteCount(
 }
 
 async function readNearStockCap(input: {
-	db: D1Database
+	db: SqlDatabase
 	user: UsageCampaignCandidate
 	now: Date
 }) {

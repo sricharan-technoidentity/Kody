@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { parseJsonWithFallback } from '../json-parsing.ts'
 import { createJobStorageId } from './storage-id.ts'
 import { type JobRecord, type PersistedJobCallerContext } from './types.ts'
@@ -175,7 +176,7 @@ function mapRow(row: Record<string, unknown>): JobRow {
 }
 
 export async function insertJobRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	job: JobRecord
 	callerContextJson: string
@@ -215,7 +216,7 @@ export async function insertJobRow(input: {
 }
 
 export async function updateJobRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	job: JobRecord
 	callerContextJson: string
@@ -259,7 +260,7 @@ export async function updateJobRow(input: {
 }
 
 export async function getJobRowById(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	jobId: string,
 ): Promise<JobRow | null> {
@@ -271,7 +272,7 @@ export async function getJobRowById(
 }
 
 export async function listJobRowsByUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<Array<JobRow>> {
 	const { results } = await db
@@ -295,7 +296,7 @@ export const maxDueJobsPerAlarm = 25
 // single query never loads the whole table. Pass the last row id of the
 // previous page (or null for the first page).
 export async function listJobRowsPage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		afterId: string | null
 		limit: number
@@ -309,7 +310,7 @@ export async function listJobRowsPage(
 }
 
 export async function listDueJobRows(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	nowIso: string,
 ): Promise<Array<JobRow>> {
@@ -345,7 +346,7 @@ export async function listDueJobRows(
  * lost or drifted while due work remained claimable.
  */
 export async function listSilentlyOverdueJobRowsPage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		overdueBeforeIso: string
 		nowIso: string
@@ -390,7 +391,7 @@ export async function listSilentlyOverdueJobRowsPage(
  * due selection and claims never pick them up again until next_run_at moves.
  */
 export async function listStuckSkippedJobRowsPage(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		nowIso: string
 		afterId: string | null
@@ -416,7 +417,7 @@ export async function listStuckSkippedJobRowsPage(
 }
 
 export async function advanceStuckSkippedJobNextRunAt(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	jobId: string
 	nextRunAt: string
@@ -449,7 +450,7 @@ export async function advanceStuckSkippedJobNextRunAt(input: {
 }
 
 export async function getNextRunnableJobRow(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	nowIso = new Date().toISOString(),
 ): Promise<JobRow | null> {
@@ -491,7 +492,7 @@ export async function getNextRunnableJobRow(
 export const jobExecutionLeaseMs = 10 * 60 * 1_000
 
 export async function claimJobRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	jobId: string
 	now: Date
@@ -540,7 +541,7 @@ export async function claimJobRow(input: {
 }
 
 export async function finalizeClaimedJobRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	job: JobRecord
 	claimToken: string
@@ -573,7 +574,7 @@ export async function finalizeClaimedJobRow(input: {
 }
 
 export async function retryClaimedJobRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	jobId: string
 	claimToken: string
@@ -608,7 +609,7 @@ export async function retryClaimedJobRow(input: {
  * scheduler claim or recomputing the next occurrence.
  */
 export async function refreshPackageJobRowIdentity(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	jobId: string
 	sourceId: string
@@ -635,7 +636,7 @@ export async function refreshPackageJobRowIdentity(input: {
 }
 
 export async function deleteJobRow(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	jobId: string,
 ): Promise<boolean> {
@@ -652,7 +653,7 @@ export async function deleteJobRow(
  * `preserved`. Returns the number of rows flipped to enabled = 0.
  */
 export async function disableExpiredJobRowsForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	nowIso: string
 }): Promise<number> {
@@ -689,7 +690,7 @@ export const maxJobRetentionCandidatesPerRun = 100
  * deletes shrink that set across hourly ticks.
  */
 export async function listJobRetentionCandidateRows(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		afterId: string | null
 		limit: number
@@ -722,7 +723,7 @@ export async function listJobRetentionCandidateRows(
 }
 
 export async function countJobRowsForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<number> {
 	const row = await db
@@ -739,7 +740,7 @@ export type JobCountBySourceId = {
 
 /** Per-`source_id` job counts for one user. Does not load job rows. */
 export async function countJobRowsBySourceId(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<Array<JobCountBySourceId>> {
 	const { results } = await db
@@ -763,7 +764,7 @@ export async function countJobRowsBySourceId(
  * jobs database counts toward the D1 storage quota.
  */
 export async function sumJobRowsStorageBytesForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<number> {
 	const columns = [
@@ -792,7 +793,7 @@ export async function sumJobRowsStorageBytesForUser(
 }
 
 export async function listJobIdRowsForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<Array<string>> {
 	const { results } = await db
@@ -803,7 +804,7 @@ export async function listJobIdRowsForUser(
 }
 
 export async function listJobStorageIdRowsForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<Array<string>> {
 	const { results } = await db
@@ -821,7 +822,7 @@ export async function listJobStorageIdRowsForUser(
  * Operator-level DR inventory only — not for user-facing paths.
  */
 export async function listAllJobStorageOwnerRows(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<Array<{ userId: string; storageId: string }>> {
 	const { results } = await db
 		.prepare(
@@ -833,7 +834,7 @@ export async function listAllJobStorageOwnerRows(
 }
 
 export async function getJobRowInsights(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<{ total: number; enabled: number }> {
 	const row = await db
 		.prepare(`SELECT COUNT(*) AS total, SUM(enabled) AS enabled FROM jobs`)

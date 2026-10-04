@@ -28,3 +28,15 @@ declare module '*/node_modules/.kody-generated/package-app-remix.mjs' {
 	export const remixVersion: string
 	export const files: Record<string, string>
 }
+
+declare module '*/node_modules/.kody-generated/codemode-host.mjs' {
+	export {
+		normalizeCode,
+		sanitizeToolName,
+		resolveProvider,
+		ToolDispatcher,
+		type ExecuteResult,
+		type ResolvedProvider,
+		type ToolProvider,
+	} from '@cloudflare/codemode'
+}

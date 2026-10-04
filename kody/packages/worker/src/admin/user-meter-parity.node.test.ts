@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
@@ -39,7 +40,7 @@ async function createParityTestDb(input: { deletingAt?: string | null } = {}) {
 		...database,
 		// The operator capability reads one account through that account's scoped reader.
 		readerFor: (userId: string) =>
-			database.forUser(userId).reader as unknown as D1Database,
+			database.forUser(userId).reader as unknown as SqlDatabase,
 	}
 }
 

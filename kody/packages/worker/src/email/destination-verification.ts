@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { isNonProductionRuntime } from '#app/deployment-env.ts'
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
 import { buildEmailDestinationVerificationEmail } from '#app/email/messages.ts'
@@ -30,7 +31,7 @@ function destinationVerificationRateLimitKey(userId: number) {
 }
 
 async function consumeDestinationVerificationRateLimit(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ) {
 	const rateLimit = await checkRateLimit(
@@ -47,7 +48,7 @@ async function consumeDestinationVerificationRateLimit(
 }
 
 async function refundDestinationVerificationRateLimit(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ) {
 	await releaseRateLimit(db, destinationVerificationRateLimitKey(userId)).catch(
@@ -103,7 +104,7 @@ export function buildEmailDestinationVerificationUrl(input: {
 }
 
 async function insertDestinationVerificationToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 	destinationId: string
 	now?: Date
@@ -124,7 +125,7 @@ async function insertDestinationVerificationToken(input: {
 }
 
 async function discardDestinationVerificationToken(
-	db: D1Database,
+	db: SqlDatabase,
 	tokenHash: string,
 ) {
 	await db
@@ -337,7 +338,7 @@ export async function resendEmailDestinationVerification(input: {
 }
 
 async function retireSiblingDestinationVerificationTokens(
-	db: D1Database,
+	db: SqlDatabase,
 	destinationId: string,
 	tokenHash: string,
 ) {
@@ -354,7 +355,7 @@ async function retireSiblingDestinationVerificationTokens(
 }
 
 export async function verifyEmailDestinationToken(input: {
-	db: D1Database
+	db: SqlDatabase
 	token: unknown
 	now?: Date
 	/** When false, a valid unused token is not consumed. HEAD probes use this. */

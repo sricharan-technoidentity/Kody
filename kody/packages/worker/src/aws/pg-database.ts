@@ -104,7 +104,12 @@ function parseInt8(value: string) {
 }
 
 function facade(
-	input: { runTransaction: TransactionRunner; role: PgRole; userId?: string },
+	input: {
+		runTransaction: TransactionRunner
+		role: PgRole
+		userId?: string
+		readOnly?: boolean
+	},
 	pinned?: Queryable,
 ): PgDatabase {
 	const owner = {}
@@ -112,7 +117,7 @@ function facade(
 		if (pinned) return run(pinned)
 		return input.runTransaction(async (tx) => {
 			await tx.query(`SET LOCAL ROLE ${input.role}`)
-			if (readOnlyRoles.has(input.role))
+			if (input.readOnly || readOnlyRoles.has(input.role))
 				await tx.query('SET TRANSACTION READ ONLY')
 			await tx.query("SELECT set_config('app.user_id', $1, true)", [
 				input.userId ?? '',
@@ -196,19 +201,7 @@ type PgStatement = Prepared & {
 	run<T = Record<string, unknown>>(): Promise<PgResult<T>>
 }
 // Public query shape shared by migrated services and legacy bindings during P3.
-type SqlStatement = {
-	bind(...values: unknown[]): SqlStatement
-	all<T = Record<string, unknown>>(): Promise<PgResult<T>>
-	first<T = Record<string, unknown>>(column?: string): Promise<T | null>
-	run<T = Record<string, unknown>>(): Promise<PgResult<T>>
-}
-export type SqlDatabase = {
-	transaction?<T>(run: (db: SqlDatabase) => Promise<T>): Promise<T>
-	prepare(sql: string): SqlStatement
-	batch<T = Record<string, unknown>>(
-		statements: SqlStatement[],
-	): Promise<PgResult<T>[]>
-}
+export { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 export type PgDatabase = {
 	dialect: 'postgres'
 	prepare(sql: string): PgStatement
@@ -221,6 +214,7 @@ export type PgDatabase = {
 export function createPgDatabase(input: {
 	connection: Pick<PGlite, 'transaction'>
 	role: PgRole
+	readOnly?: boolean
 	userId?: string
 }): PgDatabase {
 	return facade({
@@ -239,6 +233,7 @@ export function createPgDatabase(input: {
 export function createPgPoolDatabase(input: {
 	pool: Pool
 	role: PgRole
+	readOnly?: boolean
 	userId?: string
 }): PgDatabase {
 	return facade({
@@ -288,6 +283,11 @@ export function createPgPools(input: { writerUrl: string; readerUrl: string }) {
 				APP_DB: createPgPoolDatabase({
 					pool: writer,
 					role: 'kody_writer',
+					userId,
+				}),
+				APP_DB_WRITER_READER: createPgPoolDatabase({
+					pool: writer,
+					role: 'kody_reader',
 					userId,
 				}),
 				APP_DB_READER: createPgPoolDatabase({

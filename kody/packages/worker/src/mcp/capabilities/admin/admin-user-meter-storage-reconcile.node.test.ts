@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as AuditLog from '#worker/audit-log.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
@@ -54,7 +55,7 @@ test('adminUserMeterStorageReconcile routes batch size, audits, and rejects OOB'
 		failed: 0,
 		deferred: 1,
 	})
-	const env = { APP_DB: {} as D1Database, USER_METER: {} } as Env
+	const env = { APP_DB: {} as SqlDatabase, USER_METER: {} } as Env
 	const ctx = createAdminContext(env)
 
 	const custom = await adminUserMeterStorageReconcileCapability.handler(

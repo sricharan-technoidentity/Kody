@@ -26,6 +26,16 @@ import {
 } from './sentry-options.ts'
 
 test('filterSentryEvent drops expected platform and caller noise and keeps real errors', () => {
+	expect(
+		filterSentryEvent({
+			message: 'could not serialize access due to concurrent update',
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			message: 'duplicate key value violates unique constraint',
+		}),
+	).not.toBeNull()
 	// Isolate resource-limit resets are the only DO resets that isolated
 	// artifact rebuild / check phases treat as retryable.
 	expect(

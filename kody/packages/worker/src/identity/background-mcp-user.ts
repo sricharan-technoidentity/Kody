@@ -22,6 +22,10 @@ function isMissingRbacTableError(error: unknown) {
 	if (!(error instanceof Error)) return false
 	const message = error.message.toLowerCase()
 	return (
+		(/relation "(?:user_roles|roles|role_permissions|permissions)" does not exist/i.test(
+			message,
+		) &&
+			(error as { code?: string }).code === '42P01') ||
 		message.includes('no such table: user_roles') ||
 		message.includes('no such table: roles') ||
 		message.includes('no such table: role_permissions') ||

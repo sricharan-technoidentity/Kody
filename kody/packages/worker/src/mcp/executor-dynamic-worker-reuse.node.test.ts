@@ -37,7 +37,7 @@ function createFakeWorkerLoader() {
 
 function createExecutorTestEnv(loader: Env['LOADER']) {
 	return {
-		LOADER: loader,
+		RUNNER_LOADER: { forContext: () => loader },
 		APP_COMMIT_SHA: 'commit-for-test',
 	} as Env
 }
@@ -172,47 +172,4 @@ test('createExecuteExecutor records privacy-safe Dynamic Worker reuse on every L
 	expect(serialized).not.toContain(source)
 	expect(serialized).not.toContain('token')
 	expect(serialized).not.toContain('not-an-object')
-})
-
-test('createExecuteExecutor attaches the CPU usage tail under its own loader cache id', async () => {
-	const withoutTail = createFakeWorkerLoader()
-	await createExecuteExecutor({
-		env: createExecutorTestEnv(withoutTail.loader),
-		exports: createExecutorTestExports(),
-		gatewayProps: createGatewayProps('user-1'),
-	}).execute('async () => "ok"', [{ name: 'kody', fns: {} }])
-	expect(
-		withoutTail.createdOptions.get(withoutTail.ids[0]!)?.tails,
-	).toBeUndefined()
-
-	// Without Analytics Engine (local dev, tests) no tail is attached.
-	const unbound = createFakeWorkerLoader()
-	await createExecuteExecutor({
-		env: createExecutorTestEnv(unbound.loader),
-		exports: {
-			KodyFetchGateway: ({ props }: { props: unknown }) => ({ props }),
-			DynamicWorkerUsageTail: ({ props }: { props: unknown }) => ({ props }),
-		} as never,
-		gatewayProps: createGatewayProps('user-1'),
-	}).execute('async () => "ok"', [{ name: 'kody', fns: {} }])
-	expect(unbound.ids[0]).toBe(withoutTail.ids[0])
-
-	const withTail = createFakeWorkerLoader()
-	await createExecuteExecutor({
-		env: {
-			...createExecutorTestEnv(withTail.loader),
-			USAGE_EVENTS: { writeDataPoint() {} },
-		} as unknown as Env,
-		exports: {
-			KodyFetchGateway: ({ props }: { props: unknown }) => ({ props }),
-			DynamicWorkerUsageTail: ({ props }: { props: unknown }) => ({
-				tailProps: props,
-			}),
-		} as never,
-		gatewayProps: createGatewayProps('user-1'),
-	}).execute('async () => "ok"', [{ name: 'kody', fns: {} }])
-	expect(withTail.ids[0]).toBe(`${withoutTail.ids[0]}-cpu1`)
-	expect(withTail.createdOptions.get(withTail.ids[0]!)?.tails).toEqual([
-		{ tailProps: { userId: 'user-1', workerId: withoutTail.ids[0] } },
-	])
 })

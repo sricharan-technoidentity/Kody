@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 export * from './jobs-service-mocks.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { repoMockModule } from './jobs-service-mocks.ts'
@@ -932,7 +933,7 @@ export function createDatabase(
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 export function createJobServiceTestEnv(
@@ -951,10 +952,7 @@ export function createJobServiceTestEnv(
 
 export function createStorageRunnerBinding() {
 	return {
-		idFromName(name: string) {
-			return name as unknown as DurableObjectId
-		},
-		get() {
+		forBucket() {
 			return {
 				getValue: async () => ({ key: 'count', value: 2 }),
 				setValue: async () => ({ ok: true, key: 'count' }),

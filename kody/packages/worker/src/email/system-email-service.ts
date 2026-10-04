@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 import {
 	putEmailRawMime,
@@ -21,7 +22,7 @@ import {
 import { type ParsedInboundEmail } from './types.ts'
 
 export async function storeIdempotentSystemInboundEmail(input: {
-	db: D1Database
+	db: SqlDatabase
 	blobs: R2Bucket
 	delivery: Omit<InboundDelivery, 'userId'>
 	parsed: ParsedInboundEmail

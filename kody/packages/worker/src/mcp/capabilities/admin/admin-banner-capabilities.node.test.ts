@@ -1,25 +1,25 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
 import {
 	auditEventSummaries,
 	logAuditEventSpy,
 } from '#worker/test-support/audit-log-spy.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { adminBannerDeleteCapability } from './admin-banner-delete.ts'
 import { adminBannerListCapability } from './admin-banner-list.ts'
 import { adminBannerSaveCapability } from './admin-banner-save.ts'
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(
+async function createMigratedDb() {
+	const sqlite = await createTestPg()
+
+	return {
 		sqlite,
-		new URL('../../../../migrations/', import.meta.url),
-	)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+		db: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	}
 }
 
 function createContext(
@@ -30,7 +30,7 @@ function createContext(
 	const adminStableUserId = testStableUserIdFromEmail(adminEmail)
 	return {
 		env: {
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			...envOverrides,
 		} as Env,
 		callerContext: createMcpCallerContext({
@@ -63,7 +63,7 @@ const saveArgs = {
 }
 
 test('admin banner capabilities: admin-only, save, list, delete, audit', async () => {
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	const userCtx = createContext(['user'], { APP_DB: db })
 	await expect(adminBannerListCapability.handler({}, userCtx)).rejects.toThrow(
 		'lacks required role "admin"',
@@ -81,7 +81,7 @@ test('admin banner capabilities: admin-only, save, list, delete, audit', async (
 	)
 
 	const adminCtx = createContext(['admin'], { APP_DB: db })
-	sqlite.exec(`
+	await sqlite.exec(`
 		INSERT INTO users (username, email, stable_user_id, password_hash)
 		VALUES (
 			'admin-user',

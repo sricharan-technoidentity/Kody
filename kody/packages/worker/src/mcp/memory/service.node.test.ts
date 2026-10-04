@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { deterministicEmbedding } from '#worker/search-index/embedding.ts'
 import {
@@ -272,13 +273,13 @@ function createMemoryTestDb() {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	return { db, memories, suppressions, batches }
 }
 
 const env = (
-	db: D1Database,
+	db: SqlDatabase,
 	bindings: Partial<
 		Pick<Env, 'CAPABILITY_VECTOR_INDEX' | 'SENTRY_ENVIRONMENT'> & {
 			BEDROCK_EMBEDDINGS: {

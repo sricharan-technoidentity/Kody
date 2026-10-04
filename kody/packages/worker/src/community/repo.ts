@@ -1,5 +1,5 @@
 import { type SqlDatabase } from '#worker/aws/pg-database.ts'
-import { d1ContainsLikePattern } from '#worker/d1-like-pattern.ts'
+import { containsLikePattern } from '#worker/sql-like-pattern.ts'
 import { chunkArray } from '@kody-internal/shared/chunk.ts'
 import { parseTagsJson } from '@kody-internal/shared/tags-json.ts'
 import {
@@ -613,7 +613,7 @@ export async function listCommunityListingCandidates(
 	const tokens = extractCommunityListingLikeTokens(input.query ?? '')
 	if (tokens.length > 0) {
 		const tokenClauses = tokens.map((token) => {
-			const pattern = d1ContainsLikePattern(token, { escape: false })
+			const pattern = containsLikePattern(token, { escape: false })
 			const columnClauses = communityListingSearchTextColumns.map((column) => {
 				bindings.push(pattern)
 				// Tokens are lower-case; SQLite LIKE folds ASCII case, Postgres does not.

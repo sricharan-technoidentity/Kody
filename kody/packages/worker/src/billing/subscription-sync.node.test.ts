@@ -1,9 +1,8 @@
-import { DatabaseSync } from 'node:sqlite'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { createInMemoryRunLogUsageEnv } from '#worker/test-support/run-log-usage.ts'
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { ensureEntitlementTestSchema } from '#worker/entitlements/test-schema.ts'
+import { onTestFinished, expect, test, vi } from 'vitest'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { consoleError } from '#worker/test-support/console-spies.ts'
 import { createBillingLinkReference } from './billing-config.ts'
@@ -14,173 +13,179 @@ import {
 	refreshStripePlanForUser,
 } from './subscription-sync.ts'
 
-let sqlite: DatabaseSync
-let env: Env
-beforeEach(() => {
-	sqlite = new DatabaseSync(':memory:')
+async function createBillingHarness() {
+	const sqlite = await createTestPg()
 	const client = {
 		workflow: {
 			signalWithStart: vi.fn(async () => ({ workflowId: 'stripe-refresh' })),
 		},
 	}
-	env = {
-		APP_DB: createD1FromSqlite(sqlite),
+	const env = {
+		APP_DB: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+		APP_DB_FOR_USER: (userId: string) =>
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
 		COOKIE_SECRET: 'billing-test-cookie-secret',
 		...createInMemoryUserMeterEnv().env,
 		...createInMemoryRunLogUsageEnv().env,
 		TEMPORAL: { client: async () => client },
 	} as unknown as Env
-})
-afterEach(() => {
-	sqlite.close()
-	vi.unstubAllGlobals()
-})
 
-function jsonResponse(body: unknown, status = 200) {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: { 'content-type': 'application/json' },
+	onTestFinished(() => {
+		vi.unstubAllGlobals()
 	})
-}
-
-function createBillingEnv(
-	overrides: {
-		STRIPE_SECRET_KEY?: string
-		STRIPE_PRO_PRICE_ID?: string
-		STRIPE_PRO_YEARLY_PRICE_ID?: string
-		STRIPE_API_BASE_URL?: string
-		TEMPORAL?: Env['TEMPORAL']
-		DISCORD_BOT_TOKEN?: string
-		DISCORD_GUILD_ID?: string
-		DISCORD_MEMBER_ROLE_ID?: string
-		DISCORD_STANDARD_ROLE_ID?: string
-		DISCORD_PRO_ROLE_ID?: string
-	} = {},
-): Env {
-	return {
-		...env,
-		STRIPE_SECRET_KEY: 'sk_test_secret',
-		STRIPE_PRO_PRICE_ID: 'price_pro',
-		STRIPE_API_BASE_URL: 'https://stripe.mock',
-		...overrides,
+	function jsonResponse(body: unknown, status = 200) {
+		return new Response(JSON.stringify(body), {
+			status,
+			headers: { 'content-type': 'application/json' },
+		})
 	}
-}
-
-async function seedUser(input: {
-	email: string
-	plan?: 'free' | 'pro' | 'max'
-	stripeCustomerId?: string | null
-	stripePlan?: string | null
-	stripePriceId?: string | null
-	stripePlanRefreshedAt?: string | null
-	entitlementLadder?: 'public' | 'legacy'
-}) {
-	await ensureEntitlementTestSchema(env.APP_DB)
-	const stableUserId = await createStableUserIdFromEmail(input.email)
-	await env.APP_DB.prepare(
-		`INSERT INTO users (
+	function createBillingEnv(
+		overrides: {
+			STRIPE_SECRET_KEY?: string
+			STRIPE_PRO_PRICE_ID?: string
+			STRIPE_PRO_YEARLY_PRICE_ID?: string
+			STRIPE_API_BASE_URL?: string
+			TEMPORAL?: Env['TEMPORAL']
+			DISCORD_BOT_TOKEN?: string
+			DISCORD_GUILD_ID?: string
+			DISCORD_MEMBER_ROLE_ID?: string
+			DISCORD_STANDARD_ROLE_ID?: string
+			DISCORD_PRO_ROLE_ID?: string
+		} = {},
+	): Env {
+		return {
+			...env,
+			STRIPE_SECRET_KEY: 'sk_test_secret',
+			STRIPE_PRO_PRICE_ID: 'price_pro',
+			STRIPE_API_BASE_URL: 'https://stripe.mock',
+			...overrides,
+		}
+	}
+	async function seedUser(input: {
+		email: string
+		plan?: 'free' | 'pro' | 'max'
+		stripeCustomerId?: string | null
+		stripePlan?: string | null
+		stripePriceId?: string | null
+		stripePlanRefreshedAt?: string | null
+		entitlementLadder?: 'public' | 'legacy'
+	}) {
+		const stableUserId = await createStableUserIdFromEmail(input.email)
+		await env.APP_DB.prepare(
+			`INSERT INTO users (
 			username, email, password_hash, email_verified_at, stable_user_id, plan,
 			stripe_customer_id, stripe_plan, stripe_price_id, stripe_plan_refreshed_at,
 			entitlement_ladder
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-	)
-		.bind(
-			`billing-${crypto.randomUUID().slice(0, 8)}`,
-			input.email,
-			'test-password-hash',
-			new Date().toISOString(),
-			stableUserId,
-			input.plan ?? 'max',
-			input.stripeCustomerId ?? null,
-			input.stripePlan ?? null,
-			input.stripePriceId ?? null,
-			input.stripePlanRefreshedAt ?? null,
-			input.entitlementLadder ?? 'public',
 		)
-		.run()
-	const row = await env.APP_DB.prepare(`SELECT id FROM users WHERE email = ?`)
-		.bind(input.email)
-		.first<{ id: number }>()
-	if (!row) throw new Error(`Failed to seed user ${input.email}`)
-	return {
-		id: row.id,
-		email: input.email,
-		stableUserId,
-		linkReference: await createBillingLinkReference(env, stableUserId),
+			.bind(
+				`billing-${crypto.randomUUID().slice(0, 8)}`,
+				input.email,
+				'test-password-hash',
+				new Date().toISOString(),
+				stableUserId,
+				input.plan ?? 'max',
+				input.stripeCustomerId ?? null,
+				input.stripePlan ?? null,
+				input.stripePriceId ?? null,
+				input.stripePlanRefreshedAt ?? null,
+				input.entitlementLadder ?? 'public',
+			)
+			.run()
+		const row = await env.APP_DB.prepare(`SELECT id FROM users WHERE email = ?`)
+			.bind(input.email)
+			.first<{ id: number }>()
+		if (!row) throw new Error(`Failed to seed user ${input.email}`)
+		return {
+			id: row.id,
+			email: input.email,
+			stableUserId,
+			linkReference: await createBillingLinkReference(env, stableUserId),
+		}
 	}
-}
-
-async function readUserBilling(userId: number) {
-	return env.APP_DB.prepare(
-		`SELECT stripe_customer_id, stripe_plan, stripe_price_id,
+	async function readUserBilling(userId: number) {
+		return env.APP_DB.prepare(
+			`SELECT stripe_customer_id, stripe_plan, stripe_price_id,
 		        stripe_plan_refreshed_at
 		 FROM users WHERE id = ?`,
-	)
-		.bind(userId)
-		.first<{
-			stripe_customer_id: string | null
-			stripe_plan: string | null
-			stripe_price_id: string | null
-			stripe_plan_refreshed_at: string | null
-		}>()
-}
-
-function stubStripeFetch(input: {
-	checkout?: unknown
-	subscriptions?: unknown
-	checkoutStatus?: number
-	subscriptionsStatus?: number
-}) {
-	const fetchStub = vi.fn(async (request: RequestInfo | URL) => {
-		const url = String(request)
-		if (url.includes('/v1/checkout/sessions/')) {
-			return jsonResponse(
-				input.checkout ?? {
-					id: 'cs_test',
-					customer: 'cus_linked',
-					client_reference_id: null,
-				},
-				input.checkoutStatus ?? 200,
-			)
-		}
-		if (url.includes('/v1/subscriptions')) {
-			return jsonResponse(
-				input.subscriptions ?? {
-					data: [
-						{
-							id: 'sub_1',
-							status: 'active',
-							cancel_at: null,
-							items: {
-								data: [{ price: { id: 'price_pro' } }],
-							},
-						},
-					],
-				},
-				input.subscriptionsStatus ?? 200,
-			)
-		}
-		return jsonResponse({ error: 'unexpected stripe path' }, 500)
-	})
-	vi.stubGlobal('fetch', fetchStub)
-	return fetchStub
-}
-
-async function expectBillingLinkError(
-	promise: Promise<unknown>,
-	code: BillingLinkError['code'],
-) {
-	const error = await promise.then(
-		() => null,
-		(thrown: unknown) => thrown,
-	)
-	if (!(error instanceof BillingLinkError)) {
-		throw new Error('Expected BillingLinkError')
+		)
+			.bind(userId)
+			.first<{
+				stripe_customer_id: string | null
+				stripe_plan: string | null
+				stripe_price_id: string | null
+				stripe_plan_refreshed_at: string | null
+			}>()
 	}
-	expect(error.code).toBe(code)
+	function stubStripeFetch(input: {
+		checkout?: unknown
+		subscriptions?: unknown
+		checkoutStatus?: number
+		subscriptionsStatus?: number
+	}) {
+		const fetchStub = vi.fn(async (request: RequestInfo | URL) => {
+			const url = String(request)
+			if (url.includes('/v1/checkout/sessions/')) {
+				return jsonResponse(
+					input.checkout ?? {
+						id: 'cs_test',
+						customer: 'cus_linked',
+						client_reference_id: null,
+					},
+					input.checkoutStatus ?? 200,
+				)
+			}
+			if (url.includes('/v1/subscriptions')) {
+				return jsonResponse(
+					input.subscriptions ?? {
+						data: [
+							{
+								id: 'sub_1',
+								status: 'active',
+								cancel_at: null,
+								items: {
+									data: [{ price: { id: 'price_pro' } }],
+								},
+							},
+						],
+					},
+					input.subscriptionsStatus ?? 200,
+				)
+			}
+			return jsonResponse({ error: 'unexpected stripe path' }, 500)
+		})
+		vi.stubGlobal('fetch', fetchStub)
+		return fetchStub
+	}
+	async function expectBillingLinkError(
+		promise: Promise<unknown>,
+		code: BillingLinkError['code'],
+	) {
+		const error = await promise.then(
+			() => null,
+			(thrown: unknown) => thrown,
+		)
+		if (!(error instanceof BillingLinkError)) {
+			throw new Error('Expected BillingLinkError')
+		}
+		expect(error.code).toBe(code)
+	}
+	return {
+		env,
+		sqlite,
+		jsonResponse,
+		createBillingEnv,
+		seedUser,
+		readUserBilling,
+		stubStripeFetch,
+		expectBillingLinkError,
+	}
 }
 
 test('linkStripeCustomerFromCheckoutSession links customer and refreshes stripe_plan', async () => {
+	const { env, createBillingEnv, seedUser, readUserBilling, stubStripeFetch } =
+		await createBillingHarness()
+
 	const email = `link-happy-${crypto.randomUUID()}@example.com`
 	const user = await seedUser({ email, plan: 'pro' })
 	const now = new Date('2026-07-19T12:00:00.000Z')
@@ -243,6 +248,9 @@ test('linkStripeCustomerFromCheckoutSession links customer and refreshes stripe_
 })
 
 test('checkout linking surfaces Stripe failure when its retry alarm cannot be armed', async () => {
+	const { env, createBillingEnv, seedUser, stubStripeFetch } =
+		await createBillingHarness()
+
 	const email = `link-no-backstop-${crypto.randomUUID()}@example.com`
 	const user = await seedUser({ email, plan: 'pro' })
 	stubStripeFetch({
@@ -281,6 +289,15 @@ test('checkout linking surfaces Stripe failure when its retry alarm cannot be ar
 })
 
 test('linkStripeCustomerFromCheckoutSession rejects unsafe checkout links without mutating users', async () => {
+	const {
+		env,
+		createBillingEnv,
+		seedUser,
+		readUserBilling,
+		stubStripeFetch,
+		expectBillingLinkError,
+	} = await createBillingHarness()
+
 	const billingEnv = createBillingEnv()
 
 	{
@@ -393,23 +410,17 @@ test('linkStripeCustomerFromCheckoutSession rejects unsafe checkout links withou
 })
 
 test('checkout linking assigns the Discord Pro role when Discord is connected', async () => {
+	const { env, jsonResponse, createBillingEnv, seedUser } =
+		await createBillingHarness()
+
 	const email = `link-discord-pro-${crypto.randomUUID()}@example.com`
 	const user = await seedUser({ email, plan: 'free' })
-	await env.APP_DB.prepare(
-		`CREATE TABLE IF NOT EXISTS oauth_connections (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			provider_name TEXT NOT NULL,
-			provider_id TEXT NOT NULL,
-			user_id INTEGER NOT NULL,
-			provider_display_name TEXT,
-			created_at TEXT,
-			updated_at TEXT
-		)`,
-	).run()
-	await env.APP_DB.prepare(
-		`INSERT INTO oauth_connections (provider_name, provider_id, user_id)
+
+	await env.APP_DB_FOR_USER!(user.stableUserId)
+		.prepare(
+			`INSERT INTO oauth_connections (provider_name, provider_id, user_id)
 		 VALUES ('discord', '333333333333333333', ?)`,
-	)
+		)
 		.bind(user.id)
 		.run()
 
@@ -484,6 +495,9 @@ test('checkout linking assigns the Discord Pro role when Discord is connected', 
 })
 
 test('refreshStripePlanForUser keeps legacy on same-plan renew and drops it after cancel', async () => {
+	const { env, createBillingEnv, seedUser, stubStripeFetch } =
+		await createBillingHarness()
+
 	const email = `legacy-refresh-${crypto.randomUUID()}@example.com`
 	const user = await seedUser({
 		email,
@@ -564,6 +578,9 @@ test('refreshStripePlanForUser keeps legacy on same-plan renew and drops it afte
 })
 
 test('refreshStripePlanForUser drops legacy when the Stripe plan or price changes', async () => {
+	const { env, createBillingEnv, seedUser, stubStripeFetch } =
+		await createBillingHarness()
+
 	const billingEnv = createBillingEnv({
 		STRIPE_PRO_PRICE_ID: 'price_pro',
 	})
@@ -654,6 +671,9 @@ test('refreshStripePlanForUser drops legacy when the Stripe plan or price change
 })
 
 test('refreshStripePlanForUser keeps legacy on the first price observation after deploy', async () => {
+	const { env, createBillingEnv, seedUser, stubStripeFetch } =
+		await createBillingHarness()
+
 	const email = `legacy-first-price-${crypto.randomUUID()}@example.com`
 	const user = await seedUser({
 		email,
@@ -697,6 +717,9 @@ test('refreshStripePlanForUser keeps legacy on the first price observation after
 })
 
 test('refreshStripePlanForUser does not re-flag a public account that resubscribes', async () => {
+	const { env, createBillingEnv, seedUser, stubStripeFetch } =
+		await createBillingHarness()
+
 	const email = `resub-${crypto.randomUUID()}@example.com`
 	const user = await seedUser({
 		email,

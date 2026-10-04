@@ -83,37 +83,37 @@ function createEstimateEnv() {
 				throw new Error('APP_DB should not be queried when email is absent')
 			},
 		},
-		STORAGE_RUNNER: {
-			idFromName: (name: string) => name,
-			get: () => ({
-				getEstimatedBytes: () => mockModule.getEstimatedBytes(),
-				sqlQuery: (input: {
-					query: string
-					params?: Array<unknown>
-					writable?: boolean
-				}) => mockModule.sqlQuery(input),
-				getValue: async ({ key }: { key: string }) => ({
-					key,
-					value: null,
-				}),
-				setValue: async ({ key }: { key: string }) => ({
-					ok: true as const,
-					key,
-				}),
-				deleteValue: async () => ({
-					ok: true as const,
-					key: 'x',
-					deleted: true,
-				}),
-				clearStorage: async () => ({ ok: true as const }),
-				listValues: async () => ({
-					entries: [],
-					estimatedBytes: 0,
-					truncated: false,
-					nextStartAfter: null,
-					pageSize: 50,
-				}),
-			}),
+		STORAGE_CELLS: {
+			forBucket: (bucket: { userId: string; storageId: string }) =>
+				(() => ({
+					getEstimatedBytes: () => mockModule.getEstimatedBytes(),
+					sqlQuery: (input: {
+						query: string
+						params?: Array<unknown>
+						writable?: boolean
+					}) => mockModule.sqlQuery(input),
+					getValue: async ({ key }: { key: string }) => ({
+						key,
+						value: null,
+					}),
+					setValue: async ({ key }: { key: string }) => ({
+						ok: true as const,
+						key,
+					}),
+					deleteValue: async () => ({
+						ok: true as const,
+						key: 'x',
+						deleted: true,
+					}),
+					clearStorage: async () => ({ ok: true as const }),
+					listValues: async () => ({
+						entries: [],
+						estimatedBytes: 0,
+						truncated: false,
+						nextStartAfter: null,
+						pageSize: 50,
+					}),
+				}))(JSON.stringify([bucket.userId, bucket.storageId])),
 		},
 	} as unknown as Env
 }

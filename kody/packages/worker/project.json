@@ -16,19 +16,6 @@
 				"command": "npm run dev:client"
 			}
 		},
-		"dev-worker": {
-			"executor": "nx:run-commands",
-			"options": {
-				"command": "npm run dev:worker"
-			}
-		},
-		"build-client-web": {
-			"executor": "nx:run-commands",
-			"outputs": ["{workspaceRoot}/dist"],
-			"options": {
-				"command": "npm run build:client:web"
-			}
-		},
 		"build-client": {
 			"executor": "nx:run-commands",
 			"outputs": ["{workspaceRoot}/dist"],

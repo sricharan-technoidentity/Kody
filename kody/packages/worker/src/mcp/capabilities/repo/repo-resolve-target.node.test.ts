@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { mismatchedPackageScopeMessage } from '#worker/package-registry/package-name.ts'
@@ -67,7 +68,7 @@ test('resolveRepoSourceReference throws McpCallerError for missing source and pa
 
 	mockModule.getEntitySourceByIdForUser.mockResolvedValue(null)
 	const missingSource = resolveRepoSourceReference({
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		args: { source_id: 'source-missing' },
 	})
@@ -84,7 +85,7 @@ test('resolveRepoSourceReference throws McpCallerError for missing source and pa
 
 	mockModule.getSavedPackageById.mockResolvedValue(null)
 	const missingPackage = resolveRepoSourceReference({
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		args: { target: { kind: 'package', package_id: 'pkg-missing' } },
 	})
@@ -95,7 +96,7 @@ test('resolveRepoSourceReference throws McpCallerError for missing source and pa
 	)
 
 	const missingIdentity = resolveRepoSourceReference({
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		args: {},
 	})
@@ -111,19 +112,19 @@ test('resolveRepoSourceReference accepts scoped @owner/leaf, leaf-only, and reje
 	const savedPackage = createSavedPackageRow()
 	const source = createPackageSourceRow()
 	mockModule.getSavedPackageByKodyId.mockImplementation(
-		async (_db: D1Database, input: { kodyId: string }) =>
+		async (_db: SqlDatabase, input: { kodyId: string }) =>
 			input.kodyId === 'travel-map' ? savedPackage : null,
 	)
 	mockModule.getEntitySourceByIdForUser.mockResolvedValue(source)
 
 	const scoped = await resolveRepoSourceReference({
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		ownerScope: 'kentcdodds',
 		args: { target: { kind: 'package', kody_id: '@kentcdodds/travel-map' } },
 	})
 	const leaf = await resolveRepoSourceReference({
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		ownerScope: 'kentcdodds',
 		args: { target: { kind: 'package', kody_id: 'travel-map' } },
@@ -150,7 +151,7 @@ test('resolveRepoSourceReference accepts scoped @owner/leaf, leaf-only, and reje
 	)
 
 	const unknownScoped = resolveRepoSourceReference({
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		ownerScope: 'kentcdodds',
 		args: {
@@ -167,7 +168,7 @@ test('resolveRepoSourceReference accepts scoped @owner/leaf, leaf-only, and reje
 	)
 
 	const foreignScope = resolveRepoSourceReference({
-		db: {} as D1Database,
+		db: {} as SqlDatabase,
 		userId: 'user-1',
 		ownerScope: 'kentcdodds',
 		args: { target: { kind: 'package', kody_id: '@other/travel-map' } },

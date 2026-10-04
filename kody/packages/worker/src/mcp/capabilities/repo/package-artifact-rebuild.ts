@@ -4,7 +4,7 @@ import {
 	formatErrorCauseChain,
 	getErrorMessage,
 } from '@kody-internal/shared/error-message.ts'
-import { isRetryableD1LockError } from '#worker/d1-retry.ts'
+import { isRetryableSqlError } from '#worker/sql-retry.ts'
 import {
 	isPublishedPackageArtifactBuiltForCommit,
 	reusePublishedPackageArtifactIfUnchanged,
@@ -30,9 +30,9 @@ export const publishedPackageArtifactRebuildConcurrency =
 	isolatedArtifactRebuildChunkConcurrency
 
 /**
- * Deploy-time DO code resets, other platform isolate resets, and D1
- * `internal error; reference = …` blips during staging or target rebuilds
- * are transient. Rebuilds are idempotent (already-built targets are skipped),
+ * Package sandbox isolate resets and PostgreSQL transaction/connection
+ * failures during staging or target rebuilds are transient.
+ * Rebuilds are idempotent (already-built targets are skipped),
  * so a short bounded retry recovers without re-running publish. Matches
  * packagePublishExternalPush delays.
  */
@@ -43,9 +43,7 @@ function isTransientDurableObjectResetError(error: unknown) {
 }
 
 function isTransientArtifactRebuildError(error: unknown) {
-	return (
-		isTransientDurableObjectResetError(error) || isRetryableD1LockError(error)
-	)
+	return isTransientDurableObjectResetError(error) || isRetryableSqlError(error)
 }
 
 function logArtifactRebuildRetry(input: {

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type Action } from 'remix/router'
 import { jsonResponse } from '#worker/json-response.ts'
 import {
@@ -291,7 +292,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 	const db = createDb(env.APP_DB)
 
 	async function createConnection(input: {
-		db: D1Database | PgDatabase
+		db: SqlDatabase | PgDatabase
 		provider: OauthProviderId
 		profile: OauthProfile
 		userId: number
@@ -325,7 +326,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 	}
 
 	async function completeDiscordGuildLogin(input: {
-		db: D1Database | PgDatabase
+		db: SqlDatabase | PgDatabase
 		provider: OauthProviderId
 		userId: number
 		discordUserId: string
@@ -418,7 +419,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			}
 
 			async function issueLogin(
-				accountDb: D1Database | PgDatabase,
+				accountDb: SqlDatabase | PgDatabase,
 				user: {
 					id: number
 					stable_user_id: string | null
@@ -510,7 +511,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			// out, only the provider identity is known: continue on its owner's.
 			const connectionDb = session
 				? env.APP_DB
-				: await resolveTokenOwnerDb<D1Database | PgDatabase>({
+				: await resolveTokenOwnerDb<SqlDatabase | PgDatabase>({
 						db: env.APP_DB,
 						forUser: getAccountWriterFactory(env),
 						kind: 'oauth_connection',
@@ -626,7 +627,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			// the identity and signs that account in. An unverified row is
 			// treated as a possible squat: invalidate the password, drop
 			// attacker-added factors, then link.
-			const emailOwnerDb = await resolveTokenOwnerDb<D1Database | PgDatabase>({
+			const emailOwnerDb = await resolveTokenOwnerDb<SqlDatabase | PgDatabase>({
 				db: env.APP_DB,
 				forUser: getAccountWriterFactory(env),
 				kind: 'account_email',
@@ -752,7 +753,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 				stable_user_id: string
 				email: string
 			} | null = null
-			let accountDb: D1Database | PgDatabase
+			let accountDb: SqlDatabase | PgDatabase
 			try {
 				username = await getAvailableUsernameFromBase(
 					env.APP_DB,
@@ -871,8 +872,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			if (platformEmailDomain) {
 				try {
 					await ensureDefaultEmailInbox({
-						// ponytail: D1-typed until P6 moves mailboxes; it reclaims stale address rows cross-user.
-						db: accountDb as D1Database,
+						db: accountDb as SqlDatabase,
 						userId: stableUserId,
 						username,
 						domain: platformEmailDomain,
@@ -908,8 +908,7 @@ export function createAuthProviderCallbackHandler(env: Env) {
 			})
 			try {
 				await attributeReferralAtSignup({
-					// ponytail: the referrer lookup is cross-user; P4 `entitlements` gives it a definer.
-					db: accountDb as D1Database,
+					db: accountDb as SqlDatabase,
 					refereeStableUserId: stableUserId,
 					refereeUsername: username,
 					referralCode: resolveReferralCodeForSignup({

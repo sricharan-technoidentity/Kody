@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	buildForkListingDiffHref,
 	buildListingAheadPrompt,
@@ -269,7 +270,7 @@ async function toDetail(input: {
 }
 
 async function hasActiveCommunityListing(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 }) {

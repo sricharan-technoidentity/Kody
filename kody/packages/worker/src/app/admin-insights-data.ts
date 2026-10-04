@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { cachified } from '@epic-web/cachified'
 import {
 	utcDayKey,
@@ -416,7 +417,7 @@ FORMAT JSON
  * `aggregateRunLogInsights` and
  * `packages/worker/src/run-records/package-activation-state.ts`.
  */
-async function queryActivationBase(db: D1Database): Promise<{
+async function queryActivationBase(db: SqlDatabase): Promise<{
 	steps: Array<AdminInsightsActivationStep>
 	forksByActor: AdminInsightsActivation['forksByActor']
 }> {
@@ -494,7 +495,7 @@ function mergeActivation(
 }
 
 async function queryTotals(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<
 	Omit<AdminInsightsTotals, 'scheduledJobs' | 'enabledJobs' | 'workflowRuns'>
 > {
@@ -539,7 +540,7 @@ async function queryTotals(
 	}
 }
 
-async function countQuery(db: D1Database, query: string) {
+async function countQuery(db: SqlDatabase, query: string) {
 	const row = await db.prepare(query).first<CountRow>()
 	return Number(row?.n ?? 0)
 }

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { jsonResponse } from '#worker/json-response.ts'
 import { type Action } from 'remix/router'
 import { enum_, object, optional, parseSafe, string } from 'remix/data-schema'
@@ -154,7 +155,7 @@ function displayPasskeyName(passkey: PasskeyRow) {
 }
 
 async function loadPasskeysPayload(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<AccountPasskeysLoaderData> {
 	const passkeys = await listPasskeysForUser(db, userId)

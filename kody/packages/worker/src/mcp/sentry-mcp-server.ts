@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 const serverImplementation = {

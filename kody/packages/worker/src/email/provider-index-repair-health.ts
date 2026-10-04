@@ -1,8 +1,9 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 import { type MailboxProviderIndexRepairStatus } from './mailbox-provider-index-repair.ts'
 
 export async function syncProviderIndexRepairOwnerHealth(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	status: MailboxProviderIndexRepairStatus
 	now?: Date
@@ -38,7 +39,7 @@ export async function syncProviderIndexRepairOwnerHealth(input: {
 }
 
 export async function loadProviderIndexRepairHealth(input: {
-	db: D1Database
+	db: SqlDatabase
 }): Promise<{
 	pendingOwners: number
 	pendingCount: number

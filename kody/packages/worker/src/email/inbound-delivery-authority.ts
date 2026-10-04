@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	buildEntitlementUpgradeHint,
 	EntitlementLimitError,
@@ -39,7 +40,7 @@ import { systemEmailOwnerId } from './email-owner.ts'
 import { replaceInboundDueOwnerHint } from './inbound-due-owners.ts'
 
 export type UserInboundDeliveryAuthorityEnv = {
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 } & MailboxEnv &
 	UserMeterEnv
 

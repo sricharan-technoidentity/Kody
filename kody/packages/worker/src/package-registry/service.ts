@@ -1,7 +1,7 @@
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
 import { parseTagsJson } from '@kody-internal/shared/tags-json.ts'
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { invalidateCommunityPublicCache } from '#app/data-cache.ts'
 import {
 	deletePackageKodyIdRedirects,
@@ -388,6 +388,7 @@ export async function refreshSavedPackageProjection(input: {
 						const { buildKodyAppClientBundle } =
 							await import('#worker/package-runtime/module-graph.ts')
 						return await buildKodyAppClientBundle({
+							env: input.env,
 							sourceFiles: loadedFiles,
 							entryPoint,
 						})

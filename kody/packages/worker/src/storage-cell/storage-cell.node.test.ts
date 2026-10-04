@@ -18,8 +18,27 @@ test('storage SQL preserves its API while fencing stale leases and reserving byt
 		}
 		const first = await openStorageCell(input)
 		await first.sql('CREATE TABLE items (value TEXT)')
+		await first
+			.sql(
+				"CREATE TABLE batch(value TEXT); INSERT INTO batch VALUES ('semi;colon'); SELECT value FROM batch",
+			)
+			.then((rows) => expect(rows).toEqual([['semi;colon']]))
+		await expect(
+			first.sql(
+				"INSERT INTO batch VALUES ('rollback'); INSERT INTO missing VALUES (1)",
+			),
+		).rejects.toThrow()
+		expect(await first.sql('SELECT COUNT(*) FROM batch')).toEqual([[1]])
 		await first.sql('INSERT INTO items VALUES (?)', ['hello'])
 		expect(await first.sql('SELECT value FROM items')).toEqual([['hello']])
+		await expect(
+			first.sql("ATTACH DATABASE '/tmp/other-user.sqlite' AS other"),
+		).rejects.toThrow()
+		await expect(first.sql('BEGIN')).rejects.toThrow()
+		await expect(
+			openStorageCell({ ...input, ownerId: 'worker-2' }),
+		).rejects.toThrow('lease')
+		await first.release()
 		const second = await openStorageCell({ ...input, ownerId: 'worker-2' })
 		expect(second.fencingToken).toBeGreaterThan(first.fencingToken)
 		await expect(

@@ -26,7 +26,7 @@ type Index = { hash: string; range: string }
 export function createFakeDynamo(
 	options: { indexes?: Record<string, Index> } = {},
 ) {
-	const indexes = {
+	const indexes: Record<string, { hash: string; range: string }> = {
 		'ns-pk': { hash: 'ns', range: 'pk' },
 		[runsByStartedIndex]: { hash: 'pk', range: 'startedSk' },
 		...options.indexes,
@@ -261,7 +261,7 @@ function compare(a: AttributeValue | undefined, b: AttributeValue | undefined) {
 	return Buffer.compare(Buffer.from(String(left)), Buffer.from(String(right)))
 }
 
-const tokenPattern = /\s*(<>|<=|>=|[=<>(),+\-]|[#:]?[A-Za-z_][A-Za-z0-9_]*)/y
+const tokenPattern = /\s*(<>|<=|>=|[=<>(),+-]|[#:]?[A-Za-z_][A-Za-z0-9_]*)/y
 
 function tokenize(expression: string) {
 	const tokens: Array<string> = []
@@ -314,7 +314,7 @@ function evaluate(expression: string, item: Item, context: Context): boolean {
 		if (next() !== token) throw validation(`Expected ${token} in ${expression}`)
 	}
 	const keyword = (word: string) => peek()?.toUpperCase() === word
-	const operand = () => {
+	const operand = (): AttributeValue | undefined => {
 		const token = next()!
 		return token.startsWith(':') ? value(token) : item[name(token)]
 	}
@@ -428,7 +428,7 @@ function applyUpdate(
 	const next = () => tokens[position++]
 	const atEnd = () =>
 		position >= tokens.length || sections.has(tokens[position]!.toUpperCase())
-	const operand = () => {
+	const operand = (): AttributeValue | undefined => {
 		const token = next()!
 		if (token === 'if_not_exists') {
 			if (next() !== '(') throw validation('Expected ( after if_not_exists.')

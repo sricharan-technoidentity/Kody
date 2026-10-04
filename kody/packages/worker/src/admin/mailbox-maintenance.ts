@@ -42,7 +42,7 @@ export const adminMailboxMaintenanceRetentionConcurrency = 4
 export const adminMailboxMaintenanceRetentionBudgetMs = 10_000
 
 export type AdminMailboxMaintenanceEnv = MailboxEnv & {
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 	EMAIL_BLOBS: Pick<R2Bucket, 'delete' | 'head'>
 }
 
@@ -231,7 +231,7 @@ async function runOwnersWithBudget(input: {
  * content, message ids, or per-owner identity (except retention cursors).
  */
 export async function loadAdminMailboxMaintenanceStatus(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 }): Promise<AdminMailboxMaintenanceStatus> {
 	const now = input.now ?? new Date()

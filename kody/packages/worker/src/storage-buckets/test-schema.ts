@@ -1,9 +1,10 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Non-destructive schema for `user_storage_buckets` in workers-unit tests,
  * where the D1 database starts empty and each suite provisions the tables it
  * needs. Mirrors the live `user_storage_buckets` schema (through 0018).
  */
-export async function ensureUserStorageBucketsTestSchema(db: D1Database) {
+export async function ensureUserStorageBucketsTestSchema(db: SqlDatabase) {
 	await db
 		.prepare(
 			`CREATE TABLE IF NOT EXISTS user_storage_buckets (

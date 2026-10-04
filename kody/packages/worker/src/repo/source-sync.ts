@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	hasArtifactsAccess,
 	type ArtifactBootstrapAccess,
@@ -102,13 +103,13 @@ async function assertPackageBootstrapUnlocked(input: {
 
 function canSyncArtifactSource(env: Env) {
 	const runtimeEnv = env as Env & {
-		REPO_SESSION?: DurableObjectNamespace | undefined
-		APP_DB?: D1Database | undefined
+		REPO_SESSIONS?: Env['REPO_SESSIONS']
+		APP_DB?: SqlDatabase | undefined
 		BUNDLE_ARTIFACTS_KV?: KVNamespace | undefined
 	}
 	return (
 		hasArtifactsAccess(env) &&
-		runtimeEnv.REPO_SESSION != null &&
+		runtimeEnv.REPO_SESSIONS != null &&
 		typeof runtimeEnv.APP_DB?.prepare === 'function' &&
 		runtimeEnv.BUNDLE_ARTIFACTS_KV != null
 	)
@@ -340,7 +341,7 @@ export async function syncArtifactSourceSnapshot(
 		// the consistent D1+KV state that publishSession already
 		// established, while leaving the repo session row marked
 		// status: 'published' with the new base_commit. See
-		// repo-session-do.ts publishSession for the internal snapshot
+		// repo-session-service.ts publishSession for the internal snapshot
 		// persistence and rollback.
 		return publishResult.publishedCommit
 	} finally {

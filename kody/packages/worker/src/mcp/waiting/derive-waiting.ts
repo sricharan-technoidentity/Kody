@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	deriveOnboardingChecklist,
 	readOnboardingChecklistDismissed,
@@ -344,7 +345,7 @@ type ActivationStampRow = {
 }
 
 /** `null` (missing row or read failure) means every stamp is unknown. */
-async function probeActivationStamps(db: D1Database, userId: string) {
+async function probeActivationStamps(db: SqlDatabase, userId: string) {
 	try {
 		return await db
 			.prepare(
@@ -367,7 +368,7 @@ function activationStamp(
 	return row ? Boolean(row[column]) : null
 }
 
-async function probeHasMemory(db: D1Database, userId: string) {
+async function probeHasMemory(db: SqlDatabase, userId: string) {
 	try {
 		const rows = await listMemoriesByUserId(db, userId, { limit: 1 })
 		return rows.length > 0

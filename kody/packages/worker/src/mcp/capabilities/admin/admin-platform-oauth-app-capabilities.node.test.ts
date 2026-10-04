@@ -1,5 +1,10 @@
+import {
+	createTestPg,
+	createTestAuditPg,
+} from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
@@ -9,26 +14,21 @@ import { createMcpCallerContext } from '#mcp/context.ts'
 vi.unmock('#worker/audit-log.ts')
 import { type CapabilityContext } from '#mcp/capabilities/types.ts'
 import { getPlatformOauthAppClientSecret } from '#worker/integrations/platform-apps.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { adminPlatformOauthAppDeleteCapability } from './admin-platform-oauth-app-delete.ts'
 import { adminPlatformOauthAppListCapability } from './admin-platform-oauth-app-list.ts'
 import { adminPlatformOauthAppSaveCapability } from './admin-platform-oauth-app-save.ts'
 
-const migrationsDirectory = new URL('../../../../migrations/', import.meta.url)
-const auditMigrationsDirectory = new URL(
-	'../../../../audit-migrations/',
-	import.meta.url,
-)
+async function createHarness() {
+	const sqlite = await createTestPg()
 
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const auditSqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(auditSqlite, auditMigrationsDirectory)
+	const auditSqlite = await createTestAuditPg()
+
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
-		AUDIT_DB: createD1FromSqlite(auditSqlite),
+		APP_DB: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+		AUDIT_DB: createPgDatabase({
+			connection: auditSqlite,
+			role: 'kody_audit_writer',
+		}),
 		SECRET_KMS: testSecretKms,
 	} as Env
 	const ctx = {
@@ -60,7 +60,7 @@ const saveInput = {
 }
 
 test('save/list/delete platform OAuth apps never expose the client secret and write audit rows', async () => {
-	const { auditSqlite, ctx, env } = createHarness()
+	const { auditSqlite, ctx, env } = await createHarness()
 
 	const saved = await adminPlatformOauthAppSaveCapability.handler(
 		saveInput,
@@ -111,9 +111,9 @@ test('save/list/delete platform OAuth apps never expose the client secret and wr
 	)
 	expect(deleted).toEqual({ deleted: true })
 
-	const auditActions = auditSqlite
-		.prepare('SELECT action, result FROM audit_events ORDER BY id ASC')
-		.all() as Array<{ action: string; result: string }>
+	const auditActions = (await pgQuery(auditSqlite).all(
+		'SELECT action, result FROM audit_events ORDER BY id ASC',
+	)) as Array<{ action: string; result: string }>
 	expect(auditActions).toEqual([
 		{ action: 'adminPlatformOauthAppSave', result: 'success' },
 		{ action: 'adminPlatformOauthAppSave', result: 'success' },
@@ -123,15 +123,16 @@ test('save/list/delete platform OAuth apps never expose the client secret and wr
 })
 
 test('delete refuses while connections exist and records the failure in the audit log', async () => {
-	const { sqlite, auditSqlite, ctx } = createHarness()
+	const { sqlite, auditSqlite, ctx } = await createHarness()
 	await adminPlatformOauthAppSaveCapability.handler(saveInput, ctx)
-	sqlite
-		.prepare(
-			`INSERT INTO user_integrations (
+	await pgQuery(sqlite).run(
+		`INSERT INTO user_integrations (
 				user_id, name, app_slug, platform_app_slug
 			) VALUES (?, ?, NULL, ?)`,
-		)
-		.run('user-1', 'github', 'github')
+		'user-1',
+		'github',
+		'github',
+	)
 
 	await expect(
 		adminPlatformOauthAppDeleteCapability.handler({ slug: 'github' }, ctx),
@@ -140,16 +141,14 @@ test('delete refuses while connections exist and records the failure in the audi
 	const listed = await adminPlatformOauthAppListCapability.handler({}, ctx)
 	expect(listed.apps[0]?.connectionCount).toBe(1)
 
-	const failures = auditSqlite
-		.prepare(
-			`SELECT action FROM audit_events WHERE result = 'failure' ORDER BY id ASC`,
-		)
-		.all() as Array<{ action: string }>
+	const failures = (await pgQuery(auditSqlite).all(
+		`SELECT action FROM audit_events WHERE result = 'failure' ORDER BY id ASC`,
+	)) as Array<{ action: string }>
 	expect(failures).toEqual([{ action: 'adminPlatformOauthAppDelete' }])
 })
 
 test('enabling a confidential app without a client secret is an McpCallerError with audit failure', async () => {
-	const { ctx, auditSqlite } = createHarness()
+	const { ctx, auditSqlite } = await createHarness()
 	await expect(
 		adminPlatformOauthAppSaveCapability.handler(
 			{
@@ -164,11 +163,9 @@ test('enabling a confidential app without a client secret is an McpCallerError w
 		),
 	).rejects.toBeInstanceOf(McpCallerError)
 
-	const failures = auditSqlite
-		.prepare(
-			`SELECT action, result FROM audit_events WHERE result = 'failure' ORDER BY id ASC`,
-		)
-		.all() as Array<{ action: string; result: string }>
+	const failures = (await pgQuery(auditSqlite).all(
+		`SELECT action, result FROM audit_events WHERE result = 'failure' ORDER BY id ASC`,
+	)) as Array<{ action: string; result: string }>
 	expect(failures).toEqual([
 		{ action: 'adminPlatformOauthAppSave', result: 'failure' },
 	])

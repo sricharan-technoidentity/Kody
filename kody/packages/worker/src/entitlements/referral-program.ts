@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Referral attribution at signup and invoice-gated Standard credit.
  * Reward is one stacked month for both parties; there is no annual or
@@ -138,7 +139,7 @@ export function readStripeInvoiceSubscriptionId(
 }
 
 export async function attributeReferralAtSignup(input: {
-	db: D1Database
+	db: SqlDatabase
 	refereeStableUserId: string
 	refereeUsername: string
 	referralCode: string | null | undefined
@@ -152,7 +153,7 @@ export async function attributeReferralAtSignup(input: {
 	if (code === normalizeReferralCode(input.refereeUsername)) {
 		return { outcome: 'ignored', reason: 'self' }
 	}
-	const db = input.db as D1Database | PgDatabase
+	const db = input.db as SqlDatabase | PgDatabase
 	// The referee's writer cannot see the referrer; on PostgreSQL the directory
 	// answers only a person account's stable id for the code (platform excluded).
 	const referrer =
@@ -204,7 +205,7 @@ export async function attributeReferralAtSignup(input: {
 }
 
 async function loadParty(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ): Promise<ReferralParty | null> {
 	return db
@@ -248,7 +249,7 @@ function rejectReasonForParties(
 }
 
 async function markRejected(
-	db: D1Database,
+	db: SqlDatabase,
 	referralId: number,
 	reason: ReferralRejectReason,
 ) {
@@ -263,7 +264,7 @@ async function markRejected(
 }
 
 function stackReferralCreditStatement(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	paidPeriodEndAt: string | null
 	referralId: number
@@ -273,15 +274,9 @@ function stackReferralCreditStatement(input: {
 	return input.db
 		.prepare(
 			`UPDATE users
-			 SET referral_standard_credit_expires_at = strftime(
-			       '%Y-%m-%dT%H:%M:%fZ',
-			       max(
-			         strftime('%s', ?),
-			         COALESCE(strftime('%s', referral_standard_credit_expires_at), 0),
-			         COALESCE(strftime('%s', ?), 0)
-			       ) + ?,
-			       'unixepoch'
-			     ),
+			 SET referral_standard_credit_expires_at = to_char(
+ (greatest(?::timestamptz, coalesce(referral_standard_credit_expires_at::timestamptz, 'epoch'::timestamptz), ?::timestamptz) + (? * interval '1 second')) AT TIME ZONE 'UTC',
+ 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
 			     updated_at = ?
 			 WHERE stable_user_id = ?
 			   AND EXISTS (
@@ -303,7 +298,7 @@ function stackReferralCreditStatement(input: {
 }
 
 export async function rewardReferralForPaidInvoice(input: {
-	db: D1Database
+	db: SqlDatabase
 	refereeStableUserId: string
 	invoiceId: string
 	invoiceQualifies: boolean
@@ -425,7 +420,7 @@ export async function rewardReferralForPaidInvoice(input: {
 }
 
 export async function maybeRewardHeldReferralAfterEmailVerified(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	referrerPaidPeriodEndAt?: string | null
 	resolveReferrerPaidPeriodEnd?: (
@@ -481,7 +476,7 @@ export async function maybeRewardHeldReferralAfterEmailVerified(input: {
 }
 
 export async function loadReferralProgramSummary(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	username: string
 	origin: string

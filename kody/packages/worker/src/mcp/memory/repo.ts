@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	chunkArray,
 	maxD1BoundParameters,
@@ -41,7 +42,7 @@ function mapSuppressionRow(
 }
 
 export async function insertMemory(
-	db: D1Database,
+	db: SqlDatabase,
 	row: Omit<McpMemoryRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -75,7 +76,7 @@ export async function insertMemory(
 }
 
 export async function getMemoryById(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	memoryId: string,
 ): Promise<McpMemoryRow | null> {
@@ -93,7 +94,7 @@ export async function getMemoryById(
 }
 
 export async function updateMemory(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	memoryId: string,
 	fields: {
@@ -145,7 +146,7 @@ export async function updateMemory(
 }
 
 export async function deleteMemory(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	memoryId: string,
 ): Promise<boolean> {
@@ -157,7 +158,7 @@ export async function deleteMemory(
 }
 
 export async function listMemoriesByUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	options?: {
 		statuses?: Array<McpMemoryRow['status']>
@@ -190,7 +191,7 @@ export async function listMemoriesByUserId(
  * uses this so a single query never loads the whole table.
  */
 export async function listMemoriesByUserIdPage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	afterId: string | null
 	limit: number
@@ -218,7 +219,7 @@ export async function listMemoriesByUserIdPage(input: {
 }
 
 export async function listMemoriesByIds(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	options: {
 		ids: Array<string>
@@ -261,7 +262,7 @@ export async function listMemoriesByIds(
 // single query never loads the whole table. Pass the last row id of the
 // previous page (or null for the first page).
 export async function listMemoriesPage(input: {
-	db: D1Database
+	db: SqlDatabase
 	afterId: string | null
 	limit: number
 }): Promise<Array<McpMemoryRow>> {
@@ -280,7 +281,7 @@ export async function listMemoriesPage(input: {
 }
 
 function touchMemoryAccessedAtStatement(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	memoryIds: Array<string>,
 	timestamp: string,
@@ -296,7 +297,7 @@ function touchMemoryAccessedAtStatement(
 }
 
 export async function touchMemoryAccessedAt(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 	memoryIds: Array<string>,
 	timestamp?: string,
@@ -307,7 +308,7 @@ export async function touchMemoryAccessedAt(
 }
 
 export async function getConversationSuppressions(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	conversationId: string
 	now?: string
@@ -333,7 +334,7 @@ const conversationSuppressionUpsertSql = `INSERT INTO mcp_memory_conversation_su
 					expires_at = excluded.expires_at`
 
 function conversationSuppressionUpsertStatements(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	conversationId: string
 	memoryIds: Array<string>
@@ -355,7 +356,7 @@ function conversationSuppressionUpsertStatements(input: {
 }
 
 export async function upsertConversationSuppressions(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	conversationId: string
 	memoryIds: Array<string>
@@ -381,7 +382,7 @@ export async function upsertConversationSuppressions(input: {
  * D1 batch so acknowledgement cannot partially suppress.
  */
 export async function acknowledgeSurfacedMemoryWrites(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	conversationId: string
 	memoryIds: Array<string>
@@ -409,7 +410,7 @@ export async function acknowledgeSurfacedMemoryWrites(input: {
 }
 
 export async function pruneExpiredConversationSuppressions(
-	db: D1Database,
+	db: SqlDatabase,
 	now?: string,
 ) {
 	const cutoff = now ?? new Date().toISOString()

@@ -1,11 +1,11 @@
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
+
 import { expect, test, vi } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import * as secretService from '#mcp/secrets/service.ts'
 import { type SecretMetadata } from '#mcp/secrets/types.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { secretListCapability } from './secret-list.ts'
 
@@ -157,13 +157,11 @@ test('secretList matches implicit user-secret read access and still lists packag
 })
 
 test('secretList from execute returns caller-owned package metadata with package_id', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(
-		sqlite,
-		new URL('../../../../migrations/', import.meta.url),
-	)
+	await using database = await createTestDb({ userId: 'user-execute-list' })
+	const sqlite = database.pg
+
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
+		APP_DB: database.db,
 		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	} as Env

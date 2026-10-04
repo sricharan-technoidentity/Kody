@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	buildPackageAppSubdomainOrigin,
 	isDnsSafeUsername,
@@ -244,7 +245,7 @@ function toPackageSearchMatch(
 }
 
 export async function resolvePackageIdentitySearch(input: {
-	db: D1Database
+	db: SqlDatabase
 	env?: Env
 	userId: string | null
 	query: string

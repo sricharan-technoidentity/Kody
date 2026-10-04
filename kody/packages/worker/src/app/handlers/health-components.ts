@@ -1,6 +1,7 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type Action } from 'remix/router'
 import { type routes } from '#universal/routes.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { readFleetExecuteLastSuccess } from '#worker/execute-health-heartbeat.ts'
 import { type AppEnv } from '#worker/env-schema.ts'
 
@@ -61,8 +62,8 @@ export type HealthComponentsReport = {
 
 type HealthComponentsEnv = {
 	APP_COMMIT_SHA: AppEnv['APP_COMMIT_SHA']
-	APP_DB?: D1Database
-	AUDIT_DB?: D1Database
+	APP_DB?: SqlDatabase
+	AUDIT_DB?: SqlDatabase
 	OAUTH_KV?: KVNamespace
 	BUNDLE_ARTIFACTS_KV?: KVNamespace
 	COMMUNITY_ASSETS?: R2Bucket
@@ -122,7 +123,7 @@ export async function collectHealthComponents(
 				'app_db',
 				appDb
 					? () =>
-							runD1WithRetry(
+							runSqlWithRetry(
 								() => appDb.prepare('SELECT 1').first(),
 								d1CheckRetryOptions,
 							)
@@ -132,7 +133,7 @@ export async function collectHealthComponents(
 				'audit_db',
 				auditDb
 					? () =>
-							runD1WithRetry(
+							runSqlWithRetry(
 								() => auditDb.prepare('SELECT 1').first(),
 								d1CheckRetryOptions,
 							)

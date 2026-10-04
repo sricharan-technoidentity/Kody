@@ -3,7 +3,7 @@ import {
 	chunkArray,
 	maxD1BoundParameters,
 } from '@kody-internal/shared/chunk.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import {
 	repoSessionIndexNamespace,
 	type RepoSessionIndexEnv,
@@ -42,7 +42,7 @@ function mapEntitySourceRow(row: Record<string, unknown>): EntitySourceRow {
 }
 
 export async function insertEntitySource(
-	db: D1Database,
+	db: SqlDatabase,
 	row: EntitySourceRow,
 ): Promise<void> {
 	await db
@@ -83,7 +83,7 @@ export async function getEntitySourceById(
 }
 
 export async function listEntitySourcesByIds(
-	db: D1Database,
+	db: SqlDatabase,
 	ids: ReadonlyArray<string>,
 ): Promise<Array<EntitySourceRow>> {
 	if (ids.length === 0) return []
@@ -103,7 +103,7 @@ export async function listEntitySourcesByIds(
 }
 
 export async function getEntitySourceByIdForUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		userId: string
@@ -117,7 +117,7 @@ export async function getEntitySourceByIdForUser(
 }
 
 export async function getEntitySourceByEntity(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		userId: string
 		entityKind: EntityKind
@@ -136,7 +136,7 @@ export async function getEntitySourceByEntity(
 }
 
 export async function getEntitySourceByRepoId(
-	db: D1Database,
+	db: SqlDatabase,
 	repoId: string,
 ): Promise<EntitySourceRow | null> {
 	const result = await db
@@ -147,7 +147,7 @@ export async function getEntitySourceByRepoId(
 }
 
 export async function listEntitySourcesByUser(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<Array<EntitySourceRow>> {
 	const { results } = await db
@@ -162,7 +162,7 @@ export async function listEntitySourcesByUser(
 }
 
 export async function updateEntitySource(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		userId: string
@@ -200,7 +200,7 @@ export async function updateEntitySource(
 		add('external_check_until', input.externalCheckUntil)
 	}
 	add('updated_at', new Date().toISOString())
-	const result = await runD1WithRetry(() =>
+	const result = await runSqlWithRetry(() =>
 		db
 			.prepare(
 				`UPDATE entity_sources
@@ -214,7 +214,7 @@ export async function updateEntitySource(
 }
 
 export async function upsertEntitySource(
-	db: D1Database,
+	db: SqlDatabase,
 	row: EntitySourceRow,
 ): Promise<void> {
 	const existing = await getEntitySourceByEntity(db, {
@@ -240,7 +240,7 @@ export async function upsertEntitySource(
 export const externalReconcileGraceMs = 60 * 60 * 1000
 
 export async function markEntitySourcePendingExternalReconcile(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		id: string
 		userId: string
@@ -251,7 +251,7 @@ export async function markEntitySourcePendingExternalReconcile(
 		new Date(input.tokenExpiresAt).getTime() + externalReconcileGraceMs,
 	).toISOString()
 	const updatedAt = new Date().toISOString()
-	const result = await runD1WithRetry(() =>
+	const result = await runSqlWithRetry(() =>
 		db
 			.prepare(
 				`UPDATE entity_sources
@@ -281,7 +281,7 @@ export type ExternalReconcileCursor = {
 }
 
 export async function listEntitySourcesForExternalReconcile(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		before: string
 		limit: number
@@ -328,7 +328,7 @@ export async function listEntitySourcesForExternalReconcile(
 }
 
 export async function deleteEntitySource(
-	env: { APP_DB: D1Database } & Partial<RepoSessionIndexEnv>,
+	env: { APP_DB: SqlDatabase } & Partial<RepoSessionIndexEnv>,
 	input: {
 		id: string
 		userId: string

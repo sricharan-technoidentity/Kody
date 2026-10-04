@@ -1,6 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
 	countStaticDependentBundleArtifactPackages,
 	getPublishedBundleArtifactByIdentity,
@@ -11,49 +11,23 @@ import {
 	upsertPublishedBundleArtifactRow,
 } from './published-bundle-artifacts-repo.ts'
 
-function createPublishedBundleArtifactsDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE published_bundle_artifacts (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			source_id TEXT NOT NULL,
-			published_commit TEXT NOT NULL,
-			artifact_kind TEXT NOT NULL,
-			artifact_name TEXT,
-			entry_point TEXT NOT NULL,
-			kv_key TEXT NOT NULL,
-			dependencies_json TEXT NOT NULL DEFAULT '[]',
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
-		CREATE UNIQUE INDEX idx_published_bundle_artifacts_source_identity
-		ON published_bundle_artifacts(
-			user_id,
-			source_id,
-			artifact_kind,
-			COALESCE(artifact_name, ''),
-			entry_point
-		);
-		CREATE TABLE entity_sources (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			published_commit TEXT
-		);
-	`)
-	return createD1FromSqlite(sqlite)
-}
-
 async function setLivePublishedCommit(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { userId: string; sourceId: string; publishedCommit: string },
 ) {
 	await db
 		.prepare(
-			`INSERT OR REPLACE INTO entity_sources (id, user_id, published_commit)
-			VALUES (?, ?, ?)`,
+			`INSERT INTO entity_sources (id, user_id, published_commit, entity_kind, entity_id, repo_id, manifest_path, source_root, created_at, updated_at)
+ VALUES (?, ?, ?, 'package', ?, ?, 'package.json', '/', '2026-01-01', '2026-01-01')
+ ON CONFLICT(id) DO UPDATE SET published_commit = excluded.published_commit`,
 		)
-		.bind(input.sourceId, input.userId, input.publishedCommit)
+		.bind(
+			input.sourceId,
+			input.userId,
+			input.publishedCommit,
+			input.sourceId,
+			input.sourceId,
+		)
 		.run()
 }
 
@@ -78,7 +52,7 @@ function createStaticDependentsDb(input: {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 test('static dependent bundle artifact queries count and list bounded rows by source id', async () => {
@@ -163,7 +137,8 @@ test('static dependent bundle artifact queries count and list bounded rows by so
 })
 
 test('upsertPublishedBundleArtifactRow keeps module and importable-module distinct and recovers a raced identity insert', async () => {
-	const db = createPublishedBundleArtifactsDb()
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	const identity = {
 		userId: 'user-1',
 		sourceId: 'source-1',
@@ -298,7 +273,7 @@ test('upsertPublishedBundleArtifactRow recovers when lookup misses and insert hi
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	const id = await upsertPublishedBundleArtifactRow(db, {
 		userId: 'user-1',
@@ -326,7 +301,8 @@ test('upsertPublishedBundleArtifactRow recovers when lookup misses and insert hi
 })
 
 test('upsertPublishedBundleArtifactRow leaves a newer live identity alone when a stale persist recovers', async () => {
-	const db = createPublishedBundleArtifactsDb()
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	const identity = {
 		userId: 'user-1',
 		sourceId: 'source-1',

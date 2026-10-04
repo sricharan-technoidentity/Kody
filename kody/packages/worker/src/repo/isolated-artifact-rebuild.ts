@@ -5,10 +5,10 @@ import { isolatedRunnerResourceLimitAdvice } from './isolated-runner-limit-messa
 
 /**
  * Heavy published-package artifact rebuilds run in fresh, throwaway
- * `REPO_SESSION` isolates instead of the long-lived publish session Durable
- * Object. One large package (for example morning-briefing) could otherwise
+ * `RepoSession` isolates instead of the long-lived publish session interpreter
+ * session. One large package (for example morning-briefing) could otherwise
  * push the session isolate (workspace + git state + esbuild-wasm) over the
- * Durable Object memory limit and kill the publish (same class of failure as
+ * interpreter session memory limit and kill the publish (same class of failure as
  * kentcdodds/kody#987 for check phases). Each rebuild chunk gets a brand-new
  * DO id, so:
  *
@@ -16,7 +16,7 @@ import { isolatedRunnerResourceLimitAdvice } from './isolated-runner-limit-messa
  *   each other (esbuild-wasm memory in particular never shrinks once grown),
  * - a package too large for even a single target surfaces as a failed rebuild
  *   with an actionable message instead of an opaque isolate reset, and
- * - the throwaway instances never touch their own Durable Object storage, so
+ * - the throwaway instances never touch their own interpreter session storage, so
  *   nothing persists for their random ids.
  *
  * Workspace source files are staged once in KV with a short TTL (collected by
@@ -65,7 +65,7 @@ export type IsolatedArtifactRebuildRequest = {
 
 /**
  * Staged snapshots are user-owned content, so the staging key is namespaced
- * by `userId` and the consuming Durable Object verifies the key belongs to
+ * by `userId` and the consuming interpreter session verifies the key belongs to
  * the requesting user before reading it.
  */
 export function isolatedArtifactRebuildStagingKeyForUser(userId: string) {
@@ -145,9 +145,7 @@ function describeTargets(
 export function createIsolatedArtifactRebuildRunner(
 	env: Env | undefined,
 ): IsolatedArtifactRebuildRunner | null {
-	const namespace = (
-		env as (Env & { REPO_SESSION?: DurableObjectNamespace }) | undefined
-	)?.REPO_SESSION
+	const namespace = env?.REPO_SESSIONS
 	const stagingKv = (
 		env as (Env & { BUNDLE_ARTIFACTS_KV?: KVNamespace }) | undefined
 	)?.BUNDLE_ARTIFACTS_KV
@@ -164,10 +162,8 @@ export function createIsolatedArtifactRebuildRunner(
 			// A fresh, user-namespaced id per chunk puts every heavy rebuild
 			// wave in its own isolate. The instance never touches its Durable
 			// Object storage, so nothing persists for the random name.
-			const stub = namespace.get(
-				namespace.idFromName(
-					`isolated-artifact-rebuild-${request.userId}-${crypto.randomUUID()}`,
-				),
+			const stub = namespace(
+				`isolated-artifact-rebuild-${request.userId}-${crypto.randomUUID()}`,
 			) as unknown as IsolatedArtifactRebuildStub
 			try {
 				return await stub.runIsolatedArtifactRebuild(request)

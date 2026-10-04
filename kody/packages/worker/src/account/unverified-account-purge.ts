@@ -1,7 +1,8 @@
-import * as Sentry from '@sentry/cloudflare'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { shouldRunRetentionCron } from '@kody-internal/shared/jobs/scheduled-lanes.ts'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { auditDatabaseFromEnv, logAuditEvent } from '#worker/audit-log.ts'
 import {
 	AccountDeletionWritersActiveError,
@@ -230,13 +231,13 @@ function ageDays(createdAt: string, now: Date) {
 }
 
 async function listUnverifiedAccountsPage(input: {
-	db: D1Database
+	db: SqlDatabase
 	ageCutoff: string
 	retryBackoffCutoff: string
 	batchSize: number
 }) {
 	const conditions = unverifiedAccountSqlConditions().join('\n			AND ')
-	const { results } = await runD1WithRetry(() =>
+	const { results } = await runSqlWithRetry(() =>
 		input.db
 			.prepare(
 				`SELECT id, stable_user_id, email, created_at
@@ -252,14 +253,14 @@ async function listUnverifiedAccountsPage(input: {
 }
 
 async function claimUnverifiedAccountForPurge(input: {
-	db: D1Database
+	db: SqlDatabase
 	dbUserId: number
 	now: Date
 	retryBackoffCutoff: string
 }): Promise<UnverifiedAccountClaim> {
 	const deletingAt = utcSqliteTimestamp(input.now)
 	const eligibility = unverifiedPersonEligibilitySql.join('\n					AND ')
-	const createdResult = await runD1WithRetry(() =>
+	const createdResult = await runSqlWithRetry(() =>
 		input.db
 			.prepare(
 				`UPDATE users
@@ -274,7 +275,7 @@ async function claimUnverifiedAccountForPurge(input: {
 	if ((createdResult.meta.changes ?? 0) === 1) {
 		return { claimed: true, created: true, deletingAt }
 	}
-	const restampedResult = await runD1WithRetry(() =>
+	const restampedResult = await runSqlWithRetry(() =>
 		input.db
 			.prepare(
 				`UPDATE users

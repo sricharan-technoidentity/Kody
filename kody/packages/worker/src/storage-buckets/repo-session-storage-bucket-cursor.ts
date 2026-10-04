@@ -1,6 +1,7 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /** Platform-owned singleton (created and seeded by the schema migrations). */
 export async function readRepoSessionStorageBucketCursor(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<string> {
 	const row = await db
 		.prepare(
@@ -12,7 +13,7 @@ export async function readRepoSessionStorageBucketCursor(
 }
 
 export async function writeRepoSessionStorageBucketCursor(input: {
-	db: D1Database
+	db: SqlDatabase
 	position: string
 	now?: Date
 }): Promise<void> {

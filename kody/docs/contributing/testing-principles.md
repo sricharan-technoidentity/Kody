@@ -9,19 +9,23 @@ when that makes a single test longer and more assertion-heavy.
 Choose the lightest flavor that can falsify the behavior. Filename suffixes pick
 the Vitest project (`vitest.config.ts`):
 
-| Flavor / command                                                                    | Use when                                                                                                                                                                                                                                                                                                        | Avoid when                                                                                                                                                                                                                                         |
-| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `*.node.test.ts` (`npm run test:node` / node-unit; also in `npm run test`)          | Pure server logic, pure functions, handlers/services that can run against an in-memory `node:sqlite` D1 facade (`createD1FromSqlite` in `packages/worker/src/test-support/`), or code that is correctly covered by spies/stubs (for example `vi.spyOn` on `recordUsage`). Fast feedback; no Workers runtime.    | The assertion needs real Cloudflare bindings (`env.APP_DB`, KV, DO, R2) or Workers-only APIs that the node stubs do not honestly exercise.                                                                                                         |
-| `*.workers.test.ts` (`npm run test:workers` / workers-unit; also in `npm run test`) | The behavior depends on real local bindings from `cloudflare:workers` / the Vitest Workers pool (D1 schema + queries, KV reads/writes, DO stubs as configured). Prefer shared explicit-import factories from `packages/worker/src/test-support/` and domain `test-schema.ts` helpers over copy-pasted seed SQL. | The file never reads `env` / bindings and only tests pure registry or string logic — prefer `*.node.test.ts` instead (several `src/mcp/**` workers suites are historical misclassifications; leave them unless you are already editing that area). |
-| `*.mcp-e2e.test.ts` (`npm run test:mcp`)                                            | A tiny smoke suite for the real MCP HTTP transport, OAuth, and package-app session wiring.                                                                                                                                                                                                                      | Capability-by-capability coverage that does not need that transport — put those beside the implementation as node or workers tests.                                                                                                                |
-| Playwright (`npm run test:e2e:run`)                                                 | A very small number of user-critical happy-path journeys through the worker + client. See [end-to-end testing](./end-to-end-testing.md).                                                                                                                                                                        | Edge cases, copy pinning, or anything a faster unit/integration test can cover.                                                                                                                                                                    |
+| Flavor / command                         | Use when                                                                                                                                                                                                                                                                           | Avoid when                                                                              |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `*.node.test.ts` (`npm run test:node`)   | Server logic, handlers and adapters. Use `createTestDb({ userId })` for the migrated PostgreSQL baseline and scoped writer/reader, or `createTargetTestEnv()` for the complete mock AWS/Temporal environment. Use native workerd Runner tests for published package compatibility. | In-process fakes cannot prove sandbox compatibility or HTTP/browser transport behavior. |
+| `*.mcp-e2e.test.ts` (`npm run test:mcp`) | A small suite for native Node MCP transport, OAuth and package-app session wiring.                                                                                                                                                                                                 | Capability coverage that a node test can exercise.                                      |
+| Playwright (`npm run test:e2e:run`)      | The selected POC browser journeys through the native front door and client. See [end-to-end testing](./end-to-end-testing.md).                                                                                                                                                     | Edge cases and behavior covered by faster tests.                                        |
 
-**Usage metering example** (lifted from
-[usage metering](./architecture/usage-metering.md)): in `*.node.test.ts`, spy on
-`recordUsage` and assert call shape for success and failure paths. In
-`*.workers.test.ts` with a real local D1, call `ensureUsageRollupsTestSchema`
-from `packages/worker/src/usage/test-schema.ts` and assert on `usage_rollups`
-rows instead of spying.
+The migration POC no longer runs a Workers test pool. The retained legacy SQLite
+fixtures are pending P8 conversion; new application tests use PGlite.
+`database.pg` is reserved for fixture seeding and raw assertions. Execute the
+behavior under test through `database.db`, `database.reader` or an explicit
+operator role. Owner tests must not use a superuser to bypass RLS. Dispose
+fixtures with `await using` or their explicit `close()` method.
+
+For usage metering, spy on `recordUsage` when the call shape is the contract.
+Use an owner-scoped PostgreSQL fixture when the persisted rollup is the
+contract. Temporal workflow/activity tests use a standalone local test server;
+AWS adapters use mock credentials and in-memory service doubles.
 
 Shared test helpers live under `packages/worker/src/test-support/`. Import
 factories explicitly inside each test (or a per-test factory). Do not introduce
@@ -108,22 +112,9 @@ factories explicitly inside each test (or a per-test factory). Do not introduce
 - Run server/unit tests with `npm run test` (plus targeted Vitest paths when
   needed) to avoid Playwright spec discovery and accidental matches like
   `packages/worker/src/mcp/mcp-server.mcp-e2e.test.ts`.
-- Workers-unit harness rules (see
-  [decision 0011](./decisions/0011-workers-unit-pool-harness.md)):
-  - **Prefer `*.node.test.ts`** unless the assertion needs real Cloudflare
-    bindings or Workers-only APIs (`@cloudflare/worker-bundler`, DO RPC, etc.).
-  - **Do not** warm Durable Objects from `globalSetup` (Node-only) or from
-    workers-unit `setupFiles` (breaks webhook / scheduled / `packageSave`
-    suites).
-  - **Do not** use `--no-isolate` / shared storage to chase suite wall clock.
-    Per-file isolation stays; disabling it breaks suites that assume a clean
-    store.
-  - **Do not** stub away DOs in workers tests when binding fidelity is the
-    point, and do not “fix” pool slowness with `--no-verify` or a shorter local
-    `testTimeout`. Shared `testTimeout` is 20s so the pool’s ~10s first DO RPC
-    in a file does not fail the default budget.
-  - Pool cold load is inherent today; suite wall clock will not match production
-    RPC latency until the upstream pool improves.
+- Keep per-file isolation for Node, PGlite, Temporal and Runner tests. Native
+  workerd compatibility tests run through the Runner harness; an in-process fake
+  alone does not establish that published packages run unchanged.
 - Vitest is configured with `clearMocks` and `mockReset` globally
   (`vitest-shared.ts`). Each test starts with a clean mock slate; inline the
   setup a test needs rather than relying on leftover state from a prior case.
@@ -146,13 +137,10 @@ factories explicitly inside each test (or a per-test factory). Do not introduce
     (`packages/worker/src/test-support/incidental-runtime-warnings.ts`) for the
     bundler/registry-runtime noise set. Anything outside the allowlist still
     fails the test.
-  - Workerd logs Durable Object / WorkerEntrypoint RPC rejections as
-    `uncaught exception` even when the caller catches them. Do not filter those
-    dumps — a real isolate crash must stay visible. Prevent the RPC throw
-    instead: fail closed in the sandbox or host tool before the gateway/DO call
-    (retriever `fetch`, read-only `storage.sql`), and when a test must exercise
-    an in-object abort, call the method inside `runInDurableObject` rather than
-    across the test RPC stub.
+  - Keep native workerd isolate failures visible. When the host can reject an
+    invalid request before entering the sandbox, assert that rejection through
+    the Runner/broker harness. Do not filter isolate crash dumps to obtain a
+    passing test.
 
   Keep test output free of stray logging.
 

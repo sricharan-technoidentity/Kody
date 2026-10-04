@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { maxD1BoundParameters } from '@kody-internal/shared/chunk.ts'
 import { type PGlite } from '@electric-sql/pglite'
 import { expect, test } from 'vitest'
@@ -35,7 +36,7 @@ async function insertPackageSecret(
 test('listPackageScopeSecretMetadata chunks package ids to stay within the D1 binding limit', async () => {
 	const userId = 'user-with-many-packages'
 	await using database = await createTestDb({ userId })
-	const db = database.reader as unknown as D1Database
+	const db = database.reader as unknown as SqlDatabase
 	const packageIds = Array.from(
 		{ length: maxD1BoundParameters + 1 },
 		(_, index) => `package-${String(index).padStart(3, '0')}`,
@@ -76,7 +77,7 @@ test('listPackageScopeSecretMetadata chunks package ids to stay within the D1 bi
 
 test('listSecretBucketsByScope returns caller-owned package buckets only (RLS and the user filter)', async () => {
 	await using database = await createTestDb({ userId: 'user-1' })
-	const db = database.reader as unknown as D1Database
+	const db = database.reader as unknown as SqlDatabase
 	await insertPackageSecret(database.pg, {
 		bucketId: 'bucket-owned',
 		userId: 'user-1',

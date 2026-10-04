@@ -1,9 +1,9 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { DeleteItemCommand } from '@aws-sdk/client-dynamodb'
 import { expect, test, vi } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { planLimits } from '#universal/plans.ts'
 import { consumeDailyEntitlement } from '#worker/entitlements/service.ts'
-import type * as EntitlementService from '#worker/entitlements/service.ts'
 import { userMeterRpc } from '#worker/entitlements/user-meter-client.ts'
 import {
 	ComputeOverageLimitError,
@@ -20,31 +20,6 @@ import {
 	seedPackageResolution,
 } from '#worker/test-support/package-invocations.ts'
 import { automationInvocationsPerDayResource } from './automation-invocation-entitlement.ts'
-
-const entitlementServiceMock = vi.hoisted(() => ({
-	stopPastInclude: false,
-}))
-
-vi.mock('#worker/entitlements/service.ts', async (importOriginal) => {
-	const actual = await importOriginal<typeof EntitlementService>()
-	return {
-		...actual,
-		consumeDailyEntitlement: async (
-			...args: Parameters<typeof actual.consumeDailyEntitlement>
-		) => {
-			if (entitlementServiceMock.stopPastInclude) {
-				throw new ComputeOverageLimitError({
-					resource: 'unique_worker_days',
-					plan: 'pro',
-					limit: 350,
-					current: 351,
-					creditsStatus: 'add_credits',
-				})
-			}
-			return await actual.consumeDailyEntitlement(...args)
-		},
-	}
-})
 
 vi.mock('#worker/package-registry/repo.ts', () => ({
 	getSavedPackageById: (...args: Array<unknown>) =>
@@ -101,7 +76,7 @@ vi.mock('#worker/run-records/package-subscriptions.ts', () => ({
 }))
 
 vi.mock('#worker/identity/background-mcp-user.ts', () => ({
-	resolveBackgroundMcpUser: async (_db: D1Database, userId: string) => ({
+	resolveBackgroundMcpUser: async (_db: SqlDatabase, userId: string) => ({
 		userId,
 		email: 'owner@example.com',
 		username: 'owner',
@@ -321,7 +296,23 @@ test('an empty Pro wallet past the monthly include gets a 429 stop before sandbo
 	const db = createDatabase()
 	const { env } = createEnvWithUserMeter(db)
 	const token = createToken()
-	entitlementServiceMock.stopPastInclude = true
+	const originalMeters = env.USER_METERS!
+	env.USER_METERS = {
+		forUser(userId: string) {
+			return {
+				...originalMeters.forUser(userId),
+				async consume() {
+					throw new ComputeOverageLimitError({
+						resource: 'unique_worker_days',
+						plan: 'pro',
+						limit: 350,
+						current: 351,
+						creditsStatus: 'add_credits',
+					})
+				},
+			}
+		},
+	}
 	try {
 		const denied = await invokePackageExport({
 			env,
@@ -352,6 +343,6 @@ test('an empty Pro wallet past the monthly include gets a 429 stop before sandbo
 		})
 		expect(repoMockModule.runBundledModuleWithRegistry).not.toHaveBeenCalled()
 	} finally {
-		entitlementServiceMock.stopPastInclude = false
+		env.USER_METERS = originalMeters
 	}
 })

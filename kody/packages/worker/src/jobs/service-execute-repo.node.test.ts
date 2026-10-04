@@ -34,7 +34,7 @@ vi.mock('#worker/repo/repo-sessions.ts', async () =>
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionsMock(),
 )
-vi.mock('#worker/repo/repo-session-do.ts', async () =>
+vi.mock('#worker/repo/repo-session-service.ts', async () =>
 	(
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionDoMock(),
@@ -77,7 +77,7 @@ test('executeJobOnce repo-backed job execution workflow', async () => {
 			BUNDLE_ARTIFACTS_KV: createBundleArtifactsKv(),
 			LOADER: {} as WorkerLoader,
 			REPO_SESSION: {} as DurableObjectNamespace,
-			STORAGE_RUNNER: createStorageRunnerBinding(),
+			STORAGE_CELLS: createStorageRunnerBinding(),
 		})
 		mockRepoPersistence()
 		const callerContext = createBaseCallerContext()
@@ -189,7 +189,7 @@ test('executeJobOnce repo-backed job execution workflow', async () => {
 			}
 			const repoSessionRpcSpy = vi
 				.spyOn(
-					await import('#worker/repo/repo-session-do.ts'),
+					await import('#worker/repo/repo-session-service.ts'),
 					'repoSessionRpc',
 				)
 				.mockReturnValue(sessionClient as never)
@@ -387,7 +387,10 @@ test('executeJobOnce repo-backed job execution workflow', async () => {
 		}
 
 		const repoSessionRpcSpy = vi
-			.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+			.spyOn(
+				await import('#worker/repo/repo-session-service.ts'),
+				'repoSessionRpc',
+			)
 			.mockReturnValue(sessionClient as never)
 		const executeSpy = vi
 			.spyOn(
@@ -661,7 +664,10 @@ test('executeJobOnce repo session bundling and check policy workflow', async () 
 		}
 
 		const repoSessionRpcSpy = vi
-			.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+			.spyOn(
+				await import('#worker/repo/repo-session-service.ts'),
+				'repoSessionRpc',
+			)
 			.mockReturnValue(sessionClient as never)
 		const executeSpy = vi
 			.spyOn(
@@ -822,7 +828,10 @@ test('executeJobOnce repo session bundling and check policy workflow', async () 
 		}
 
 		const repoSessionRpcSpy = vi
-			.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+			.spyOn(
+				await import('#worker/repo/repo-session-service.ts'),
+				'repoSessionRpc',
+			)
 			.mockReturnValue(sessionClient as never)
 		const executeSpy = vi
 			.spyOn(
@@ -1032,7 +1041,10 @@ test('executeJobOnce repo session bundling and check policy workflow', async () 
 		])
 
 		const repoSessionRpcSpy = vi
-			.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+			.spyOn(
+				await import('#worker/repo/repo-session-service.ts'),
+				'repoSessionRpc',
+			)
 			.mockReturnValue(sessionClient as never)
 		const executeSpy = vi
 			.spyOn(
@@ -1199,7 +1211,10 @@ test('executeJobOnce repo session bundling and check policy workflow', async () 
 		}
 
 		const repoSessionRpcSpy = vi
-			.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+			.spyOn(
+				await import('#worker/repo/repo-session-service.ts'),
+				'repoSessionRpc',
+			)
 			.mockReturnValue(sessionClient as never)
 		const executeSpy = vi.spyOn(
 			await import('#mcp/run-kody-registry.ts'),

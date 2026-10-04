@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	queryAnalyticsEngineSql,
 	resolveUsageEventsDataset,
@@ -34,7 +35,7 @@ const hourMs = fleetPackageErrorRateHourWindowMs
 
 export type FleetPackageErrorRateEnv = {
 	USAGE_EVENTS?: AnalyticsEngineDataset
-	APP_DB?: D1Database
+	APP_DB?: SqlDatabase
 	BUNDLE_ARTIFACTS_KV?: KVNamespace
 	APP_BASE_URL?: string
 	CLOUDFLARE_ACCOUNT_ID?: string

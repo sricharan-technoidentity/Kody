@@ -1,8 +1,8 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import {
 	addEmailNotificationDestination,
@@ -17,21 +17,25 @@ import {
 	markEmailNotificationDestinationVerified,
 } from './destinations.ts'
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
+async function createMigratedDb() {
+	const sqlite = await createTestPg()
+
 	return {
 		sqlite,
-		db: createD1FromSqlite(sqlite),
+		db: createPgDatabase({
+			connection: sqlite,
+			role: 'kody_writer',
+			userId: await createStableUserIdFromEmail('owner@example.com'),
+		}),
 	}
 }
 
 async function seedUser(
-	sqlite: DatabaseSync,
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
 	input: { id: number; email: string; username: string; verified?: boolean },
 ) {
 	const stableUserId = await createStableUserIdFromEmail(input.email)
-	sqlite.exec(`
+	await sqlite.exec(`
 		INSERT INTO users (
 			id, username, email, stable_user_id, password_hash, email_verified_at
 		) VALUES (
@@ -47,7 +51,7 @@ async function seedUser(
 }
 
 test('identity is always listed, extras verify before they are sendable, and default can move off identity', async () => {
-	const { sqlite, db: appDb } = createMigratedDb()
+	const { sqlite, db: appDb } = await createMigratedDb()
 	const userStableId = await seedUser(sqlite, {
 		id: 1,
 		email: 'owner@example.com',
@@ -171,7 +175,7 @@ test('identity is always listed, extras verify before they are sendable, and def
 })
 
 test('additional destinations cap at five extras and identity email cannot be added', async () => {
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	await seedUser(sqlite, {
 		id: 1,
 		email: 'owner@example.com',
@@ -215,7 +219,7 @@ test('additional destinations cap at five extras and identity email cannot be ad
 })
 
 test('display-name and odd email forms store the bare address and become sendable', async () => {
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	const userStableId = await seedUser(sqlite, {
 		id: 1,
 		email: 'owner@example.com',
@@ -238,9 +242,10 @@ test('display-name and odd email forms store the bare address and become sendabl
 	expect(added.created).toBe(true)
 	expect(added.destination.email).toBe('phone@example.com')
 	expect(
-		sqlite
-			.prepare(`SELECT email FROM email_notification_destinations WHERE id = ?`)
-			.get(added.destination.id) as { email: string },
+		(await pgQuery(sqlite).get(
+			`SELECT email FROM email_notification_destinations WHERE id = ?`,
+			added.destination.id,
+		)) as { email: string },
 	).toEqual({ email: 'phone@example.com' })
 
 	await markEmailNotificationDestinationVerified({
@@ -248,7 +253,7 @@ test('display-name and odd email forms store the bare address and become sendabl
 		destinationId: added.destination.id,
 		userId: 1,
 	})
-	sqlite.exec(`
+	await sqlite.exec(`
 		INSERT INTO email_notification_destinations (
 			id, user_id, email, verified_at, is_default
 		) VALUES (
@@ -270,7 +275,7 @@ test('display-name and odd email forms store the bare address and become sendabl
 })
 
 test('changing identity email to an extra destination drops that extra row', async () => {
-	const { sqlite, db } = createMigratedDb()
+	const { sqlite, db } = await createMigratedDb()
 	await seedUser(sqlite, {
 		id: 1,
 		email: 'owner@example.com',

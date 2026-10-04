@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { expect, test, vi } from 'vitest'
 import { recordFeatureFlagExposures } from './exposure.ts'
@@ -13,7 +14,7 @@ test('skips exposure recording without measured flags or a stable user id', asyn
 			FLAG_EXPOSURES: {
 				writeDataPoint,
 			} as unknown as AnalyticsEngineDataset,
-			APP_DB: { batch } as unknown as D1Database,
+			APP_DB: { batch } as unknown as SqlDatabase,
 		},
 		{
 			stableUserId: 'user-1',

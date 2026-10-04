@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const savedPackage = {
@@ -161,7 +162,7 @@ const { createAccountPackagesApiHandler, createAccountPackagesHandler } =
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		COOKIE_SECRET: 'secret',
 	} as Env
 }

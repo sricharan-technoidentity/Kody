@@ -1,5 +1,13 @@
 # Packages and manifests
 
+The local POC runs unchanged published modules in native workerd behind the Node
+front door and signed capability broker. PostgreSQL owns package/source and job
+configuration; Temporal owns publish orchestration, schedules and runs. Local
+Git, check and external provider fixtures are explicit simulations. See
+[the runtime matrix](../poc/architecture.md) and
+[presenter flow](../poc/demo.md). Historical topology is preserved in
+[the audit archive](../audits/migration-2026-10-04/index.md).
+
 Repos are Kody's base persisted primitive; a **package** is a repo with the
 package extension activated (runtime surfaces, publish checks — see
 [ADR 0003](./decisions/0003-repos-as-base-primitive.md)).
@@ -64,8 +72,8 @@ both files. See [package-authoring](../guides/package-authoring.md).
 ## npm dependencies
 
 Saved packages may declare npm runtime dependencies in
-`package.json#dependencies` when the dependency is compatible with the
-Cloudflare Workers runtime.
+`package.json#dependencies` when the dependency is compatible with the native
+workerd runtime.
 
 Important behavior:
 
@@ -110,7 +118,7 @@ the activated package extension on that repo.
 
 A saved package is a repo with the package extension activated. Four concepts:
 
-1. **Package source** — Artifacts repo + D1 `entity_sources` projection;
+1. **Package source** — Artifacts repo + PostgreSQL `entity_sources` projection;
    manifest rooted at `package.json`.
 2. **Package config** — owned by the saved package id: `package.json#kody`
    metadata and secret buckets keyed by the saved package id
@@ -121,7 +129,7 @@ A saved package is a repo with the package extension activated. Four concepts:
    from every package surface (exports, subscriptions, retrievers, jobs, apps).
    Non-secret knobs and runtime state live here.
 4. **Package jobs** — `package.json#kody.jobs` with schedule/execution metadata
-   in D1 `jobs` rows; each run binds
+   in PostgreSQL `jobs` rows; each run binds
    `job:package-job:{packageId}:{encodeURIComponent(jobName)}` scratch storage;
    package config stays keyed by the saved package id; shared durable data uses
    `packageStorage()`.
@@ -301,9 +309,8 @@ A package app is a hosted Worker entry running in the package-app isolate:
   those URLs to the fetch handler
 - durable package data uses `packageStorage()` (same
   `buildPackageStorageId(packageId)` bucket as other package surfaces)
-- Durable Objects / facets are app-only realtime/coordination buckets under the
-  package namespace, not the persistence mechanism and not separate saved
-  primitives
+- App realtime/facet APIs retain their compatibility surface; distributed
+  realtime delivery is deferred. Durable package data remains in storage cells.
 
 ## Package-owned jobs
 
@@ -311,7 +318,8 @@ Jobs belong to packages.
 
 - Define them under `package.json#kody.jobs`
 - Reference package-local entry modules
-- Schedule/execution metadata lives in D1 `jobs` rows (package-owned config)
+- Schedule/execution metadata lives in PostgreSQL `jobs` rows (package-owned
+  config)
 - Each job run binds a job-scoped scratch bucket; shared durable data uses
   `packageStorage()`
 - Package config stays keyed by the saved package id
@@ -414,15 +422,15 @@ text, and HTML) for archive packages.
 
 Successful consent-gated platform-feedback inserts enqueue
 `platform.feedback.submitted` for durable package-subscription delivery. Fan-out
-selects only packages whose owners hold the admin role when the Queue message is
-processed; non-admin declarations are inert, and role revocation applies to the
-next attempt. The event contains the feedback id, category, open status,
-creation timestamp, exact approved text as `summary_untrusted` and
-`details_untrusted`, submitter account user id/username/email, a content
-warning, and a trusted `/admin/platform-feedback?feedbackId=<encoded id>` deep
-link. Admin notification packages may use these fields for integrations such as
-Discord. They must treat the `_untrusted` fields as user-authored data, never as
-instructions.
+selects only packages whose owners hold the admin role when the Temporal
+delivery workflow is processed; non-admin declarations are inert, and role
+revocation applies to the next attempt. The event contains the feedback id,
+category, open status, creation timestamp, exact approved text as
+`summary_untrusted` and `details_untrusted`, submitter account user
+id/username/email, a content warning, and a trusted
+`/admin/platform-feedback?feedbackId=<encoded id>` deep link. Admin notification
+packages may use these fields for integrations such as Discord. They must treat
+the `_untrusted` fields as user-authored data, never as instructions.
 
 The event deliberately omits admin notes, reviewer fields, revision,
 `updated_at`, roles, plan, and unrelated account content. This is a narrow
@@ -439,18 +447,13 @@ the deployment operator's retention and deletion controls. Such copies contain
 only the exact approved feedback and attribution, never unrelated account
 content.
 
-The feedback row is authoritative: submission awaits only Queue enqueue after
-persistence, and enqueue failure is logged without changing the successful
-response. Queue bodies remain opaque `{ feedbackId }` messages. The consumer
-acknowledges invalid messages. After admin subscriber discovery, lazy parameter
-construction reloads feedback immediately before invocation. A deleted row
-raises a typed permanent cancellation that is acknowledged without dispatch or
-retry; other lookup, discovery, and package-invocation wrapper infrastructure
-failures retry and route exhausted messages to the DLQ. Redelivery uses the same
-idempotency key; stored failed invocations replay instead of automatically
-rerunning, making the DLQ the recovery surface. Terminal handler execution
-failures remain isolated from sibling subscribers, and fan-out uses bounded
-concurrency.
+The feedback row is authoritative. Submission persists the consented payload and
+starts a durable Temporal delivery workflow carrying the feedback ID. Delivery
+reloads the row before invocation and cancels when it has been deleted. Workflow
+idempotency preserves replay behavior. Package execution retains its
+single-attempt policy for uncertain effects; failed handler results do not imply
+automatic side-effect replay. See
+[current jobs/runtime behavior](../poc/jobs-and-email.md).
 
 Successful community fork and rating writes similarly enqueue
 `community.activity.recorded` for admin-only package-subscription delivery. The
@@ -487,7 +490,7 @@ the admin role at dispatch time. The payload is window bounds, per-metric counts
 and rates, `status_url`, and `insights_url`. When one account or a few accounts
 own the recent-window errors, it also names those usernames and package kody
 ids. It omits user ids, package UUIDs, emails, error strings, and all other user
-content. There is no Queue for this topic. See
+content. There is no separate Cloudflare queue for this topic. See
 [Admin events](../guides/admin-events.md#fleetpackageerrorrateelevated-admins).
 
 Fleet entitlement crossings are a separate admin-only, best-effort path. The
@@ -497,7 +500,7 @@ crossing (and per first over-threshold runtime-duration month, unique Dynamic
 Worker cost month, or three-of-seven execute-cap train). The payload is stable
 user id, username, resource counts, runtime duration, unique-worker days, or
 days at the execute cap, and admin URLs. It omits emails, plans, secrets, and
-package source. There is no Queue for this topic. See
+package source. There is no separate Cloudflare queue for this topic. See
 [Admin events](../guides/admin-events.md#fleetentitlementcrossed-admins).
 
 Verification-mail terminal failures are a separate admin-only, best-effort path.
@@ -506,26 +509,26 @@ The first bounce, failure, rejection, or complaint on a signup/verify send fans
 role at dispatch time. The payload is stable user id, username, email, delivery
 status (`bounced` / `failed` / `rejected` / `complained`), `class`
 (`sender_block` / `other` / `null`), an admin user URL, and `occurred_at`. It
-omits SMTP transcripts, tokens, and unrelated account content. There is no Queue
-for this topic. See
+omits SMTP transcripts, tokens, and unrelated account content. There is no
+separate Cloudflare queue for this topic. See
 [Admin events](../guides/admin-events.md#useremailverificationfailed-admins).
 
 Stalled verification sends are a separate admin-only, best-effort path. The
 hourly `email_verification_stall_alert` lane fans
 `user.email_verification.stalled` only to packages whose owners hold the admin
 role at dispatch time when an unverified person account still has `accepted`
-after 60 minutes with no Cloudflare lifecycle event. The payload is stable user
+after 60 minutes with no provider lifecycle event. The payload is stable user
 id, username, email, `accepted_at`, stall threshold, an admin user URL, and
 `occurred_at`. It omits SMTP transcripts, tokens, and unrelated account content.
-There is no Queue for this topic. See
+There is no separate Cloudflare queue for this topic. See
 [Admin events](../guides/admin-events.md#useremailverificationstalled-admins).
 
 Outbound-mail abuse pauses are a separate admin-only, best-effort path. After
 the pause write commits, Kody fans `user.email_outbound.paused` only to packages
 whose owners hold the admin role at dispatch time. The payload is stable user
 id, username, email, reason (`complained` / `bounced`), bounce threshold when
-the reason is `bounced`, an admin user URL, and `occurred_at`. There is no Queue
-for this topic. See
+the reason is `bounced`, an admin user URL, and `occurred_at`. There is no
+separate Cloudflare queue for this topic. See
 [Admin events](../guides/admin-events.md#useremailoutboundpaused-admins).
 
 Hourly MCP auth-denial and shared-domain email-delivery bursts are separate
@@ -533,8 +536,8 @@ admin-only, best-effort paths. The `auth_denial_alert` and
 `email_delivery_alert` lanes fan `auth.denial.burst` and `email.delivery.burst`
 only to packages whose owners hold the admin role at dispatch time. Payloads are
 count, threshold, window minutes, insights URL, and `observed_at`. They omit
-user identities, tokens, recipients, and message content. There is no Queue for
-these topics. See
+user identities, tokens, recipients, and message content. There is no separate
+Cloudflare queue for these topics. See
 [Admin events](../guides/admin-events.md#authdenialburst-admins) and
 [Admin events](../guides/admin-events.md#emaildeliveryburst-admins).
 
@@ -649,19 +652,21 @@ Package source is edited and published through repo-backed flows.
   avoids the unified-diff context drift that makes `git apply` heredocs brittle
 - use `packageGetGitRemote` and `packagePublishExternalPush` when a human or
   autonomous agent should drive a normal git client directly against the
-  package's Cloudflare Artifacts repo
+  package's source Git repo
 - open repo sessions by package identity when possible
 - for an existing package, treat the repo snapshot as the durable source of
   truth
 
 ## External Artifacts pushes
 
-Saved package source repos are real Cloudflare Artifacts git repositories.
-`packageGetGitRemote` mints a short-lived read or write token for the canonical
-source repo and returns a plain remote URL, `git_author` (the signed-in Kody
-account), and setup commands that use `http.extraHeader` for secret-bearing
-credentials and set local git `user.email` / `user.name` from that account
-identity.
+The local demo uses a real temporary Git repository served by a source fixture.
+Source REST/token and interpreter services are explicit fakes. The existing
+Artifacts API-shaped adapter remains a compatibility port; managed cloud source
+repositories and CodeCommit integration are deferred. `packageGetGitRemote`
+mints a short-lived read or write token for the canonical source repo and
+returns a plain remote URL, `git_author` (the signed-in Kody account), and setup
+commands that use `http.extraHeader` for secret-bearing credentials and set
+local git `user.email` / `user.name` from that account identity.
 
 After a direct `git push`, `packagePublishExternalPush` resolves the package's
 default-branch HEAD, opens a transient repo session checkout at that commit, and
@@ -674,14 +679,14 @@ versus the previous published snapshot, and copies those artifacts onto the new
 commit key so the identity row never points at a hole. Shared modules, stale
 captured `kody:@` dependency commits, missing prior artifacts, first publish,
 force, and mismatched `already_published` snapshot rewrites still rebuild. Check
-failures before promotion return the failed checks and do not mutate D1, KV
-snapshots, published bundle artifacts, package projections, or vectors. A
-rebuild failure after promotion returns `checks_failed` with a bundle check;
-re-run the publish capability to repair artifacts. Non-fast-forward external
-heads are refused unless the caller passes `allow_force: true`. When
-`saved_packages.locked_at` is set, checks still run and the result is `locked`
-with an approval URL; `published_commit` does not move until the owner promotes
-that commit on the website.
+failures before promotion return the failed checks and do not mutate PostgreSQL
+identity rows, object snapshots, published bundle artifacts, package
+projections, or vectors. A rebuild failure after promotion returns
+`checks_failed` with a bundle check; re-run the publish capability to repair
+artifacts. Non-fast-forward external heads are refused unless the caller passes
+`allow_force: true`. When `saved_packages.locked_at` is set, checks still run
+and the result is `locked` with an approval URL; `published_commit` does not
+move until the owner promotes that commit on the website.
 
 When publish succeeds, `packagePublishExternalPush` decorates the response with
 `static_dependents`, a bounded summary of direct saved packages whose published

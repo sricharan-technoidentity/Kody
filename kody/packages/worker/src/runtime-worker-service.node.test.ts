@@ -4,7 +4,7 @@ const exportsMock = vi.hoisted(() => ({
 	PackageAppRuntimeBridge: undefined as unknown,
 }))
 
-vi.mock('cloudflare:workers', () => ({
+vi.mock('#worker/front-door/host-context.ts', () => ({
 	exports: exportsMock,
 }))
 

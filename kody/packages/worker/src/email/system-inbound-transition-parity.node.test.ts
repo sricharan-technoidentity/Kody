@@ -1,7 +1,5 @@
-import { DatabaseSync } from 'node:sqlite'
-import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { expect } from 'vitest'
+import { test, env } from '#worker/test-support/mail.ts'
 import { type InboundDelivery } from './inbound-delivery.ts'
 import { insertSystemEmailMessage } from './system-email-graph-store.ts'
 import {
@@ -14,22 +12,6 @@ import {
 	reconcileSystemStaleInboundDeliveries,
 	releaseSystemInboundDeliveryStorage,
 } from './system-inbound-delivery-store.ts'
-
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
-function createDedicatedDatabase() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, migrationsDirectory)
-	sqlite.exec(`
-		INSERT INTO email_inboxes (
-			id, user_id, name, description, enabled, created_at, updated_at
-		) VALUES (
-			'system-transition-inbox', 'system:email', 'support', '', 1,
-			'2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z'
-		)
-	`)
-	return sqlite
-}
 
 function delivery(id: string, now: Date): InboundDelivery {
 	return {
@@ -52,8 +34,12 @@ function delivery(id: string, now: Date): InboundDelivery {
 }
 
 test('dedicated system inbound transitions stay behaviorally exhaustive', async () => {
-	using sqlite = createDedicatedDatabase()
-	const db = createD1FromSqlite(sqlite)
+	const db = env.APP_DB
+	await db
+		.prepare(
+			"INSERT INTO email_inboxes(id,user_id,name,description,enabled,created_at,updated_at) VALUES ('system-transition-inbox','system:email','support','',1,'2026-07-01T00:00:00.000Z','2026-07-01T00:00:00.000Z')",
+		)
+		.run()
 	const now = new Date('2026-08-03T00:00:00.000Z')
 	const rejected = delivery('rejected', now)
 	await claimSystemInboundDeliveryWindow({ db, delivery: rejected, now })

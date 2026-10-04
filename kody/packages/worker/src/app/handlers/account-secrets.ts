@@ -1,4 +1,4 @@
-import { waitUntil } from 'cloudflare:workers'
+import { waitUntil } from '#worker/front-door/host-context.ts'
 import { jsonResponse } from '#worker/json-response.ts'
 import { safeParseHost } from '@kody-internal/shared/url-hosts.ts'
 import { type Action } from 'remix/router'

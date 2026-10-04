@@ -1,5 +1,6 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
-import { type ExecuteResult } from '@cloudflare/codemode'
+import type { ExecuteResult } from '@cloudflare/codemode'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { createMcpCallerContext, parseMcpCallerContext } from '#mcp/context.ts'
@@ -626,7 +627,7 @@ async function cleanupAdHocJobSource(input: {
 
 async function createPackageJobCallerContext(input: {
 	env: Env
-	db: D1Database
+	db: SqlDatabase
 	baseUrl: string
 	userId: string
 	packageId: string

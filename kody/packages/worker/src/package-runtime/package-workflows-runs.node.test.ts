@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { DynamicCallableWorkflowBase } from './package-workflows-test-harness.ts'
 vi.mock('#worker/temporal/package-workflow.ts', () => ({
 	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
@@ -42,7 +43,7 @@ vi.mock('#mcp/run-kody-registry.ts', () => ({
 }))
 
 vi.mock('#worker/identity/background-mcp-user.ts', () => ({
-	resolveBackgroundMcpUser: async (_db: D1Database, userId: string) => ({
+	resolveBackgroundMcpUser: async (_db: SqlDatabase, userId: string) => ({
 		userId,
 		email: `${userId}@example.com`,
 		username: userId,

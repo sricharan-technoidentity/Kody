@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 import {
 	type AccountUsageComputeOverage,
@@ -21,7 +22,7 @@ import {
 
 /** This UTC month's activity counts from the hourly `usage_rollups`. */
 export async function readAccountActivity(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	month: string
 }): Promise<AccountActivity> {
@@ -52,7 +53,7 @@ export async function readAccountActivity(input: {
  * told once above plan limits and the Credits section.
  */
 export async function loadAccountUsageStory(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	plan: PlanName
 	creditWallet: CreditWalletState
@@ -107,7 +108,7 @@ export async function loadAccountUsageStory(input: {
 }
 
 async function readWalletForAlarm(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 	month: string
 }) {

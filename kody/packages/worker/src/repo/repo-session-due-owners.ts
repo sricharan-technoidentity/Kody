@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 
 export const repoSessionDueOwnerBatchSize = 25
@@ -9,7 +10,7 @@ export type RepoSessionDueOwner = {
 }
 
 export async function replaceRepoSessionDueOwner(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	dueAt: string | null
 	now?: Date
@@ -35,7 +36,7 @@ export async function replaceRepoSessionDueOwner(input: {
 }
 
 export async function listDueRepoSessionOwners(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	limit?: number
 }): Promise<Array<RepoSessionDueOwner>> {
@@ -59,7 +60,7 @@ export async function listDueRepoSessionOwners(input: {
 }
 
 export async function listRepoSessionDueOwnersPage(input: {
-	db: D1Database
+	db: SqlDatabase
 	afterUserId?: string
 	limit?: number
 }): Promise<Array<RepoSessionDueOwner>> {
@@ -80,7 +81,7 @@ export async function listRepoSessionDueOwnersPage(input: {
 }
 
 export async function deferRepoSessionDueOwner(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	error: unknown
 	now?: Date

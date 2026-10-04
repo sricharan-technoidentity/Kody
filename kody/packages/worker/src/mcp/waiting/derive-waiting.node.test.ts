@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createMemoryKvNamespace } from '#worker/test-support/memory-kv.ts'
 import { accountActivitySummaryWindowMs } from '#universal/account-activity-filters.ts'
@@ -108,7 +109,7 @@ function createStubDb(
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function resetFirstUseMocks() {

@@ -1,10 +1,10 @@
+import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
 import { integrationDeleteCapability } from './integration-delete.ts'
 import { integrationGetCapability } from './integration-get.ts'
 import { integrationListCapability } from './integration-list.ts'
@@ -22,20 +22,25 @@ import {
 	upsertPlatformIntegration,
 } from '#worker/integrations/service.ts'
 
-const migrationsDirectory = new URL('../../../../migrations/', import.meta.url)
+async function createEnv(userId = 'user-123') {
+	const sqlite = await createTestPg()
 
-function applyAllMigrations(db: DatabaseSync) {
-	applyRepositoryMigrations(db, migrationsDirectory)
-}
-
-function createEnv() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite)
 	return {
 		sqlite,
+		adminDb: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
 		env: {
-			APP_DB: createD1FromSqlite(sqlite),
+			APP_DB: createPgDatabase({
+				connection: sqlite,
+				role: 'kody_writer',
+				userId,
+			}),
 			SECRET_KMS: testSecretKms,
+			APP_DB_FOR_USER: (id: string) =>
+				createPgDatabase({
+					connection: sqlite,
+					role: 'kody_writer',
+					userId: id,
+				}),
 		} as unknown as Env,
 	}
 }
@@ -117,9 +122,9 @@ test('mergeIntegrationConfig and integrationSave create, canonicalize identity, 
 		requiredHosts: ['accounts.spotify.com', 'api.spotify.com'],
 	})
 
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-123')
 	const result = await integrationSaveCapability.handler(spotifyBase, {
-		env,
+		env: getAccountEnv(env, 'user-123'),
 		callerContext: caller('user-123'),
 	})
 
@@ -140,14 +145,14 @@ test('mergeIntegrationConfig and integrationSave create, canonicalize identity, 
 
 	const listed = await integrationListCapability.handler(
 		{},
-		{ env, callerContext: caller('user-123') },
+		{ env: getAccountEnv(env, 'user-123'), callerContext: caller('user-123') },
 	)
 	expect(listed.integrations).toHaveLength(1)
 	expect(listed.integrations[0]).toEqual(result.integration)
 
 	const got = await integrationGetCapability.handler(
 		{ name: 'Spotify' },
-		{ env, callerContext: caller('user-123') },
+		{ env: getAccountEnv(env, 'user-123'), callerContext: caller('user-123') },
 	)
 	expect(got.integration).toEqual(result.integration)
 
@@ -159,7 +164,7 @@ test('mergeIntegrationConfig and integrationSave create, canonicalize identity, 
 			clientId: 'github-client-id-value',
 			requiredHosts: ['api.github.com'],
 		},
-		{ env, callerContext: caller('user-123') },
+		{ env: getAccountEnv(env, 'user-123'), callerContext: caller('user-123') },
 	)
 	expect(github.integration.name).toBe('github')
 
@@ -174,7 +179,7 @@ test('mergeIntegrationConfig and integrationSave create, canonicalize identity, 
 			requiredHosts: ['api.canva.com'],
 			tokenExchangeStyle: 'basic-form',
 		},
-		{ env, callerContext: caller('user-456') },
+		{ env: getAccountEnv(env, 'user-456'), callerContext: caller('user-456') },
 	)
 	expect(canvaResult.integration).toMatchObject({
 		name: 'canva',
@@ -183,7 +188,7 @@ test('mergeIntegrationConfig and integrationSave create, canonicalize identity, 
 		tokenExchangeStyle: 'basic-form',
 	})
 
-	const defaultPkceEnv = createEnv()
+	const defaultPkceEnv = await createEnv('user-123')
 	const defaultResult = await integrationSaveCapability.handler(
 		{
 			name: 'spotify-default',
@@ -193,7 +198,10 @@ test('mergeIntegrationConfig and integrationSave create, canonicalize identity, 
 			clientId: 'spotify-client-id-value',
 			requiredHosts: ['api.spotify.com'],
 		},
-		{ env: defaultPkceEnv.env, callerContext: caller('user-789') },
+		{
+			env: getAccountEnv(defaultPkceEnv.env, 'user-789'),
+			callerContext: caller('user-789'),
+		},
 	)
 	expect(defaultResult.integration.flow).toBe('pkce')
 	expect(defaultResult.integration.usePkce).toBeUndefined()
@@ -205,7 +213,10 @@ test('mergeIntegrationConfig and integrationSave create, canonicalize identity, 
 				flow: 'pkce',
 				clientId: 'spotify-client-id-value',
 			},
-			{ env: createEnv().env, callerContext: caller('user-123') },
+			{
+				env: (await createEnv('user-123')).env,
+				callerContext: caller('user-123'),
+			},
 		),
 	).rejects.toSatisfy(
 		(error: unknown) =>
@@ -221,17 +232,20 @@ test('mergeIntegrationConfig and integrationSave create, canonicalize identity, 
 				flow: 'pkce',
 				clientId: 'x-client-id',
 			},
-			{ env: createEnv().env, callerContext: caller('user-123') },
+			{
+				env: (await createEnv('user-123')).env,
+				callerContext: caller('user-123'),
+			},
 		),
 	).rejects.toThrow(/letters or numbers/i)
 })
 
 test('integrationSave reuses an existing app when credentials match and preserves unspecified fields on partial update', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-reuse')
 	const userId = 'user-reuse'
 
 	await integrationSaveCapability.handler(googleBase, {
-		env,
+		env: getAccountEnv(env, userId),
 		callerContext: caller(userId),
 	})
 	await integrationSaveCapability.handler(
@@ -244,12 +258,12 @@ test('integrationSave reuses an existing app when credentials match and preserve
 			},
 			requiredHosts: ['www.googleapis.com'],
 		},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 
 	const apps = await integrationOauthAppListCapability.handler(
 		{},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(apps.apps).toHaveLength(1)
 	expect(apps.apps[0]).toMatchObject({
@@ -268,7 +282,7 @@ test('integrationSave reuses an existing app when credentials match and preserve
 			name: 'google',
 			apiBaseUrl: 'https://www.googleapis.com/v2',
 		},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(partial.integration).toMatchObject({
 		name: 'google',
@@ -293,7 +307,7 @@ test('integrationSave reuses an existing app when credentials match and preserve
 					'attacker.example',
 				],
 			},
-			{ env, callerContext: caller(userId) },
+			{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 		),
 	).rejects.toSatisfy(
 		(error: unknown) =>
@@ -306,7 +320,7 @@ test('integrationSave reuses an existing app when credentials match and preserve
 				name: 'google',
 				tokenUrl: 'https://attacker.example/token',
 			},
-			{ env, callerContext: caller(userId) },
+			{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 		),
 	).rejects.toSatisfy(
 		(error: unknown) =>
@@ -320,7 +334,7 @@ test('integrationSave reuses an existing app when credentials match and preserve
 			name: 'google',
 			tokenUrl: 'https://oauth2.googleapis.com/oauth/token',
 		},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(sameHost.integration.tokenUrl).toBe(
 		'https://oauth2.googleapis.com/oauth/token',
@@ -328,11 +342,11 @@ test('integrationSave reuses an existing app when credentials match and preserve
 })
 
 test('integrationDelete and credential rotation return the expected MCP response shapes', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-rotate')
 	const userId = 'user-rotate'
 
 	await integrationSaveCapability.handler(googleBase, {
-		env,
+		env: getAccountEnv(env, userId),
 		callerContext: caller(userId),
 	})
 	await integrationSaveCapability.handler(
@@ -340,7 +354,7 @@ test('integrationDelete and credential rotation return the expected MCP response
 			...googleBase,
 			name: 'google-mail',
 		},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 
 	const rotated = await integrationOauthAppRotateCredentialsCapability.handler(
@@ -348,7 +362,7 @@ test('integrationDelete and credential rotation return the expected MCP response
 			slug: 'google',
 			clientId: 'google-client-id-rotated',
 		},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(rotated.app).toMatchObject({
 		slug: 'google',
@@ -359,13 +373,13 @@ test('integrationDelete and credential rotation return the expected MCP response
 
 	const deletedMail = await integrationDeleteCapability.handler(
 		{ name: 'google-mail' },
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(deletedMail).toEqual({ deleted: true })
 
 	const afterDelete = await integrationListCapability.handler(
 		{},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(afterDelete.integrations.map((entry) => entry.name)).toEqual([
 		'google',
@@ -373,18 +387,18 @@ test('integrationDelete and credential rotation return the expected MCP response
 
 	const deletedGoogle = await integrationDeleteCapability.handler(
 		{ name: 'google' },
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(deletedGoogle).toEqual({ deleted: true })
 
 	const emptyApps = await integrationOauthAppListCapability.handler(
 		{},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(emptyApps.apps).toEqual([])
 
 	await integrationSaveCapability.handler(googleBase, {
-		env,
+		env: getAccountEnv(env, userId),
 		callerContext: caller(userId),
 	})
 	await integrationSaveCapability.handler(
@@ -392,11 +406,11 @@ test('integrationDelete and credential rotation return the expected MCP response
 			...googleBase,
 			name: 'google-mail',
 		},
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	const deletedApp = await integrationOauthAppDeleteCapability.handler(
 		{ slug: 'google' },
-		{ env, callerContext: caller(userId) },
+		{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 	)
 	expect(deletedApp).toEqual({
 		deleted: true,
@@ -405,40 +419,40 @@ test('integrationDelete and credential rotation return the expected MCP response
 	expect(
 		await integrationOauthAppListCapability.handler(
 			{},
-			{ env, callerContext: caller(userId) },
+			{ env: getAccountEnv(env, userId), callerContext: caller(userId) },
 		),
 	).toEqual({ apps: [] })
 })
 
 test('integration capabilities deny cross-user reads and require authentication', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-123')
 
 	await integrationSaveCapability.handler(spotifyBase, {
-		env,
+		env: getAccountEnv(env, 'user-a'),
 		callerContext: caller('user-a'),
 	})
 
 	const otherUserList = await integrationListCapability.handler(
 		{},
-		{ env, callerContext: caller('user-b') },
+		{ env: getAccountEnv(env, 'user-b'), callerContext: caller('user-b') },
 	)
 	expect(otherUserList.integrations).toEqual([])
 
 	const otherUserGet = await integrationGetCapability.handler(
 		{ name: 'spotify' },
-		{ env, callerContext: caller('user-b') },
+		{ env: getAccountEnv(env, 'user-b'), callerContext: caller('user-b') },
 	)
 	expect(otherUserGet.integration).toBeNull()
 
 	const otherUserDelete = await integrationDeleteCapability.handler(
 		{ name: 'spotify' },
-		{ env, callerContext: caller('user-b') },
+		{ env: getAccountEnv(env, 'user-b'), callerContext: caller('user-b') },
 	)
 	expect(otherUserDelete).toEqual({ deleted: false })
 
 	const stillThere = await integrationGetCapability.handler(
 		{ name: 'spotify' },
-		{ env, callerContext: caller('user-a') },
+		{ env: getAccountEnv(env, 'user-a'), callerContext: caller('user-a') },
 	)
 	expect(stillThere.integration?.name).toBe('spotify')
 
@@ -453,13 +467,13 @@ test('integration capabilities deny cross-user reads and require authentication'
 })
 
 test('integrationSave refuses platform (built-in) connections instead of converting them to the user lane', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-123')
 	const platformEnv = {
 		...env,
 		SECRET_KMS: testSecretKms,
 	} as Env
 	await upsertPlatformOauthApp({
-		db: platformEnv.APP_DB,
+		db: adminDb,
 		env: platformEnv,
 		app: {
 			slug: 'github',
@@ -496,14 +510,14 @@ test('integrationSave refuses platform (built-in) connections instead of convert
 })
 
 test('integrationSave persists accountLabel on an existing user-lane connection', async () => {
-	const { env } = createEnv()
+	const { env, adminDb } = await createEnv('user-123')
 	await integrationSaveCapability.handler(spotifyBase, {
-		env,
+		env: getAccountEnv(env, 'user-123'),
 		callerContext: caller('user-123'),
 	})
 	await integrationSaveCapability.handler(
 		{ name: 'spotify', accountLabel: 'me@kentcdodds.com' },
-		{ env, callerContext: caller('user-123') },
+		{ env: getAccountEnv(env, 'user-123'), callerContext: caller('user-123') },
 	)
 	const joined = await getJoinedIntegration({
 		env,

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	AccountSuspendedError,
@@ -75,7 +76,7 @@ vi.mock('#worker/run-records/package-subscriptions.ts', () => ({
 }))
 
 const backgroundUserMocks = vi.hoisted(() => ({
-	resolveBackgroundMcpUser: vi.fn(async (_db: D1Database, userId: string) => ({
+	resolveBackgroundMcpUser: vi.fn(async (_db: SqlDatabase, userId: string) => ({
 		userId,
 		email: 'owner@example.com',
 		username: 'owner',
@@ -84,7 +85,7 @@ const backgroundUserMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('#worker/identity/background-mcp-user.ts', () => ({
-	resolveBackgroundMcpUser: (db: D1Database, userId: string) =>
+	resolveBackgroundMcpUser: (db: SqlDatabase, userId: string) =>
 		backgroundUserMocks.resolveBackgroundMcpUser(db, userId),
 }))
 

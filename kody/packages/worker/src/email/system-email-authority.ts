@@ -1,3 +1,5 @@
+import { type SqlStatement } from '@kody-internal/shared/sql-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 
 type SystemEmailAuthorityRow = {
@@ -19,7 +21,7 @@ const unsupportedSystemProviderLinksSql = `(
 	)
 )`
 
-export async function assertSystemEmailGraphAuthority(db: D1Database) {
+export async function assertSystemEmailGraphAuthority(db: SqlDatabase) {
 	const marker = await db
 		.prepare(
 			`SELECT authority, graph_mismatch_count, provider_link_count
@@ -52,7 +54,7 @@ export async function assertSystemEmailGraphAuthority(db: D1Database) {
  * only when the cutover invariant is broken; the marker CHECK then aborts and
  * rolls back the entire D1 batch.
  */
-export function systemEmailAuthorityGuardStatement(db: D1Database) {
+export function systemEmailAuthorityGuardStatement(db: SqlDatabase) {
 	return db.prepare(
 		`INSERT INTO system_email_graph_authority (
 			singleton, authority, cutover_at, graph_mismatch_count,
@@ -76,8 +78,8 @@ export function systemEmailAuthorityGuardStatement(db: D1Database) {
  * the same D1 batch. The final guard result is intentionally not exposed.
  */
 export async function commitSystemEmailAuthorityBatch(input: {
-	db: D1Database
-	statements: ReadonlyArray<D1PreparedStatement>
+	db: SqlDatabase
+	statements: ReadonlyArray<SqlStatement>
 }) {
 	const results = await input.db.batch([
 		...input.statements,

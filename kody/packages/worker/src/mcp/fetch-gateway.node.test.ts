@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { expect, test, vi } from 'vitest'
@@ -50,7 +51,7 @@ const env = {
 				},
 			}
 		},
-	} as unknown as D1Database,
+	} as unknown as SqlDatabase,
 	...userMeter.env,
 	COOKIE_SECRET: 'test-cookie-secret',
 	SECRET_KMS: testSecretKms,

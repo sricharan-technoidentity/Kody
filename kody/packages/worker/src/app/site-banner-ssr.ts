@@ -109,7 +109,10 @@ async function loadSiteBannerLoaderDataUnsafe(input: {
 	const dismissedIds = dbUserId
 		? uniqueIds([
 				...cookieDismissed,
-				...(await listDismissedBannerIds(input.env.APP_DB, dbUserId)),
+				...(await listDismissedBannerIds(
+					input.env.APP_DB_READER ?? input.env.APP_DB,
+					dbUserId,
+				)),
 			])
 		: cookieDismissed
 

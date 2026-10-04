@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { ensureEntitlementTestSchema } from '#worker/entitlements/test-schema.ts'
 
@@ -7,7 +8,8 @@ import { ensureEntitlementTestSchema } from '#worker/entitlements/test-schema.ts
  * per-test factory) — do not wire them through `beforeEach`.
  */
 
-export async function ensureRbacTestSchema(db: D1Database) {
+export async function ensureRbacTestSchema(db: SqlDatabase) {
+	if ((db as unknown as { dialect?: string }).dialect === 'postgres') return
 	await ensureEntitlementTestSchema(db)
 	await db
 		.prepare(
@@ -32,7 +34,8 @@ export async function ensureRbacTestSchema(db: D1Database) {
 		.run()
 }
 
-export async function ensurePackageSubscriptionTestSchema(db: D1Database) {
+export async function ensurePackageSubscriptionTestSchema(db: SqlDatabase) {
+	if ((db as unknown as { dialect?: string }).dialect === 'postgres') return
 	const statements = [
 		`CREATE TABLE IF NOT EXISTS saved_packages (
 			id TEXT PRIMARY KEY,
@@ -107,7 +110,7 @@ export async function ensurePackageSubscriptionTestSchema(db: D1Database) {
  * Pass `db` explicitly (usually `env.APP_DB`) — no ambient default.
  */
 export async function seedAccount(input: {
-	db: D1Database
+	db: SqlDatabase
 	email: string
 	username: string
 	emailVerifiedAt?: string | null
@@ -172,13 +175,13 @@ export async function seedAccount(input: {
 }
 
 export async function assignAdminRole(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: number
 }) {
 	await input.db
 		.prepare(
-			`INSERT OR IGNORE INTO user_roles (user_id, role_id)
-			 SELECT ?, id FROM roles WHERE name = 'admin'`,
+			`INSERT INTO user_roles (user_id, role_id)
+			 SELECT ?, id FROM roles WHERE name = 'admin' ON CONFLICT DO NOTHING`,
 		)
 		.bind(input.userId)
 		.run()

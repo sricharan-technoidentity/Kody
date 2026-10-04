@@ -1,5 +1,5 @@
 import { type SqlDatabase } from '#worker/aws/pg-database.ts'
-import { d1ContainsLikePattern } from '#worker/d1-like-pattern.ts'
+import { containsLikePattern } from '#worker/sql-like-pattern.ts'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 import { readPagination } from '#worker/query-params.ts'
 // Type-only: the admin payload envelopes are the app/client wire contract and
@@ -198,7 +198,7 @@ function buildAdminUserListWhereClause(
 	const conditions: Array<string> = []
 	const params: Array<string> = []
 	if (filters.query) {
-		const pattern = d1ContainsLikePattern(filters.query).toLowerCase()
+		const pattern = containsLikePattern(filters.query).toLowerCase()
 		conditions.push(
 			`(lower(username) LIKE ? ESCAPE '\\' OR lower(email) LIKE ? ESCAPE '\\')`,
 		)
@@ -373,7 +373,7 @@ export async function loadAdminUserByTarget(
  * the updated account metadata record, or null when no user matches the target.
  */
 export async function updateAdminUserPlan(
-	db: D1Database,
+	db: SqlDatabase,
 	input: AdminUserTarget & { plan: PlanName | null; now?: Date },
 ): Promise<AdminUserListItem | null> {
 	const existing = await loadAdminUserByTarget(db, input)
@@ -427,7 +427,7 @@ export async function updateAdminUserPlan(
  * account metadata record, or null when no user matches `id`.
  */
 export async function updateAdminUserSuspension(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string; suspended: boolean },
 ): Promise<AdminUserListItem | null> {
 	const existing = await loadAdminUserRowByStableUserId(db, input.stableUserId)
@@ -448,7 +448,7 @@ export async function updateAdminUserSuspension(
  * record, or null when no user matches `id`.
  */
 export async function clearAdminUserEmailOutboundPause(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId: string },
 ): Promise<AdminUserListItem | null> {
 	const existing = await loadAdminUserRowByStableUserId(db, input.stableUserId)
@@ -610,7 +610,7 @@ export type StableUserIdConflict = {
 }
 
 export async function findStableUserIdConflictByEmail(
-	db: D1Database,
+	db: SqlDatabase,
 	email: string,
 ): Promise<StableUserIdConflict | null> {
 	const normalizedEmail = normalizeEmail(email)

@@ -1,1110 +1,896 @@
-import { expect, test, vi } from 'vitest'
-import type * as PublishedBundleArtifactsModule from './published-bundle-artifacts.ts'
+import { installedKleurFiles } from '#worker/test-support/npm-package-files.ts'
+import { env } from '#worker/test-support/runner-suite.ts'
+import { expect, test } from 'vitest'
+import { createMcpCallerContext } from '#mcp/context.ts'
 import {
-	moduleGraphMockModule as mockModule,
-	createBundleResult,
-	createBundleInput,
-	createModuleBundleInput,
-	createTemporaryModuleGraph,
-	createSavedPackageRecord,
-	createLoadedPackageSource,
-	type RuntimeModule,
-} from '#worker/test-support/module-graph.ts'
-
-vi.mock('#worker/worker-bundler-modules.ts', () => ({
-	importWorkerBundler: async () => ({
-		createWorker: (...args: Array<unknown>) => mockModule.createWorker(...args),
-	}),
-}))
-
-vi.mock('#worker/package-registry/scope-grants.ts', () => ({
-	getPlatformAccountByUsername: (...args: Array<unknown>) =>
-		mockModule.getPlatformAccountByUsername(...args),
-	isPlatformAccountStableUserId: async () => false,
-	listPlatformAccountUsernames: async () => [],
-}))
-
-vi.mock('#worker/package-registry/repo.ts', () => ({
-	getSavedPackageByKodyId: (...args: Array<unknown>) =>
-		mockModule.getSavedPackageByKodyId(...args),
-	getSavedPackageByName: (...args: Array<unknown>) =>
-		mockModule.getSavedPackageByName(...args),
-}))
-
-vi.mock('#worker/package-registry/source.ts', () => ({
-	loadPackageSourceBySourceId: (...args: Array<unknown>) =>
-		mockModule.loadPackageSourceBySourceId(...args),
-}))
-
-vi.mock('./published-bundle-artifacts.ts', async () => {
-	const actual = await vi.importActual<typeof PublishedBundleArtifactsModule>(
-		'./published-bundle-artifacts.ts',
-	)
-	return {
-		...actual,
-		loadPublishedBundleArtifactByIdentity: (...args: Array<unknown>) =>
-			mockModule.loadPublishedBundleArtifactByIdentity(...args),
-	}
-})
-
-const {
-	buildKodyAppBundle,
+	createAdHocExecuteSourceFiles,
+	runBundledModuleWithRegistry,
+} from '#mcp/run-kody-registry.ts'
+import { createExecutePackageInvokeTools } from '#worker/package-invocations/service.ts'
+import {
+	buildKodyAppClientBundle,
+	buildKodyImportableModuleBundle,
 	buildKodyModuleBundle,
-	buildPackageRuntimeModulePath,
-	createPackageRuntimeModuleSource,
-	createPublishedPackageAppBundleCacheKey,
-	createRuntimeModuleReexportSource,
-	createRuntimeModuleSource,
-	hydrateKodyRuntimeModules,
-	parsePackageRuntimeModulePathPackageId,
-	refreshKodyRuntimeModules,
-} = await import('./module-graph.ts')
+} from './module-graph.ts'
+import { packageAppClientModuleNamePattern } from './package-app-client-module-name.ts'
+import { persistPublishedSourceSnapshot } from './published-runtime-artifacts.ts'
+import { persistPublishedBundleArtifact } from './published-bundle-artifacts.ts'
+import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 
-test('hydrateKodyRuntimeModules resolves duplicate dynamic specifiers once per pass', async () => {
-	const createDynamicPlaceholder = (specifier: string) =>
-		`export const __kodyDynamicPackageSpecifier = ${JSON.stringify(specifier)};
-throw new Error('unhydrated ${specifier}');
-`
-	const artifact = {
-		version: 1,
-		kind: 'importable-module' as const,
-		artifactName: './value',
-		sourceId: 'source-1',
-		publishedCommit: 'commit-1',
-		entryPoint: './value.js',
-		mainModule: 'value.js',
-		modules: {
-			'value.js': 'export default function value() { return "resolved" }',
-		},
-		dependencies: [],
-		dynamicDependencies: [],
-		packageContext: null,
-		createdAt: '2026-05-11T00:00:00.000Z',
-	}
-	mockModule.getSavedPackageByName.mockResolvedValue(createSavedPackageRecord())
-	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
-		...createLoadedPackageSource(),
-		manifest: {
-			...createLoadedPackageSource().manifest,
-			exports: {
-				'./value': './value.js',
-			},
-		},
-		files: {
-			'value.js': 'export default function value() { return "resolved" }',
-		},
-	})
-	mockModule.loadPublishedBundleArtifactByIdentity.mockResolvedValue({
-		row: {},
-		artifact,
-	})
-
-	const specifier = 'kody:@kentcdodds/example-package/value'
-	const { modules: hydratedModules } = await hydrateKodyRuntimeModules({
-		env: {
-			APP_DB: {},
-			REPO_SESSION: {},
-		} as Env,
-		baseUrl: 'https://heykody.dev',
-		userId: 'user-1',
-		modules: {
-			'entry-a.js': `export default async function runA() {
-	const module = await import('./.__kody_virtual__/dynamic-imports/a.js')
-	return module.default
+async function runSql(sql: string, ...values: Array<unknown>) {
+	await env.APP_DB.prepare(sql)
+		.bind(...values)
+		.run()
 }
-`,
-			'entry-b.js': `export default async function runB() {
-	const module = await import('./.__kody_virtual__/dynamic-imports/b.js')
-	return module.default
-}
-`,
-			'.__kody_virtual__/dynamic-imports/a.js':
-				createDynamicPlaceholder(specifier),
-			'.__kody_virtual__/dynamic-imports/b.js':
-				createDynamicPlaceholder(specifier),
-		},
-	})
 
-	expect(
-		mockModule.loadPublishedBundleArtifactByIdentity,
-	).toHaveBeenCalledTimes(1)
-	expect(hydratedModules['.__kody_virtual__/dynamic-imports/a.js']).toContain(
-		'__kodyDynamicPackageResolved',
-	)
-	expect(hydratedModules['.__kody_virtual__/dynamic-imports/b.js']).toContain(
-		'__kodyDynamicPackageResolved',
-	)
-})
-
-test('buildKodyModuleBundle keeps deterministic dependency ordering after parallel resolution', async () => {
-	mockModule.createWorker.mockResolvedValue(createBundleResult('ordered-deps'))
-	mockModule.getSavedPackageByName.mockImplementation(
-		async (
-			_db: unknown,
-			input: {
-				name: string
-			},
-		) => {
-			if (input.name === '@kentcdodds/zebra-package') {
-				return createSavedPackageRecord({
-					name: '@kentcdodds/zebra-package',
-					kodyId: 'zebra-package',
-					sourceId: 'source-zebra',
-				})
-			}
-			if (input.name === '@kentcdodds/alpha-package') {
-				return createSavedPackageRecord({
-					name: '@kentcdodds/alpha-package',
-					kodyId: 'alpha-package',
-					sourceId: 'source-alpha',
-				})
-			}
-			return null
-		},
-	)
-	mockModule.loadPackageSourceBySourceId.mockImplementation(
-		async (input: { sourceId: string }) => ({
-			...createLoadedPackageSource(),
-			source: {
-				id: input.sourceId,
-				published_commit: `commit-${input.sourceId}`,
-			},
-			manifest: {
-				name:
-					input.sourceId === 'source-zebra'
-						? '@kentcdodds/zebra-package'
-						: '@kentcdodds/alpha-package',
-				exports: {
-					'.': './index.js',
-				},
-				kody: {
-					id:
-						input.sourceId === 'source-zebra'
-							? 'zebra-package'
-							: 'alpha-package',
-					description: 'Dependency package',
-				},
-			},
-			files: {
-				'index.js': 'export default async function run() { return "ok" }',
-			},
-		}),
-	)
-
-	const { buildKodyModuleBundle } = await import('./module-graph.ts')
-
-	const result = await buildKodyModuleBundle({
-		env: {
-			APP_DB: {},
-			REPO_SESSION: {},
-		} as Env,
-		baseUrl: 'https://heykody.dev',
-		userId: 'user-1',
-		sourceFiles: {
-			'package.json': JSON.stringify({
-				name: '@kentcdodds/local-package',
-				exports: {
-					'.': './index.js',
-				},
-				kody: {
-					id: 'local-package',
-					description: 'Local package',
-				},
-			}),
-			'index.js': [
-				'import zebra from "kody:@kentcdodds/zebra-package"',
-				'import alpha from "kody:@kentcdodds/alpha-package"',
-				'export default [zebra, alpha]',
-			].join('\n'),
-		},
-		entryPoint: 'index.js',
-	})
-
-	expect(result.dependencies).toEqual([
-		{
-			sourceId: 'source-alpha',
-			publishedCommit: 'commit-source-alpha',
-			kodyId: 'alpha-package',
-			packageName: '@kentcdodds/alpha-package',
-			packageId: 'pkg-1',
-		},
-		{
-			sourceId: 'source-zebra',
-			publishedCommit: 'commit-source-zebra',
-			kodyId: 'zebra-package',
-			packageName: '@kentcdodds/zebra-package',
-			packageId: 'pkg-1',
-		},
-	])
-})
-
-test('createRuntimeModuleSource returns a stable memoized string', () => {
-	const first = createRuntimeModuleSource()
-	const second = createRuntimeModuleSource()
-	expect(first).toBe(second)
-	expect(first).toContain('__kodyCreateRuntimeObjectProxy')
-})
-
-test('kody:runtime exports resolve against the current run when the module instance is reused across sequential runs', async () => {
-	// Dynamic workers with identical code are cached and reused, so the
-	// runtime module evaluates once and then serves every later run from the
-	// isolate's ES module cache. Each run's `kody` closes over that run's RPC
-	// dispatcher stubs, which are disposed when the run's evaluate() call
-	// returns — a frozen `export const kody = runtime.kody` therefore made
-	// every later run fail with "RPC stub used after being disposed".
-	const modules = {
-		'.__kody_virtual__/runtime.js': createRuntimeModuleSource(),
-		'entry.js': [
-			"import { kody, email } from './.__kody_virtual__/runtime.js'",
-			'const capturedSearch = kody.communitySearch',
-			'export default async function main() {',
-			'\treturn {',
-			"\t\tviaProxy: await kody.communitySearch({ query: 'slack' }),",
-			"\t\tviaTopLevelCapture: await capturedSearch({ query: 'slack' }),",
-			'\t\temail,',
-			'\t}',
-			'}',
-		].join('\n'),
-	}
-	const moduleGraph = await createTemporaryModuleGraph(modules)
-	try {
-		const runtimeModule = (await moduleGraph.importModule(
-			'.__kody_virtual__/runtime.js',
-			{ cacheBust: false },
-		)) as RuntimeModule
-		const createRunRuntime = (label: string, state: { disposed: boolean }) => ({
-			kody: {
-				communitySearch: async (args: unknown) => {
-					if (state.disposed) {
-						throw new Error('RPC stub used after being disposed.')
-					}
-					return { label, args }
-				},
-			},
-			email: null,
-		})
-		const runOnce = async (runtime: Record<string, unknown>) =>
-			await runtimeModule.__kodyRunInRuntime(runtime, async () => {
-				const entry = (await moduleGraph.importModule('entry.js', {
-					cacheBust: false,
-				})) as { default: () => Promise<unknown> }
-				return await entry.default()
-			})
-
-		const firstState = { disposed: false }
-		const first = await runOnce(createRunRuntime('first-run', firstState))
-		expect(first).toEqual({
-			viaProxy: { label: 'first-run', args: { query: 'slack' } },
-			viaTopLevelCapture: { label: 'first-run', args: { query: 'slack' } },
-			email: null,
-		})
-
-		// The first run's dispatcher stubs die once its evaluate() returns.
-		firstState.disposed = true
-
-		const second = await runOnce(
-			createRunRuntime('second-run', { disposed: false }),
-		)
-		expect(second).toEqual({
-			viaProxy: { label: 'second-run', args: { query: 'slack' } },
-			viaTopLevelCapture: { label: 'second-run', args: { query: 'slack' } },
-			email: null,
-		})
-	} finally {
-		await moduleGraph.cleanup()
-	}
-})
-
-test('buildKodyAppBundle keeps esbuild defaults even when the graph imports remix/ui', async () => {
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(createBundleResult('remix'))
-	const remixInput = createBundleInput({ entryPoint: 'app/router.ts' })
-	remixInput.sourceFiles['app/router.ts'] = [
-		"import { createRouter } from 'remix/router'",
-		"import { renderToString } from 'remix/ui/server'",
-		'export default createRouter()',
-	].join('\n')
-	await buildKodyAppBundle(remixInput)
-	const remixCall = mockModule.createWorker.mock.calls[0]?.[0] as {
-		files: Record<string, string>
-		jsx?: string
-		jsxImportSource?: string
-	}
-	expect(remixCall.files['node_modules/remix/package.json']).toContain(
-		'"./router": "./dist/router.js"',
-	)
-	expect(remixCall.files['node_modules/remix/dist/ui/server.js']).toBeTypeOf(
-		'string',
-	)
-	// Vendored remix is a convenience; the host does not sniff the graph for
-	// JSX, import.meta.url, or keepNames. Without a tsconfig, esbuild defaults.
-	expect(remixCall).not.toHaveProperty('jsx')
-	expect(remixCall).not.toHaveProperty('jsxImportSource')
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(createBundleResult('tsconfig'))
-	const tsconfigInput = createBundleInput({ entryPoint: 'app/router.ts' })
-	tsconfigInput.sourceFiles['app/router.ts'] = [
-		"import { createRouter } from 'remix/router'",
-		"import { renderToString } from 'remix/ui/server'",
-		'export default createRouter()',
-	].join('\n')
-	tsconfigInput.sourceFiles['tsconfig.json'] = JSON.stringify({
-		compilerOptions: {
-			jsx: 'react-jsx',
-			jsxImportSource: 'remix/ui',
-		},
-	})
-	await buildKodyAppBundle(tsconfigInput)
-	const tsconfigCall = mockModule.createWorker.mock.calls[0]?.[0] as {
-		jsx?: string
-		jsxImportSource?: string
-	}
-	expect(tsconfigCall).toMatchObject({
-		jsx: 'automatic',
-		jsxImportSource: 'remix/ui',
-	})
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(createBundleResult('headers'))
-	const headersInput = createBundleInput({ entryPoint: 'src/app.ts' })
-	headersInput.sourceFiles['src/app.ts'] = [
-		"import { CacheControl } from 'remix/headers'",
-		'export default { fetch: () => new Response("ok") }',
-	].join('\n')
-	await buildKodyAppBundle(headersInput)
-	const headersCall = mockModule.createWorker.mock.calls[0]?.[0] as Record<
-		string,
-		unknown
-	>
-	expect(
-		(headersCall.files as Record<string, string>)[
-			'node_modules/remix/package.json'
-		],
-	).toBeTypeOf('string')
-	expect(headersCall).not.toHaveProperty('jsx')
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(createBundleResult('fetch'))
-	await buildKodyAppBundle(createBundleInput())
-	const fetchCall = mockModule.createWorker.mock.calls[0]?.[0] as Record<
-		string,
-		unknown
-	>
-	expect(
-		(fetchCall.files as Record<string, string>)[
-			'node_modules/remix/package.json'
-		],
-	).toBeTypeOf('string')
-	expect(fetchCall).not.toHaveProperty('jsx')
-})
-
-test('buildKodyAppBundle cache lifecycle reuses hits, shares in-flight builds, evicts failures, and keys by entrypoint', async () => {
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(createBundleResult('warm-cache'))
-
-	const cacheKey = createPublishedPackageAppBundleCacheKey({
-		userId: 'user-1',
-		source: {
-			id: 'source-1',
-			published_commit: 'commit-1',
-			manifest_path: 'package.json',
-			source_root: '/',
-		},
-		entryPoint: 'app.js',
-	})
-
-	const first = await buildKodyAppBundle(createBundleInput({ cacheKey }))
-	const second = await buildKodyAppBundle(createBundleInput({ cacheKey }))
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(1)
-	expect(first).toBe(second)
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker
-		.mockResolvedValueOnce(createBundleResult('uncached-first'))
-		.mockResolvedValueOnce(createBundleResult('uncached-second'))
-	await buildKodyAppBundle(createBundleInput({ cacheKey: null }))
-	await buildKodyAppBundle(createBundleInput({ cacheKey: null }))
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(2)
-
-	mockModule.createWorker.mockReset()
-	let resolveBundle:
-		| ((value: { mainModule: string; modules: WorkerLoaderModules }) => void)
-		| null = null
-	const bundlePromise = new Promise<{
-		mainModule: string
-		modules: WorkerLoaderModules
-	}>((resolve) => {
-		resolveBundle = resolve
-	})
-	mockModule.createWorker.mockImplementation(async () => await bundlePromise)
-
-	const concurrentCacheKey = createPublishedPackageAppBundleCacheKey({
-		userId: 'user-1',
-		source: {
-			id: 'source-concurrent',
-			published_commit: 'commit-concurrent-1',
-			manifest_path: 'package.json',
-			source_root: '/',
-		},
-		entryPoint: 'app.js',
-	})
-	const firstPromise = buildKodyAppBundle(
-		createBundleInput({ cacheKey: concurrentCacheKey }),
-	)
-	const secondPromise = buildKodyAppBundle(
-		createBundleInput({ cacheKey: concurrentCacheKey }),
-	)
-	resolveBundle?.(createBundleResult('shared-in-flight'))
-	const [inFlightFirst, inFlightSecond] = await Promise.all([
-		firstPromise,
-		secondPromise,
-	])
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(1)
-	expect(inFlightFirst).toBe(inFlightSecond)
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker
-		.mockRejectedValueOnce(new Error('bundle failed'))
-		.mockResolvedValueOnce(createBundleResult('retry-success'))
-	const failureCacheKey = createPublishedPackageAppBundleCacheKey({
-		userId: 'user-1',
-		source: {
-			id: 'source-failure',
-			published_commit: 'commit-failure-1',
-			manifest_path: 'package.json',
-			source_root: '/',
-		},
-		entryPoint: 'app.js',
-	})
-	await expect(
-		buildKodyAppBundle(createBundleInput({ cacheKey: failureCacheKey })),
-	).rejects.toThrow('bundle failed')
-	const retried = await buildKodyAppBundle(
-		createBundleInput({ cacheKey: failureCacheKey }),
-	)
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(2)
-	expect(retried).toEqual(createBundleResult('retry-success'))
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker
-		.mockResolvedValueOnce(createBundleResult('entry-app'))
-		.mockResolvedValueOnce(createBundleResult('entry-admin'))
-	const source = {
-		id: 'source-shared',
-		published_commit: 'commit-shared-1',
+function createSourceRow(input: {
+	userId: string
+	packageId: string
+	sourceId: string
+	publishedCommit: string
+}) {
+	return {
+		id: input.sourceId,
+		user_id: input.userId,
+		entity_kind: 'package' as const,
+		entity_id: input.packageId,
+		repo_id: `repo-${input.sourceId}`,
+		published_commit: input.publishedCommit,
+		indexed_commit: null,
 		manifest_path: 'package.json',
 		source_root: '/',
+		created_at: '2026-05-13T00:00:00.000Z',
+		updated_at: '2026-05-13T00:00:00.000Z',
 	}
-	const appEntryCacheKey = createPublishedPackageAppBundleCacheKey({
-		userId: 'user-1',
-		source,
-		entryPoint: 'app.js',
-	})
-	const adminEntryCacheKey = createPublishedPackageAppBundleCacheKey({
-		userId: 'user-1',
-		source,
-		entryPoint: 'admin.js',
-	})
-	const appBundle = await buildKodyAppBundle(
-		createBundleInput({ cacheKey: appEntryCacheKey, entryPoint: 'app.js' }),
-	)
-	const adminBundle = await buildKodyAppBundle(
-		createBundleInput({
-			cacheKey: adminEntryCacheKey,
-			entryPoint: 'admin.js',
-		}),
-	)
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(2)
-	expect(appBundle).not.toBe(adminBundle)
-})
-
-test('buildKodyModuleBundle cache lifecycle reuses hits, skips when disabled, keys by code and userId, and evicts failures', async () => {
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(createBundleResult('module-warm'))
-
-	const first = await buildKodyModuleBundle(
-		createModuleBundleInput({ reuseCachedBundle: true }),
-	)
-	const second = await buildKodyModuleBundle(
-		createModuleBundleInput({ reuseCachedBundle: true }),
-	)
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(1)
-	expect(first).toEqual(second)
-	expect(first.modules).not.toBe(second.modules)
-	expect(first.dependencies).not.toBe(second.dependencies)
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker
-		.mockResolvedValueOnce(createBundleResult('module-uncached-first'))
-		.mockResolvedValueOnce(createBundleResult('module-uncached-second'))
-	await buildKodyModuleBundle(createModuleBundleInput())
-	await buildKodyModuleBundle(
-		createModuleBundleInput({ reuseCachedBundle: false }),
-	)
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(2)
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker
-		.mockResolvedValueOnce(createBundleResult('module-code-a'))
-		.mockResolvedValueOnce(createBundleResult('module-code-b'))
-	await buildKodyModuleBundle(
-		createModuleBundleInput({
-			reuseCachedBundle: true,
-			code: 'export default async function run() { return "a" }',
-		}),
-	)
-	await buildKodyModuleBundle(
-		createModuleBundleInput({
-			reuseCachedBundle: true,
-			code: 'export default async function run() { return "b" }',
-		}),
-	)
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(2)
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker
-		.mockResolvedValueOnce(createBundleResult('module-user-1'))
-		.mockResolvedValueOnce(createBundleResult('module-user-2'))
-	await buildKodyModuleBundle(
-		createModuleBundleInput({
-			reuseCachedBundle: true,
-			userId: 'user-cache-a',
-			code: 'export default async function run() { return "shared" }',
-		}),
-	)
-	await buildKodyModuleBundle(
-		createModuleBundleInput({
-			reuseCachedBundle: true,
-			userId: 'user-cache-b',
-			code: 'export default async function run() { return "shared" }',
-		}),
-	)
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(2)
-
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker
-		.mockRejectedValueOnce(new Error('module bundle failed'))
-		.mockResolvedValueOnce(createBundleResult('module-retry-success'))
-	await expect(
-		buildKodyModuleBundle(
-			createModuleBundleInput({
-				reuseCachedBundle: true,
-				code: 'export default async function run() { return "retry" }',
-			}),
-		),
-	).rejects.toThrow('module bundle failed')
-	const retried = await buildKodyModuleBundle(
-		createModuleBundleInput({
-			reuseCachedBundle: true,
-			code: 'export default async function run() { return "retry" }',
-		}),
-	)
-	expect(mockModule.createWorker).toHaveBeenCalledTimes(2)
-	expect(retried).toEqual(createBundleResult('module-retry-success'))
-})
-
-test('hydrateKodyRuntimeModules replaces stale persisted kody runtime modules', async () => {
-	const staleRuntimeSource =
-		'export const kody = { stale: true }; export default { kody };'
-	const { modules: hydratedModules } = await hydrateKodyRuntimeModules({
-		env: {
-			APP_DB: {},
-			REPO_SESSION: {},
-		} as Env,
-		baseUrl: 'https://heykody.dev',
-		userId: 'user-1',
-		modules: {
-			'.__kody_virtual__/runtime.js': staleRuntimeSource,
-			'entry.js': `import { __kodyRunInRuntime, kody } from './.__kody_virtual__/runtime.js'
-
-export async function runWithRuntime(runtime) {
-	return await __kodyRunInRuntime(runtime, async () => kody.hostRuntimeVersion({}))
 }
-`,
-		},
-	})
 
-	expect(hydratedModules['.__kody_virtual__/runtime.js']).not.toBe(
-		staleRuntimeSource,
+async function insertSavedPackage(input: {
+	userId: string
+	packageId: string
+	kodyId: string
+	name: string
+	sourceId: string
+	publishedCommit: string
+}) {
+	const now = new Date().toISOString()
+	await runSql(
+		`INSERT INTO saved_packages (
+			id, user_id, name, kody_id, description, tags_json, search_text,
+			source_id, has_app, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, '[]', NULL, ?, 0, ?, ?)`,
+		input.packageId,
+		input.userId,
+		input.name,
+		input.kodyId,
+		`${input.name} package`,
+		input.sourceId,
+		now,
+		now,
 	)
-	const moduleGraph = await createTemporaryModuleGraph(hydratedModules)
-	try {
-		const entry = (await moduleGraph.importModule('entry.js')) as {
-			runWithRuntime: (runtime: Record<string, unknown>) => Promise<unknown>
-		}
-		const result = await entry.runWithRuntime({
-			kody: {
-				async hostRuntimeVersion() {
-					return 'current-host-runtime'
-				},
-			},
-		})
-		expect(result).toBe('current-host-runtime')
-	} finally {
-		await moduleGraph.cleanup()
-	}
-})
+	await runSql(
+		`INSERT INTO entity_sources (
+			id, user_id, entity_kind, entity_id, repo_id, published_commit,
+			indexed_commit, manifest_path, source_root, created_at, updated_at
+		) VALUES (?, ?, 'package', ?, ?, ?, NULL, 'package.json', '/', ?, ?)`,
+		input.sourceId,
+		input.userId,
+		input.packageId,
+		`repo-${input.sourceId}`,
+		input.publishedCommit,
+		now,
+		now,
+	)
+	return createSourceRow(input)
+}
 
-test('hydrateKodyRuntimeModules fixes stale nested runtime modules from static package artifacts', async () => {
-	const nestedRuntimePath =
-		'.__kody_packages__/@kentcdodds/ai-chat/.__published_bundle__/2e/.__kody_virtual__/runtime.js'
-	const staleRuntimeSource = [
-		'const runtime = {}',
-		'export const kody = runtime.kody',
-		'export default runtime',
-	].join('\n')
-	const modules = {
-		'.__kody_virtual__/runtime.js': createRuntimeModuleSource(),
-		'entry.js': [
-			"import { __kodyRunInRuntime } from './.__kody_virtual__/runtime.js'",
-			"import runDependency from './.__kody_packages__/@kentcdodds/ai-chat/.__published_bundle__/2e/index.js'",
-			'',
-			'export async function runWithRuntime(runtime) {',
-			'\treturn await __kodyRunInRuntime(runtime, async () => runDependency())',
-			'}',
-		].join('\n'),
-		'.__kody_packages__/@kentcdodds/ai-chat/.__published_bundle__/2e/index.js':
-			[
-				"import { kody } from './.__kody_virtual__/runtime.js'",
-				'',
-				'export default async function runDependency() {',
-				'\treturn await kody.secretList({ scope: "user" })',
-				'}',
-			].join('\n'),
-		[nestedRuntimePath]: staleRuntimeSource,
-	}
-	const staleModuleGraph = await createTemporaryModuleGraph(modules)
-	try {
-		const staleEntry = (await staleModuleGraph.importModule('entry.js')) as {
-			runWithRuntime: (runtime: Record<string, unknown>) => Promise<unknown>
-		}
-		await expect(
-			staleEntry.runWithRuntime({
-				kody: {
-					async secretList() {
-						return { ok: true }
-					},
-				},
-			}),
-		).rejects.toThrow(
-			"Cannot read properties of undefined (reading 'secretList')",
-		)
-	} finally {
-		await staleModuleGraph.cleanup()
-	}
-
-	const { modules: hydratedModules } = await hydrateKodyRuntimeModules({
-		env: {
-			APP_DB: {},
-			REPO_SESSION: {},
-		} as Env,
-		baseUrl: 'https://heykody.dev',
-		userId: 'user-1',
-		modules,
-	})
-	expect(hydratedModules[nestedRuntimePath]).toBe(
-		createRuntimeModuleReexportSource(nestedRuntimePath),
-	)
-	expect(hydratedModules[nestedRuntimePath]).not.toBe(staleRuntimeSource)
-	const hydratedModuleGraph = await createTemporaryModuleGraph(hydratedModules)
-	try {
-		const hydratedEntry = (await hydratedModuleGraph.importModule(
-			'entry.js',
-		)) as {
-			runWithRuntime: (runtime: Record<string, unknown>) => Promise<unknown>
-		}
-		const result = await hydratedEntry.runWithRuntime({
-			kody: {
-				async secretList(args: unknown) {
-					return { ok: true, args }
-				},
-			},
-		})
-		expect(result).toEqual({
-			ok: true,
-			args: {
-				scope: 'user',
-			},
-		})
-	} finally {
-		await hydratedModuleGraph.cleanup()
-	}
-})
-
-test('buildKodyModuleBundle refreshes nested artifact runtimes before static import rebundling', async () => {
-	const staleRuntimeSource = [
-		'const runtime = {}',
-		'export const kody = runtime.kody',
-		'export default runtime',
-	].join('\n')
-	mockModule.createWorker.mockResolvedValue(
-		createBundleResult('ai-chat-caller'),
-	)
-	mockModule.getSavedPackageByName.mockResolvedValue(
-		createSavedPackageRecord({
-			name: '@kentcdodds/ai-chat',
-			kodyId: 'ai-chat',
-			sourceId: 'source-ai-chat',
-		}),
-	)
-	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
-		source: {
-			id: 'source-ai-chat',
-			published_commit: 'commit-ai-chat',
-		},
-		manifest: {
-			name: '@kentcdodds/ai-chat',
+test(
+	'saved package bundles and executes npm dependencies declared in package.json',
+	{ timeout: 20_000 },
+	async () => {
+		silenceIncidentalRuntimeWarnings()
+		const packageJson = JSON.stringify({
+			name: '@kentcdodds/dependency-package',
 			exports: {
 				'.': './src/index.ts',
 			},
-			kody: {
-				id: 'ai-chat',
-				description: 'AI chat helpers',
+			dependencies: {
+				kleur: '^4.1.5',
 			},
-		},
-		files: {
-			'package.json': JSON.stringify({
-				name: '@kentcdodds/ai-chat',
-				exports: {
-					'.': './src/index.ts',
-				},
-				kody: {
-					id: 'ai-chat',
-					description: 'AI chat helpers',
-				},
-			}),
-			'src/index.ts':
-				'import { kody } from "kody:runtime"\nexport async function runAgentTurnNonStreaming() { return await kody.valueGet({ name: "ai-chat" }) }',
-		},
-	})
-	mockModule.loadPublishedBundleArtifactByIdentity.mockResolvedValue({
-		row: {},
-		artifact: {
-			version: 1,
-			kind: 'importable-module',
-			artifactName: '.',
-			sourceId: 'source-ai-chat',
-			publishedCommit: 'commit-ai-chat',
-			entryPoint: './src/index.ts',
-			mainModule: 'dist/index.js',
-			modules: {
-				'dist/index.js': [
-					"import { kody } from './.__kody_virtual__/runtime.js'",
-					'export async function runAgentTurnNonStreaming() {',
-					'\treturn await kody.valueGet({ name: "ai-chat" })',
+			kody: {
+				id: 'dependency-package',
+				description: 'Exercises npm dependency bundling',
+			},
+		})
+
+		const bundle = await buildKodyModuleBundle({
+			env,
+			baseUrl: 'https://kody.dev',
+			userId: 'user-workers-test',
+			sourceFiles: {
+				...(await installedKleurFiles()),
+				'package.json': packageJson,
+				'src/index.ts': [
+					"import kleur from 'kleur'",
+					'export default async function run() {',
+					"\treturn { formatted: kleur.green('dependency-ok') }",
 					'}',
 				].join('\n'),
-				'dist/.__kody_virtual__/runtime.js': staleRuntimeSource,
 			},
-			dependencies: [],
-			dynamicDependencies: [],
-			packageContext: {
-				packageId: 'pkg-ai-chat',
-				kodyId: 'ai-chat',
-				sourceId: 'source-ai-chat',
-			},
-			createdAt: '2026-05-13T00:00:00.000Z',
-		},
-	})
+			entryPoint: 'src/index.ts',
+		})
 
-	const { buildKodyModuleBundle } = await import('./module-graph.ts')
-	await buildKodyModuleBundle({
-		env: {
-			APP_DB: {},
-			REPO_SESSION: {},
-		} as Env,
-		baseUrl: 'https://heykody.dev',
-		userId: 'user-1',
+		const moduleSources = Object.values(bundle.modules)
+			.map((module) => {
+				if (typeof module === 'string') return module
+				return [module.js, module.cjs, module.text]
+					.filter((value): value is string => typeof value === 'string')
+					.join('\n')
+			})
+			.join('\n')
+		expect(moduleSources).toContain('dependency-ok')
+		expect(moduleSources).not.toContain(`from "kleur"`)
+
+		const result = await runBundledModuleWithRegistry(
+			env,
+			createMcpCallerContext({
+				baseUrl: 'https://kody.dev',
+				user: {
+					userId: 'user-workers-test',
+					email: 'worker@example.com',
+					displayName: 'Worker Test',
+				},
+			}),
+			{
+				mainModule: bundle.mainModule,
+				modules: bundle.modules,
+			},
+			undefined,
+			{
+				skipCapabilityRegistry: true,
+			},
+		)
+
+		expect(result.error).toBeUndefined()
+		expect(result.result).toEqual({
+			formatted: 'dependency-ok',
+		})
+	},
+)
+
+test(
+	'ad hoc execute synthesizes and executes npm dependencies through the bundler',
+	{ timeout: 20_000 },
+	async () => {
+		silenceIncidentalRuntimeWarnings()
+		const sourceFiles = createAdHocExecuteSourceFiles(
+			[
+				"import kleur from 'kleur'",
+				'export default function main() {',
+				"\treturn { formatted: kleur.green('ad-hoc-dependency-ok') }",
+				'}',
+			].join('\n'),
+		)
+		Object.assign(sourceFiles, await installedKleurFiles())
+		expect(JSON.parse(sourceFiles['package.json'] ?? '{}')).toEqual({
+			dependencies: { kleur: 'latest' },
+		})
+		const bundle = await buildKodyModuleBundle({
+			env,
+			baseUrl: 'https://kody.dev',
+			userId: 'user-ad-hoc-npm-test',
+			sourceFiles,
+			entryPoint: 'entry.ts',
+			bundleContext: 'ad-hoc-execute',
+		})
+		const result = await runBundledModuleWithRegistry(
+			env,
+			createMcpCallerContext({
+				baseUrl: 'https://kody.dev',
+				user: {
+					userId: 'user-ad-hoc-npm-test',
+					email: 'worker@example.com',
+					displayName: 'Worker Test',
+				},
+			}),
+			bundle,
+			undefined,
+			{ skipCapabilityRegistry: true },
+		)
+
+		expect(result.error).toBeUndefined()
+		expect(result.result).toEqual({ formatted: 'ad-hoc-dependency-ok' })
+	},
+)
+
+test('ad hoc execute runtime exposes only packages.invoke', async () => {
+	silenceIncidentalRuntimeWarnings()
+	const bundle = await buildKodyModuleBundle({
+		env,
+		baseUrl: 'https://kody.dev',
+		userId: 'user-workers-test',
+		bundleContext: 'ad-hoc-execute',
 		sourceFiles: {
 			'entry.ts': [
-				"import { runAgentTurnNonStreaming } from 'kody:@kentcdodds/ai-chat'",
-				'export default async function main() {',
-				'\treturn await runAgentTurnNonStreaming()',
+				"import { kody, packageContext, packages } from 'kody:runtime'",
+				'',
+				'export default async function main(input = {}) {',
+				'\t// Direct kody.package_invoke_checked should reject; packages.invoke is the public API.',
+				'\tlet directKodyInvokeChecked;',
+				'\ttry {',
+				'\t\tawait kody.package_invoke_checked({',
+				"\t\t\tkodyId: 'target-package',",
+				"\t\t\texportName: './run',",
+				'\t\t});',
+				"\t\tdirectKodyInvokeChecked = 'resolved';",
+				'\t} catch (error) {',
+				'\t\tdirectKodyInvokeChecked = String(error?.message ?? error);',
+				'\t}',
+				'\tlet removedObjectInvoke;',
+				'\ttry {',
+				'\t\tawait packages?.invoke({ kodyId: "target-package", exportName: "./run" });',
+				"\t\tremovedObjectInvoke = 'resolved';",
+				'\t} catch (error) {',
+				'\t\tremovedObjectInvoke = String(error?.message ?? error);',
+				'\t}',
+				'\treturn {',
+				'\t\tpackageContextIsNull: packageContext?.packageId == null,',
+				'\t\tdirectKodyInvokeChecked,',
+				'\t\tremovedObjectInvoke,',
+				'\t\tinvoked: await packages?.invoke(',
+				'\t\t\t"kody:@owner/target-package/run",',
+				'\t\t\t{ params: input },',
+				'\t\t),',
+				'\t}',
 				'}',
 			].join('\n'),
 		},
 		entryPoint: 'entry.ts',
 	})
-
-	const bundlerInput = mockModule.createWorker.mock.calls[0]?.[0] as
-		| {
-				files?: Record<string, string>
-		  }
-		| undefined
-	const nestedRuntimePath =
-		'.__kody_packages__/@kentcdodds/ai-chat/.__published_bundle__/2e/dist/.__kody_virtual__/runtime.js'
-	expect(bundlerInput?.files?.[nestedRuntimePath]).toBe(
-		createRuntimeModuleReexportSource(nestedRuntimePath),
-	)
-	expect(bundlerInput?.files?.[nestedRuntimePath]).not.toBe(staleRuntimeSource)
-	expect(bundlerInput?.files?.['.__kody_virtual__/runtime.js']).toContain(
-		'__kodyCreateRuntimeObjectProxy',
-	)
-})
-
-test('package runtime module paths round-trip stamped package ids', () => {
-	const packageId = crypto.randomUUID()
-	const modulePath = buildPackageRuntimeModulePath(packageId)
-	expect(modulePath).toMatch(
-		/^\.__kody_virtual__\/package-runtime\/[0-9a-f]+\.js$/,
-	)
-	expect(parsePackageRuntimeModulePathPackageId(modulePath)).toBe(packageId)
-	// Artifact installs nest the stamped module under graph prefixes; the id
-	// must still parse out.
-	expect(
-		parsePackageRuntimeModulePathPackageId(
-			`.__kody_packages__/@kentcdodds/example-package/.__published_bundle__/2e/${modulePath}`,
-		),
-	).toBe(packageId)
-	expect(
-		parsePackageRuntimeModulePathPackageId('.__kody_virtual__/runtime.js'),
-	).toBeNull()
-	expect(parsePackageRuntimeModulePathPackageId('src/index.js')).toBeNull()
-	expect(
-		parsePackageRuntimeModulePathPackageId(
-			'.__kody_virtual__/package-runtime/not-hex.js',
-		),
-	).toBeNull()
-
-	const moduleSource = createPackageRuntimeModuleSource(packageId)
-	expect(moduleSource).toContain(JSON.stringify(packageId))
-	expect(moduleSource).toContain('__kodyCreatePackageBoundStorage')
-	expect(moduleSource).toContain('__kodyCreatePackageBoundSecrets')
-	expect(moduleSource).toContain('../runtime.js')
-})
-
-test('buildKodyModuleBundle stamps root modules with a per-package runtime module when rootPackageId is provided', async () => {
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(createBundleResult('stamped-root'))
-	const rootPackageId = crypto.randomUUID()
-
-	await buildKodyModuleBundle({
-		...createModuleBundleInput({
-			code: [
-				"import { packageStorage } from 'kody:runtime'",
-				'export default async function run() {',
-				'\treturn packageStorage().id',
-				'}',
-			].join('\n'),
+	const invokedInputs: Array<Record<string, unknown>> = []
+	const result = await runBundledModuleWithRegistry(
+		env,
+		createMcpCallerContext({
+			baseUrl: 'https://kody.dev',
+			user: {
+				userId: 'user-workers-test',
+				email: 'worker@example.com',
+				displayName: 'Worker Test',
+			},
 		}),
-		rootPackageId,
-	})
-
-	const stampedCall = mockModule.createWorker.mock.calls[0]?.[0] as
-		| { files?: Record<string, string> }
-		| undefined
-	const stampedModulePath = buildPackageRuntimeModulePath(rootPackageId)
-	expect(stampedCall?.files?.['.__kody_root__/entry.ts']).toContain(
-		`../${stampedModulePath}`,
-	)
-	expect(stampedCall?.files?.['.__kody_root__/entry.ts']).not.toContain(
-		"'kody:runtime'",
-	)
-	expect(stampedCall?.files?.[stampedModulePath]).toBe(
-		createPackageRuntimeModuleSource(rootPackageId),
-	)
-
-	// Without root provenance the same source uses the public runtime facade
-	// (whose packageStorage falls back to the run's own package context).
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(
-		createBundleResult('unstamped-root'),
-	)
-	await buildKodyModuleBundle(
-		createModuleBundleInput({
-			code: [
-				"import { packageStorage } from 'kody:runtime'",
-				'export default async function run() {',
-				'\treturn packageStorage().id',
-				'}',
-			].join('\n'),
-		}),
-	)
-	const unstampedCall = mockModule.createWorker.mock.calls[0]?.[0] as
-		| { files?: Record<string, string> }
-		| undefined
-	expect(unstampedCall?.files?.['.__kody_root__/entry.ts']).toContain(
-		'../.__kody_virtual__/public-runtime.js',
-	)
-	expect(unstampedCall?.files?.['.__kody_root__/entry.ts']).not.toContain(
-		'package-runtime/',
-	)
-})
-
-test('statically imported saved package sources get stamped with their own package id', async () => {
-	mockModule.createWorker.mockReset()
-	mockModule.createWorker.mockResolvedValue(
-		createBundleResult('stamped-dependency'),
-	)
-	mockModule.getSavedPackageByName.mockResolvedValue(createSavedPackageRecord())
-	mockModule.getSavedPackageByKodyId.mockResolvedValue(null)
-	mockModule.loadPublishedBundleArtifactByIdentity.mockResolvedValue(null)
-	mockModule.loadPackageSourceBySourceId.mockResolvedValue({
-		...createLoadedPackageSource(),
-		files: {
-			'index.js': 'export const value = "ok"',
-			'follow-up-on-pr-agent.js': [
-				"import { packageStorage } from 'kody:runtime'",
-				'export default async function followUp() {',
-				'\treturn packageStorage().id',
-				'}',
-			].join('\n'),
-		},
-	})
-
-	await buildKodyModuleBundle(
-		createModuleBundleInput({
-			code: [
-				"import followUp from 'kody:@kentcdodds/example-package/follow-up-on-pr-agent'",
-				"import { packageStorage } from 'kody:runtime'",
-				'export default async function run() {',
-				'\treturn { dependency: await followUp(), root: packageStorage().id }',
-				'}',
-			].join('\n'),
-		}),
-	)
-
-	const call = mockModule.createWorker.mock.calls[0]?.[0] as
-		| { files?: Record<string, string> }
-		| undefined
-	// The dependency module (saved package id pkg-1) is stamped…
-	const dependencyModulePath =
-		'.__kody_packages__/@kentcdodds/example-package/follow-up-on-pr-agent.js'
-	const stampedModulePath = buildPackageRuntimeModulePath('pkg-1')
-	expect(call?.files?.[dependencyModulePath]).toContain(
-		`../../../${stampedModulePath}`,
-	)
-	expect(call?.files?.[stampedModulePath]).toBe(
-		createPackageRuntimeModuleSource('pkg-1'),
-	)
-	// …while the unprovenanced root entry uses the public runtime facade.
-	expect(call?.files?.['.__kody_root__/entry.ts']).toContain(
-		'../.__kody_virtual__/public-runtime.js',
-	)
-	expect(call?.files?.['.__kody_root__/entry.ts']).not.toContain(
-		'package-runtime/',
-	)
-})
-
-test('refreshKodyRuntimeModules evaluates the full runtime once for artifact-only graphs', () => {
-	const prefix =
-		'.__kody_packages__/@kentcdodds/example/.__published_bundle__/ab'
-	const primary = `${prefix}/.__kody_virtual__/runtime.js`
-	const nested = `${prefix}/nested/.__kody_virtual__/runtime.js`
-	const refreshed = refreshKodyRuntimeModules(
 		{
-			[`${prefix}/entry.js`]: `import "./.__kody_virtual__/runtime.js";
-import "./nested/.__kody_virtual__/runtime.js";
-export default async function run() { return null }`,
-			[primary]: 'stale-primary',
-			[nested]: 'stale-nested',
+			mainModule: bundle.mainModule,
+			modules: bundle.modules,
 		},
-		{ includeDefaultRuntimePath: false },
+		{ eventId: 'event-1' },
+		{
+			packageContext: null,
+			packageInvokeTools: {
+				invoke: async (input) => {
+					invokedInputs.push(input)
+					return { ok: true, input }
+				},
+			},
+			skipCapabilityRegistry: true,
+		},
 	)
-	expect(refreshed[primary]).toContain('__kodyCreateRuntimeObjectProxy')
-	expect(refreshed[nested]).toContain('export * from')
-	expect(refreshed[nested]).not.toContain('__kodyCreateRuntimeObjectProxy')
-	expect(refreshed['.__kody_virtual__/runtime.js']).toBeUndefined()
-})
 
-test('refreshKodyRuntimeModules regenerates stale per-package runtime modules and their sibling shared runtime', () => {
-	const packageId = crypto.randomUUID()
-	const nestedPrefix =
-		'.__kody_packages__/@kentcdodds/example-package/.__published_bundle__/2e'
-	const stampedModulePath = `${nestedPrefix}/${buildPackageRuntimeModulePath(packageId)}`
-	const refreshed = refreshKodyRuntimeModules({
-		'entry.js': [
-			`import { packageStorage } from './${stampedModulePath}'`,
-			'export default async function run() {',
-			'\treturn packageStorage().id',
-			'}',
-		].join('\n'),
-		[stampedModulePath]: 'export const packageStorage = () => "stale"',
-	})
-	expect(refreshed[stampedModulePath]).toBe(
-		createPackageRuntimeModuleSource(packageId),
-	)
-	// The regenerated stamped module imports its sibling shared runtime; the
-	// refresh must materialize that sibling even when nothing referenced it.
-	// Prefixed copies re-export the graph-root runtime so the stamp ALS is
-	// created once and is not published on globalThis.
-	expect(refreshed['.__kody_virtual__/runtime.js']).toBe(
-		createRuntimeModuleSource(),
-	)
-	expect(refreshed[`${nestedPrefix}/.__kody_virtual__/runtime.js`]).toBe(
-		createRuntimeModuleReexportSource(
-			`${nestedPrefix}/.__kody_virtual__/runtime.js`,
+	expect(result.error).toBeUndefined()
+	expect(result.result).toEqual({
+		packageContextIsNull: true,
+		directKodyInvokeChecked: expect.stringContaining('package_invoke_checked'),
+		removedObjectInvoke: expect.stringContaining(
+			'Object-only packages.invoke was removed',
 		),
-	)
+		invoked: {
+			ok: true,
+			input: {
+				specifier: 'kody:@owner/target-package/run',
+				options: { params: { eventId: 'event-1' } },
+			},
+		},
+	})
+	expect(
+		(result.result as { directKodyInvokeChecked: unknown })
+			.directKodyInvokeChecked,
+	).not.toBe('resolved')
+	expect(invokedInputs).toEqual([
+		{
+			specifier: 'kody:@owner/target-package/run',
+			options: { params: { eventId: 'event-1' } },
+		},
+	])
 })
 
-test('packageStorage resolves the stamped package id, falls back to the run package context, and rejects unprovenanced calls', async () => {
-	const packageId = crypto.randomUUID()
-	const stampedModulePath = buildPackageRuntimeModulePath(packageId)
-	const moduleGraph = await createTemporaryModuleGraph({
-		'.__kody_virtual__/runtime.js': createRuntimeModuleSource(),
-		[stampedModulePath]: createPackageRuntimeModuleSource(packageId),
-		'stamped-entry.js': [
-			`import runtimeDefault, { packageStorage } from './${stampedModulePath}'`,
-			'export default async function main() {',
-			'\treturn {',
-			'\t\tnamed: packageStorage().id,',
-			'\t\tviaDefault: runtimeDefault.packageStorage().id,',
-			'\t}',
-			'}',
-		].join('\n'),
-		'unstamped-entry.js': [
-			"import { packageStorage } from './.__kody_virtual__/runtime.js'",
-			'export default async function main() {',
-			'\treturn packageStorage().id',
-			'}',
-		].join('\n'),
-	})
-	try {
-		const runtimeModule = (await moduleGraph.importModule(
-			'.__kody_virtual__/runtime.js',
-			{ cacheBust: false },
-		)) as RuntimeModule
-		const runEntry = async (
-			entryPath: string,
-			runtime: Record<string, unknown>,
-		) =>
-			await runtimeModule.__kodyRunInRuntime(runtime, async () => {
-				const entry = (await moduleGraph.importModule(entryPath, {
-					cacheBust: false,
-				})) as { default: () => Promise<unknown> }
-				return await entry.default()
-			})
-		const boundRuntime = {
-			__kodyPackageStorage: (boundPackageId: string) => ({
-				id: `package:${boundPackageId}`,
+test(
+	'key-less packages.invoke runs the target package lean in its own realm',
+	{ timeout: 30_000 },
+	async () => {
+		silenceIncidentalRuntimeWarnings()
+		const unique = crypto.randomUUID()
+		const userId = `user-${unique}`
+		await runSql(
+			`INSERT INTO users (username, email, password_hash, stable_user_id, email_verified_at)
+			 VALUES (?, ?, ?, ?, '2026-01-01T00:00:00.000Z')`,
+			`worker-${unique}`,
+			`worker-${unique}@example.com`,
+			'test-password-hash',
+			userId,
+		)
+		const sourceId = `source-${unique}`
+		const packageId = `pkg-${unique}`
+		const publishedCommit = `commit-${unique}`
+		const source = await insertSavedPackage({
+			userId,
+			packageId,
+			kodyId: 'lean-target',
+			name: '@kentcdodds/lean-target',
+			sourceId,
+			publishedCommit,
+		})
+		const targetSourceFiles = {
+			'package.json': JSON.stringify({
+				name: '@kentcdodds/lean-target',
+				exports: {
+					'./probe': './src/probe.ts',
+				},
+				kody: {
+					id: 'lean-target',
+					description: 'Lean invoke probe target',
+				},
 			}),
-			packageContext: { packageId: 'pkg-context', kodyId: 'context' },
+			'src/probe.ts': [
+				"import { packageContext } from 'kody:runtime'",
+				'',
+				'let isolateCallCount = 0',
+				'',
+				'export default async function probe(input: { marker?: string } = {}) {',
+				'\tisolateCallCount += 1',
+				";(globalThis as Record<string, unknown>).__kodyLeanTargetMarker = 'target'",
+				'\treturn {',
+				'\t\tmarker: input.marker ?? null,',
+				'\t\tisolateCallCount,',
+				'\t\ttargetKodyId: packageContext?.kodyId ?? null,',
+				"\t\tcallerMarkerVisible: typeof (globalThis as Record<string, unknown>).__kodyLeanCallerMarker !== 'undefined',",
+				'\t}',
+				'}',
+			].join('\n'),
+		}
+		await persistPublishedSourceSnapshot({
+			env,
+			userId,
+			source,
+			snapshot: {
+				files: targetSourceFiles,
+			},
+		})
+		const artifactBundle = await buildKodyImportableModuleBundle({
+			env,
+			baseUrl: 'https://kody.dev',
+			userId,
+			sourceFiles: targetSourceFiles,
+			entryPoint: 'src/probe.ts',
+		})
+		await persistPublishedBundleArtifact({
+			env,
+			userId,
+			source,
+			kind: 'importable-module',
+			artifactName: './probe',
+			entryPoint: 'src/probe.ts',
+			mainModule: artifactBundle.mainModule,
+			modules: artifactBundle.modules,
+			dependencies: artifactBundle.dependencies,
+			packageContext: {
+				packageId,
+				kodyId: 'lean-target',
+				sourceId,
+			},
+		})
+
+		const callerBundle = await buildKodyModuleBundle({
+			env,
+			baseUrl: 'https://kody.dev',
+			userId,
+			bundleContext: 'ad-hoc-execute',
+			sourceFiles: {
+				'entry.ts': [
+					"import { packages } from 'kody:runtime'",
+					'',
+					'export default async function main() {',
+					";(globalThis as Record<string, unknown>).__kodyLeanCallerMarker = 'caller'",
+					'\tconst startedAt = Date.now()',
+					"\tconst first = await packages?.invoke('kody:@kentcdodds/lean-target/probe', { params: { marker: 'first' } })",
+					'\tconst firstDurationMs = Date.now() - startedAt',
+					"\tconst second = await packages?.invoke('kody:@kentcdodds/lean-target/probe', { params: { marker: 'second' } })",
+					'\treturn {',
+					'\t\tfirst,',
+					'\t\tsecond,',
+					'\t\tfirstDurationMs,',
+					"\t\ttargetMarkerVisible: typeof (globalThis as Record<string, unknown>).__kodyLeanTargetMarker !== 'undefined',",
+					'\t}',
+					'}',
+				].join('\n'),
+			},
+			entryPoint: 'entry.ts',
+		})
+		const callerContext = createMcpCallerContext({
+			baseUrl: 'https://kody.dev',
+			user: {
+				userId,
+				email: 'worker@example.com',
+				displayName: 'Worker Test',
+			},
+		})
+		const result = await runBundledModuleWithRegistry(
+			env,
+			callerContext,
+			{
+				mainModule: callerBundle.mainModule,
+				modules: callerBundle.modules,
+			},
+			undefined,
+			{
+				packageContext: null,
+				packageInvokeTools: createExecutePackageInvokeTools({
+					env,
+					baseUrl: 'https://kody.dev',
+					callerContext,
+				}),
+				skipCapabilityRegistry: true,
+			},
+		)
+
+		expect(result.error).toBeUndefined()
+		const payload = result.result as {
+			first: Record<string, unknown>
+			second: Record<string, unknown>
+			firstDurationMs: number
+			targetMarkerVisible: boolean
+		}
+		// The target ran in its own runtime (packageContext bound to the target
+		// package). Same user + published graph reuse one isolate; params arrive
+		// on evaluate RPC, so the second invoke sees the module-level counter.
+		expect(payload.first).toEqual({
+			marker: 'first',
+			isolateCallCount: 1,
+			targetKodyId: 'lean-target',
+			callerMarkerVisible: false,
+		})
+		expect(payload.second).toEqual({
+			marker: 'second',
+			isolateCallCount: 1,
+			targetKodyId: 'lean-target',
+			callerMarkerVisible: false,
+		})
+		// Realm separation in the other direction: the target's globals never
+		// leak back into the caller realm.
+		expect(payload.targetMarkerVisible).toBe(false)
+		// Sanity bound only: workerd test timing is too noisy for a strict
+		// budget; the production lean-path latency claim is validated by live
+		// probes, not this test.
+		expect(payload.firstDurationMs).toBeLessThan(20_000)
+	},
+)
+
+test(
+	'named-only package exports build callable artifacts and stay importable',
+	{ timeout: 30_000 },
+	async () => {
+		silenceIncidentalRuntimeWarnings()
+		const unique = crypto.randomUUID()
+		const userId = `user-${unique}`
+		const sourceId = `source-${unique}`
+		const packageId = `pkg-${unique}`
+		const source = await insertSavedPackage({
+			userId,
+			packageId,
+			kodyId: 'named-only',
+			name: '@kentcdodds/named-only',
+			sourceId,
+			publishedCommit: `commit-${unique}`,
+		})
+		const sourceFiles = {
+			'package.json': JSON.stringify({
+				name: '@kentcdodds/named-only',
+				exports: {
+					'.': './src/index.ts',
+				},
+				kody: {
+					id: 'named-only',
+					description: 'Named-only export package',
+				},
+			}),
+			'src/index.ts':
+				'export function double(value: number) { return value * 2 }',
+		}
+		const callerContext = createMcpCallerContext({
+			baseUrl: 'https://kody.dev',
+			user: {
+				userId,
+				email: 'worker@example.com',
+				displayName: 'Worker Test',
+			},
+		})
+
+		for (const entrySource of [
+			sourceFiles['src/index.ts'],
+			[
+				'interface Shape { value: number }',
+				'export { Shape as default }',
+				sourceFiles['src/index.ts'],
+			].join('\n'),
+		]) {
+			const callableBundle = await buildKodyModuleBundle({
+				env,
+				baseUrl: 'https://kody.dev',
+				userId,
+				sourceFiles: { ...sourceFiles, 'src/index.ts': entrySource },
+				entryPoint: 'src/index.ts',
+				rootPackageId: packageId,
+			})
+			const invoked = await runBundledModuleWithRegistry(
+				env,
+				callerContext,
+				callableBundle,
+				undefined,
+				{ skipCapabilityRegistry: true },
+			)
+			expect(invoked.result).toBeUndefined()
+			expect(String(invoked.error)).toContain(
+				'Kody execute modules must default export a function; "src/index.ts" has no default export.',
+			)
 		}
 
-		// Stamped modules use their bundle-time identity even when the run
-		// belongs to a different package.
-		await expect(runEntry('stamped-entry.js', boundRuntime)).resolves.toEqual({
-			named: `package:${packageId}`,
-			viaDefault: `package:${packageId}`,
+		await persistPublishedSourceSnapshot({
+			env,
+			userId,
+			source,
+			snapshot: { files: sourceFiles },
 		})
-		// Unstamped modules fall back to the run's own package context.
-		await expect(runEntry('unstamped-entry.js', boundRuntime)).resolves.toBe(
-			'package:pkg-context',
+		const importableBundle = await buildKodyImportableModuleBundle({
+			env,
+			baseUrl: 'https://kody.dev',
+			userId,
+			sourceFiles,
+			entryPoint: 'src/index.ts',
+			rootPackageId: packageId,
+		})
+		await persistPublishedBundleArtifact({
+			env,
+			userId,
+			source,
+			kind: 'importable-module',
+			artifactName: '.',
+			entryPoint: 'src/index.ts',
+			mainModule: importableBundle.mainModule,
+			modules: importableBundle.modules,
+			dependencies: importableBundle.dependencies,
+			packageContext: { packageId, kodyId: 'named-only', sourceId },
+		})
+		const callerBundle = await buildKodyModuleBundle({
+			env,
+			baseUrl: 'https://kody.dev',
+			userId,
+			bundleContext: 'ad-hoc-execute',
+			sourceFiles: {
+				'entry.ts': [
+					"import { double } from 'kody:@kentcdodds/named-only'",
+					'export default async function main() {',
+					'\treturn { doubled: double(21) }',
+					'}',
+				].join('\n'),
+			},
+			entryPoint: 'entry.ts',
+		})
+		const imported = await runBundledModuleWithRegistry(
+			env,
+			callerContext,
+			callerBundle,
+			undefined,
+			{ skipCapabilityRegistry: true },
 		)
-		// No provenance at all: a clear, actionable error.
-		await expect(
-			runEntry('unstamped-entry.js', {
-				__kodyPackageStorage: boundRuntime.__kodyPackageStorage,
+		expect(imported.error).toBeUndefined()
+		expect(imported.result).toEqual({ doubled: 42 })
+	},
+)
+
+test(
+	'computed import(specifier) loads caller-owned default export without packages bound',
+	{ timeout: 30_000 },
+	async () => {
+		silenceIncidentalRuntimeWarnings()
+		const unique = crypto.randomUUID()
+		const userId = `user-${unique}`
+		await runSql(
+			`INSERT INTO users (username, email, password_hash, stable_user_id, email_verified_at)
+			 VALUES (?, ?, ?, ?, '2026-01-01T00:00:00.000Z')`,
+			`worker-${unique}`,
+			`worker-${unique}@example.com`,
+			'test-password-hash',
+			userId,
+		)
+		const sourceId = `source-${unique}`
+		const packageId = `pkg-${unique}`
+		const publishedCommit = `commit-${unique}`
+		const source = await insertSavedPackage({
+			userId,
+			packageId,
+			kodyId: 'computed-import-target',
+			name: '@kentcdodds/computed-import-target',
+			sourceId,
+			publishedCommit,
+		})
+		const targetSourceFiles = {
+			'package.json': JSON.stringify({
+				name: '@kentcdodds/computed-import-target',
+				exports: {
+					'./probe': './src/probe.ts',
+				},
+				kody: {
+					id: 'computed-import-target',
+					description: 'Computed import Gate 2 target',
+				},
 			}),
-		).rejects.toThrow('packageStorage() requires package provenance')
-		// Contexts that never bind the factory (no authenticated user) fail
-		// with the availability message instead of a bare TypeError.
+			'src/probe.ts': [
+				"import { packageContext, packages } from 'kody:runtime'",
+				'',
+				'export default async function probe(input: { marker?: string } = {}) {',
+				'\treturn {',
+				'\t\tmarker: input.marker ?? null,',
+				'\t\tpackageContextKodyId: packageContext?.kodyId ?? null,',
+				'\t\tpackagesBound: packages != null,',
+				'\t}',
+				'}',
+			].join('\n'),
+		}
+		await persistPublishedSourceSnapshot({
+			env,
+			userId,
+			source,
+			snapshot: {
+				files: targetSourceFiles,
+			},
+		})
+		const artifactBundle = await buildKodyImportableModuleBundle({
+			env,
+			baseUrl: 'https://kody.dev',
+			userId,
+			sourceFiles: targetSourceFiles,
+			entryPoint: 'src/probe.ts',
+			rootPackageId: packageId,
+		})
+		await persistPublishedBundleArtifact({
+			env,
+			userId,
+			source,
+			kind: 'importable-module',
+			artifactName: './probe',
+			entryPoint: 'src/probe.ts',
+			mainModule: artifactBundle.mainModule,
+			modules: artifactBundle.modules,
+			dependencies: artifactBundle.dependencies,
+			packageContext: {
+				packageId,
+				kodyId: 'computed-import-target',
+				sourceId,
+			},
+		})
+
+		const callerBundle = await buildKodyModuleBundle({
+			env,
+			baseUrl: 'https://kody.dev',
+			userId,
+			bundleContext: 'ad-hoc-execute',
+			sourceFiles: {
+				'entry.ts': [
+					"import { packages } from 'kody:runtime'",
+					'',
+					'export default async function main() {',
+					"\tconst specifier = 'kody:@kentcdodds/computed-import-target/probe'",
+					'\tconst mod = await import(specifier)',
+					"\tconst result = await mod.default({ marker: 'from-computed-import' })",
+					'\treturn {',
+					'\t\tresult,',
+					'\t\tcallerPackagesBound: packages != null,',
+					'\t}',
+					'}',
+				].join('\n'),
+			},
+			entryPoint: 'entry.ts',
+		})
+		const callerContext = createMcpCallerContext({
+			baseUrl: 'https://kody.dev',
+			user: {
+				userId,
+				email: 'worker@example.com',
+				displayName: 'Worker Test',
+			},
+		})
+		const result = await runBundledModuleWithRegistry(
+			env,
+			callerContext,
+			{
+				mainModule: callerBundle.mainModule,
+				modules: callerBundle.modules,
+			},
+			undefined,
+			{
+				packageContext: null,
+				// Gate 2: computed import must work with packages.invoke unbound.
+				packageInvokeTools: undefined,
+				skipCapabilityRegistry: true,
+			},
+		)
+
+		expect(result.error).toBeUndefined()
+		expect(result.result).toEqual({
+			result: {
+				marker: 'from-computed-import',
+				// Library-load semantics: caller's packageContext (null on execute).
+				packageContextKodyId: null,
+				packagesBound: false,
+			},
+			callerPackagesBound: false,
+		})
+	},
+)
+
+test(
+	'kody.app.client bundles TypeScript for the browser into one fingerprinted ESM module',
+	{ timeout: 20_000 },
+	async () => {
+		silenceIncidentalRuntimeWarnings()
+		const packageJson = JSON.stringify({
+			name: '@kentcdodds/browser-client',
+			exports: {
+				'.': './src/index.ts',
+			},
+			kody: {
+				id: 'browser-client',
+				description: 'Exercises the browser client bundle',
+				app: {
+					entry: './src/app.ts',
+					client: './src/client.ts',
+				},
+			},
+		})
+		const sourceFiles = {
+			'package.json': packageJson,
+			'src/index.ts': 'export default async () => ({ ok: true })',
+			'src/app.ts': [
+				"import { packageContext } from 'kody:runtime'",
+				'export default {',
+				'\tasync fetch() {',
+				'\t\treturn new Response(packageContext?.clientModuleUrl ?? "")',
+				'\t},',
+				'}',
+			].join('\n'),
+			'src/client.ts': [
+				"import { render } from './render.ts'",
+				'',
+				'type Greeting = { name: string }',
+				'const greeting: Greeting = { name: "browser" }',
+				'export const mounted = render(greeting.name)',
+			].join('\n'),
+			'src/render.ts': [
+				'export function render(name: string) {',
+				'\treturn `hello ${name}`',
+				'}',
+			].join('\n'),
+		}
+
+		const bundle = await buildKodyAppClientBundle({
+			env: env,
+			sourceFiles,
+			entryPoint: 'src/client.ts',
+		})
+
+		expect(bundle.mainModule).toMatch(packageAppClientModuleNamePattern)
+		expect(Object.keys(bundle.modules)).toEqual([bundle.mainModule])
+		const source = bundle.modules[bundle.mainModule]
+		expect(typeof source).toBe('string')
+		const code = source as string
+		// Browser ESM: TypeScript stripped, relative graph inlined, no imports
+		// left for the browser to resolve, and the export surface preserved.
+		expect(code).not.toContain('type Greeting')
+		expect(code).not.toMatch(/\bimport\b/)
+		expect(code).toContain('hello ${name}')
+		expect(code).toMatch(/export\s*\{/)
+
+		const rebuilt = await buildKodyAppClientBundle({
+			env: env,
+			sourceFiles,
+			entryPoint: 'src/client.ts',
+		})
+		expect(rebuilt.mainModule).toBe(bundle.mainModule)
+
 		await expect(
-			runEntry('stamped-entry.js', { packageContext: null }),
-		).rejects.toThrow('packageStorage() is not available')
-	} finally {
-		await moduleGraph.cleanup()
-	}
-})
+			buildKodyAppClientBundle({
+				env: env,
+				sourceFiles: {
+					...sourceFiles,
+					'src/client.ts': [
+						"import { packageContext } from 'kody:runtime'",
+						'console.log(packageContext)',
+					].join('\n'),
+				},
+				entryPoint: 'src/client.ts',
+			}),
+		).rejects.toThrow(/server-only modules that cannot run in the browser/)
+
+		// Declared externals survive esbuild as bare imports for the page's
+		// import map; the relative graph is still inlined around them.
+		const importMapPackageJson = JSON.stringify({
+			...JSON.parse(packageJson),
+			kody: {
+				...JSON.parse(packageJson).kody,
+				app: {
+					entry: './src/app.ts',
+					client: { entry: './src/client.ts', externals: ['@remix-run/ui'] },
+				},
+			},
+		})
+		const withExternals = await buildKodyAppClientBundle({
+			env: env,
+			sourceFiles: {
+				...sourceFiles,
+				'package.json': importMapPackageJson,
+				'src/client.ts': [
+					"import { Button } from '@remix-run/ui'",
+					"import { render } from './render.ts'",
+					'export const mounted = render(String(Button))',
+				].join('\n'),
+			},
+			entryPoint: 'src/client.ts',
+		})
+		const externalCode = withExternals.modules[withExternals.mainModule]
+		expect(externalCode).toMatch(/from\s+"@remix-run\/ui"/)
+		expect(externalCode).toContain('hello ${name}')
+		expect(externalCode).not.toMatch(/from\s+["']\.\/render/)
+
+		// Subpaths of a declared external stay external too, but a package that
+		// merely shares the prefix is not silently externalized: it is an
+		// unresolved bare import and fails publish with the externals hint.
+		const subpathPackageJson = JSON.stringify({
+			...JSON.parse(packageJson),
+			kody: {
+				...JSON.parse(packageJson).kody,
+				app: {
+					entry: './src/app.ts',
+					client: { entry: './src/client.ts', externals: ['preact'] },
+				},
+			},
+		})
+		const subpath = await buildKodyAppClientBundle({
+			env: env,
+			sourceFiles: {
+				...sourceFiles,
+				'package.json': subpathPackageJson,
+				'src/client.ts': [
+					"import { useState } from 'preact/hooks'",
+					'export const state = useState',
+				].join('\n'),
+			},
+			entryPoint: 'src/client.ts',
+		})
+		expect(subpath.modules[subpath.mainModule]).toMatch(
+			/from\s+"preact\/hooks"/,
+		)
+		await expect(
+			buildKodyAppClientBundle({
+				env: env,
+				sourceFiles: {
+					...sourceFiles,
+					'package.json': subpathPackageJson,
+					'src/client.ts': [
+						"import render from 'preact-render-to-string'",
+						'export const html = render',
+					].join('\n'),
+				},
+				entryPoint: 'src/client.ts',
+			}),
+		).rejects.toThrow(
+			/unresolved bare package imports after bundling \("preact-render-to-string"\)/,
+		)
+	},
+)

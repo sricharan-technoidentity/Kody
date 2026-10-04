@@ -13,16 +13,16 @@ A full-stack web application built on Cloudflare Workers with Remix 3 (beta).
 
 ## Quick Reference
 
-| Task                          | Command                |
-| ----------------------------- | ---------------------- |
-| Start or reuse dev server     | `npm run dev:ensure`   |
-| Full validation               | `npm run validate`     |
-| Apply formatter / lint        | `npm run validate:fix` |
-| Lint                          | `npm run lint`         |
-| Format                        | `npm run format`       |
-| Type check                    | `npm run typecheck`    |
-| Build                         | `npm run build`        |
-| E2E tests                     | `npm run test:e2e:run` |
+| Task                      | Command                |
+| ------------------------- | ---------------------- |
+| Start or reuse dev server | `npm run dev:ensure`   |
+| Full validation           | `npm run validate`     |
+| Apply formatter / lint    | `npm run validate:fix` |
+| Lint                      | `npm run lint`         |
+| Format                    | `npm run format`       |
+| Type check                | `npm run typecheck`    |
+| Build                     | `npm run build`        |
+| E2E tests                 | `npm run test:e2e:run` |
 
 `npm run validate` is the single authoritative local gate. `validate` is
 read-only; use `npm run validate:fix` when you want auto-fixes applied.

@@ -1,7 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+
 import { expect, test } from 'vitest'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+
 import {
 	createFakeImagesBinding,
 	tinyPngBytes,
@@ -13,8 +13,6 @@ import {
 	getMcpServerSettingRowById,
 	insertMcpServerSettingRow,
 } from './settings-repo.ts'
-
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
 
 type StoredObject = {
 	bytes: Uint8Array
@@ -67,19 +65,28 @@ function createInMemoryR2() {
 	return { bucket, objects }
 }
 
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
+async function createHarness() {
+	const database = await createTestDb({ userId: 'user-1' })
+	const sqlite = database.pg
+
+	const db = database.db
 	const r2 = createInMemoryR2()
 	const env = {
 		COMMUNITY_ASSETS: r2.bucket,
 		IMAGES: createFakeImagesBinding(),
 	} as Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
-	return { sqlite, db, env, r2 }
+	return {
+		sqlite,
+		db,
+		env,
+		r2,
+		[Symbol.asyncDispose]: database[Symbol.asyncDispose],
+	}
 }
 
-async function provisionServer(harness: ReturnType<typeof createHarness>) {
+async function provisionServer(
+	harness: Awaited<ReturnType<typeof createHarness>>,
+) {
 	const row = {
 		id: 'server-1',
 		user_id: 'user-1',
@@ -99,7 +106,7 @@ async function provisionServer(harness: ReturnType<typeof createHarness>) {
 }
 
 test('lazy refit of an MCP favicon keeps faviconSourceHost', async () => {
-	const harness = createHarness()
+	await using harness = await createHarness()
 	const server = await provisionServer(harness)
 	const previousKey = `user-mcp-server-logos/${server.user_id}/${server.id}/aaaaaaaaaaaaaaaa.png`
 	await harness.env.COMMUNITY_ASSETS.put(previousKey, tinyPngBytes, {
@@ -157,7 +164,7 @@ test('lazy refit of an MCP favicon keeps faviconSourceHost', async () => {
 })
 
 test('lazy refit does not overwrite a newer MCP logo key', async () => {
-	const harness = createHarness()
+	await using harness = await createHarness()
 	const server = await provisionServer(harness)
 	const previousKey = `user-mcp-server-logos/${server.user_id}/${server.id}/aaaaaaaaaaaaaaaa.png`
 	const newerKey = `user-mcp-server-logos/${server.user_id}/${server.id}/bbbbbbbbbbbbbbbb.webp`
@@ -229,7 +236,7 @@ test('lazy refit does not overwrite a newer MCP logo key', async () => {
 })
 
 test('lost same-hash refit race keeps the stored MCP logo', async () => {
-	const harness = createHarness()
+	await using harness = await createHarness()
 	const server = await provisionServer(harness)
 	const previousKey = `user-mcp-server-logos/${server.user_id}/${server.id}/aaaaaaaaaaaaaaaa.png`
 	await harness.env.COMMUNITY_ASSETS.put(previousKey, tinyPngBytes, {

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const mockModule = vi.hoisted(() => ({
@@ -20,7 +21,7 @@ function createUsersDb(emailVerifiedAt: string | null) {
 				first: async () => ({ email_verified_at: emailVerifiedAt }),
 			}),
 		}),
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function createEnv(options: { emailVerifiedAt?: string | null } = {}) {

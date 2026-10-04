@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 
@@ -23,7 +24,7 @@ import { adminUserGetCapability } from './admin-user-get.ts'
 import { adminUserListCapability } from './admin-user-list.ts'
 import { adminUserUpdateCapability } from './admin-user-update.ts'
 import { adminUserVerifyCapability } from './admin-user-verify.ts'
-import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-catalog.ts'
 import { createInMemoryRunLogUsageEnv } from '#worker/test-support/run-log-usage.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
@@ -607,7 +608,7 @@ function createAdminCapabilityTestDb(input: {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	return { db, auditEvents, passwordResets, userRoles, users }
 }
@@ -616,7 +617,7 @@ const userMeter = createInMemoryUserMeterEnv()
 const runLog = createInMemoryRunLogUsageEnv()
 
 function createAdminCapabilityContext(
-	db: D1Database,
+	db: SqlDatabase,
 	blobs?: Pick<R2Bucket, 'get'>,
 ) {
 	return {
@@ -626,10 +627,8 @@ function createAdminCapabilityContext(
 			...createInMemoryRepoSessionIndexEnv(db),
 			APP_DB: db,
 			AUDIT_DB: db,
-			MAILBOX: {
-				idFromName: (userId: string) =>
-					({ userId }) as unknown as DurableObjectId,
-				get: () => ({
+			MAILBOX_STORE: {
+				forUser: () => ({
 					countMessages: async () => ({ total: 0 }),
 				}),
 			},

@@ -1,52 +1,265 @@
-import { expect, test, vi } from 'vitest'
+import { env } from '#worker/test-support/mail.ts'
+import { expect } from 'vitest'
+import { test } from '#worker/test-support/mail.ts'
+import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
+import { processCloudflareEmailDeliveryEvent } from './delivery-events.ts'
+import {
+	applyOutboundEmailAbusePause,
+	emailOutboundPausedMessage,
+	outboundEmailBouncePauseThresholdPerDay,
+} from './outbound-abuse.ts'
+import { mailboxRpc } from './mailbox-client.ts'
+import { sendOutboundEmail } from './outbound.ts'
+import { upsertOutboundProviderIndexRow } from './outbound-provider-index.ts'
+import { ensureEmailTestSchema } from './test-schema.ts'
 
-const mocks = vi.hoisted(() => ({
-	dispatchUserEmailOutboundPausedSubscriptionEvent: vi.fn(async () => []),
-}))
+const platformBaseUrl = 'https://kody.example.com'
 
-vi.mock('./outbound-paused-package-subscriptions.ts', () => ({
-	dispatchUserEmailOutboundPausedSubscriptionEvent:
-		mocks.dispatchUserEmailOutboundPausedSubscriptionEvent,
-}))
-
-const { applyOutboundEmailAbusePause } = await import('./outbound-abuse.ts')
-
-test('outbound pause notify does not wait for package fan-out when waitUntil is provided', async () => {
-	consoleWarn.mockImplementation(() => {})
-	mocks.dispatchUserEmailOutboundPausedSubscriptionEvent.mockImplementationOnce(
-		() => new Promise(() => {}),
+async function seedVerifiedAccount(input: { email: string }) {
+	const username = `sender-${crypto.randomUUID().slice(0, 8)}`
+	const stableUserId = await createStableUserIdFromEmail(input.email)
+	await env.APP_DB.prepare(
+		`INSERT INTO users (username, email, password_hash, email_verified_at, plan, stable_user_id)
+			VALUES (?, ?, ?, ?, 'max', ?)`,
 	)
-	const first = vi.fn().mockResolvedValue({
-		username: 'ada',
-		email: 'ada@example.com',
+		.bind(
+			username,
+			input.email,
+			'test-password-hash',
+			new Date().toISOString(),
+			stableUserId,
+		)
+		.run()
+	return { username, stableUserId }
+}
+
+async function recordProviderEvent(input: {
+	providerMessageId: string
+	eventId: string
+	status: 'delivered' | 'bounced' | 'complained'
+	eventTimestamp: string
+}) {
+	const result = await processCloudflareEmailDeliveryEvent({
+		env,
+		body: {
+			type: `cf.email.sending.message.${input.status}`,
+			source: {
+				type: 'email.sending',
+				zoneId: 'zone-1',
+				domain: 'inbox.kody.example.com',
+			},
+			payload: {
+				eventId: input.eventId,
+				messageId: input.providerMessageId,
+				sender: 'user@inbox.kody.example.com',
+				recipient: 'recipient@example.net',
+				terminal: true,
+				delivery: { status: input.status },
+			},
+			metadata: {
+				accountId: 'account-1',
+				eventSubscriptionId: 'subscription-1',
+				eventSchemaVersion: 1,
+				eventTimestamp: input.eventTimestamp,
+			},
+		},
 	})
-	const run = vi.fn().mockResolvedValue({ meta: { changes: 1 } })
-	const prepare = vi.fn((sql: string) => {
-		if (sql.includes('email_outbound_paused_at')) {
-			return { bind: () => ({ run }) }
-		}
-		return { bind: () => ({ first }) }
+	expect(result.outcome).not.toBe('invalid')
+	return result
+}
+
+async function seedProviderMessage(input: {
+	userId: string
+	providerMessageId: string
+	subject: string
+	sentAt: string
+}) {
+	const messageId = crypto.randomUUID()
+	await mailboxRpc({ env, userId: input.userId }).upsertMessageGraph({
+		ownerId: input.userId,
+		message: {
+			id: messageId,
+			direction: 'outbound',
+			inboxId: null,
+			threadId: null,
+			senderIdentityId: null,
+			fromAddress: 'user@inbox.kody.example.com',
+			envelopeFrom: null,
+			toAddresses: ['recipient@example.net'],
+			ccAddresses: [],
+			bccAddresses: [],
+			replyToAddresses: [],
+			subject: input.subject,
+			messageIdHeader: `<${messageId}@inbox.kody.example.com>`,
+			inReplyToHeader: null,
+			references: [],
+			headers: {},
+			authResults: null,
+			textBody: null,
+			htmlBody: null,
+			rawMimeKey: null,
+			rawSize: 0,
+			processingStatus: 'sent',
+			classification: 'accepted',
+			classificationReason: null,
+			providerMessageId: input.providerMessageId,
+			deliveryStatus: null,
+			deliveryStatusAt: null,
+			error: null,
+			receivedAt: null,
+			sentAt: input.sentAt,
+			createdAt: input.sentAt,
+			updatedAt: input.sentAt,
+		},
+		attachments: [],
 	})
-	const waitUntil = vi.fn()
-	const env = {
-		APP_DB: { prepare },
-		APP_BASE_URL: 'https://kody.codes',
-		BUNDLE_ARTIFACTS_KV: {},
-	} as unknown as Env
+	await upsertOutboundProviderIndexRow({
+		db: env.APP_DB,
+		providerMessageId: input.providerMessageId,
+		userId: input.userId,
+		messageId,
+		inboxId: null,
+		now: input.sentAt,
+	})
+}
+
+async function readPauseTimestamp(stableUserId: string) {
+	const row = await env.APP_DB.prepare(
+		`SELECT email_outbound_paused_at FROM users WHERE stable_user_id = ?`,
+	)
+		.bind(stableUserId)
+		.first<{ email_outbound_paused_at: string | null }>()
+	return row?.email_outbound_paused_at ?? null
+}
+
+test('a spam complaint pauses outbound email once and blocks further sends', async () => {
+	consoleWarn.mockImplementation(() => {})
+
+	const accountEmail = `complainer-${crypto.randomUUID()}@example.com`
+	const { stableUserId } = await seedVerifiedAccount({ email: accountEmail })
+	const providerMessageId = `provider-${crypto.randomUUID()}`
+	await seedProviderMessage({
+		userId: stableUserId,
+		providerMessageId,
+		subject: 'Complaint pause',
+		sentAt: '2026-07-17T20:00:00.000Z',
+	})
+	await recordProviderEvent({
+		providerMessageId,
+		eventId: 'event-complained',
+		status: 'complained',
+		eventTimestamp: new Date().toISOString(),
+	})
+
+	const first = await applyOutboundEmailAbusePause({
+		env,
+		userId: stableUserId,
+		deliveryStatus: 'complained',
+		eventRecorded: true,
+	})
+	expect(first.paused).toBe(true)
+	const pausedAt = await readPauseTimestamp(stableUserId)
+	expect(pausedAt).not.toBeNull()
+	expect(
+		consoleWarn.mock.calls.some((call) => call[0] === 'email-outbound-paused'),
+	).toBe(true)
+
+	// Replayed queue messages must not re-pause or move the timestamp.
+	const second = await applyOutboundEmailAbusePause({
+		env,
+		userId: stableUserId,
+		deliveryStatus: 'complained',
+		eventRecorded: false,
+	})
+	expect(second.paused).toBe(false)
+	expect(await readPauseTimestamp(stableUserId)).toBe(pausedAt)
 
 	await expect(
-		applyOutboundEmailAbusePause({
-			env,
-			userId: 'user-1',
-			deliveryStatus: 'complained',
-			eventRecorded: true,
-			waitUntil,
+		sendOutboundEmail({
+			env: {
+				...env,
+				APP_BASE_URL: platformBaseUrl,
+				SES_MAIL: {
+					async send() {
+						throw new Error('Paused accounts must not reach the provider.')
+					},
+				},
+			},
+			userId: stableUserId,
+			accountEmail,
+			recipientPolicy: 'self',
+			subject: 'Blocked while paused',
+			text: 'Body',
 		}),
-	).resolves.toEqual({ paused: true })
-	expect(waitUntil).toHaveBeenCalledWith(expect.any(Promise))
-	expect(consoleWarn).toHaveBeenCalledWith('email-outbound-paused', {
-		deliveryStatus: 'complained',
+	).rejects.toThrow(emailOutboundPausedMessage)
+
+	// Delivered events and unpersisted complaint signals must not pause.
+	const deliveredAccount = await seedVerifiedAccount({
+		email: `deliverer-${crypto.randomUUID()}@example.com`,
 	})
-	consoleWarn.mockReset()
-})
+	const delivered = await applyOutboundEmailAbusePause({
+		env,
+		userId: deliveredAccount.stableUserId,
+		deliveryStatus: 'delivered',
+		eventRecorded: true,
+	})
+	expect(delivered.paused).toBe(false)
+	expect(await readPauseTimestamp(deliveredAccount.stableUserId)).toBeNull()
+
+	const phantomAccount = await seedVerifiedAccount({
+		email: `phantom-${crypto.randomUUID()}@example.com`,
+	})
+	// Conflicting-duplicate queue outcome: the complained event's insert
+	// was deduped by provider_event_id, so no persisted complaint backs it.
+	const phantom = await applyOutboundEmailAbusePause({
+		env,
+		userId: phantomAccount.stableUserId,
+		deliveryStatus: 'complained',
+		eventRecorded: false,
+	})
+	expect(phantom.paused).toBe(false)
+	expect(await readPauseTimestamp(phantomAccount.stableUserId)).toBeNull()
+}, 30_000)
+
+test('bounces below the daily threshold do not pause; reaching it does', async () => {
+	consoleWarn.mockImplementation(() => {})
+
+	const accountEmail = `bouncer-${crypto.randomUUID()}@example.com`
+	const { stableUserId } = await seedVerifiedAccount({ email: accountEmail })
+	const now = new Date()
+
+	for (
+		let attempt = 1;
+		attempt <= outboundEmailBouncePauseThresholdPerDay;
+		attempt += 1
+	) {
+		const providerMessageId = `provider-${crypto.randomUUID()}`
+		await seedProviderMessage({
+			userId: stableUserId,
+			providerMessageId,
+			subject: `Bounce ${attempt}`,
+			sentAt: now.toISOString(),
+		})
+		await recordProviderEvent({
+			providerMessageId,
+			eventId: `event-bounced-${attempt}`,
+			status: 'bounced',
+			eventTimestamp: now.toISOString(),
+		})
+		const result = await applyOutboundEmailAbusePause({
+			env,
+			userId: stableUserId,
+			deliveryStatus: 'bounced',
+			eventRecorded: true,
+			now,
+		})
+		if (attempt < outboundEmailBouncePauseThresholdPerDay) {
+			expect(result.paused).toBe(false)
+			expect(await readPauseTimestamp(stableUserId)).toBeNull()
+		} else {
+			expect(result.paused).toBe(true)
+			expect(await readPauseTimestamp(stableUserId)).not.toBeNull()
+		}
+	}
+}, 30_000)

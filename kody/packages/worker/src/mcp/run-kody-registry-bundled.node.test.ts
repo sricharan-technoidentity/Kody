@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 vi.mock('#worker/temporal/package-workflow.ts', () => ({
 	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
 }))
@@ -49,7 +50,7 @@ test('runBundledModuleWithRegistry passes params and injects runtime helpers', a
 					},
 				}
 			},
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 		RUN_STATE: runLog.state,
 		TEMPORAL: {
 			get: async () => {
@@ -1142,7 +1143,7 @@ test('runBundledModuleWithRegistry leaves claimed job transient failures running
 		.mockResolvedValue(true)
 	const { createStorageEstimateReadError } =
 		await import('#worker/storage-estimate-error.ts')
-	const { d1NetworkConnectionLostMessage } = await import('#worker/d1-retry.ts')
+	const { sqlConnectionLostMessage } = await import('#worker/sql-retry.ts')
 	const estimateError = createStorageEstimateReadError({
 		storageId: 'package:estimate-target',
 		attempts: 4,
@@ -1150,8 +1151,8 @@ test('runBundledModuleWithRegistry leaves claimed job transient failures running
 	})
 	const transientErrors = [
 		estimateError.message,
-		`${d1NetworkConnectionLostMessage}.`,
-		`D1_ERROR: ${d1NetworkConnectionLostMessage}.`,
+		`${sqlConnectionLostMessage}.`,
+		`${sqlConnectionLostMessage}.`,
 	]
 	let executeError: unknown = transientErrors[0]
 	const createExecuteExecutorSpy = vi
@@ -1193,7 +1194,7 @@ test('runBundledModuleWithRegistry leaves claimed job transient failures running
 			expect(finishSpy).not.toHaveBeenCalled()
 		}
 
-		executeError = new Error(`${d1NetworkConnectionLostMessage}.`)
+		executeError = new Error(`${sqlConnectionLostMessage}.`)
 		finishSpy.mockClear()
 		await expect(
 			runBundledModuleWithRegistry(
@@ -1203,7 +1204,7 @@ test('runBundledModuleWithRegistry leaves claimed job transient failures running
 				undefined,
 				claimedJobOptions,
 			),
-		).rejects.toThrow(`${d1NetworkConnectionLostMessage}.`)
+		).rejects.toThrow(`${sqlConnectionLostMessage}.`)
 		expect(finishSpy).not.toHaveBeenCalled()
 
 		executeError = 'user code failed'
@@ -1223,7 +1224,7 @@ test('runBundledModuleWithRegistry leaves claimed job transient failures running
 			}),
 		)
 
-		executeError = `${d1NetworkConnectionLostMessage}.`
+		executeError = `${sqlConnectionLostMessage}.`
 		finishSpy.mockClear()
 		const executeFailure = await runBundledModuleWithRegistry(
 			env,
@@ -1248,7 +1249,7 @@ test('runBundledModuleWithRegistry leaves claimed job transient failures running
 				},
 			},
 		)
-		expect(executeFailure.error).toBe(`${d1NetworkConnectionLostMessage}.`)
+		expect(executeFailure.error).toBe(`${sqlConnectionLostMessage}.`)
 		expect(finishSpy).toHaveBeenCalledWith(
 			expect.objectContaining({
 				status: 'error',

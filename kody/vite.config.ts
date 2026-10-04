@@ -1,87 +1,36 @@
-import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { cloudflare } from '@cloudflare/vite-plugin'
 import { remix } from '@pitlane/dev'
 import { defineConfig } from 'vite'
-import { parseJsonc } from './tools/ci/resource-utils.ts'
-import {
-	collectLocalOriginDevVars,
-	writeLocalOriginDevConfig,
-} from './tools/local-origin-dev-config.ts'
 import { ensureGuideCatalogModules } from './tools/build-guide-catalog-modules.ts'
 import { ensureWorkerBundlerModules } from './tools/build-worker-bundler-modules.ts'
+import { ensureNodeOAuthProvider } from './tools/build-node-oauth-provider.ts'
+import { nodeRuntimeAliases } from './tools/node-runtime-aliases.ts'
 import { markdownAsText } from './tools/vite-markdown-as-text.ts'
-
-const root = path.dirname(fileURLToPath(import.meta.url))
-// `@cloudflare/vite-plugin` reads `CLOUDFLARE_ENV` itself (not this
-// file's `envName`) to pick `env.production` / `env.test` bindings. Local
-// `npm run dev` does not set the variable, so without this default the
-// plugin loads the top-level wrangler config (no D1/DO/KV) and origin
-// `/health` fails with Missing APP_DB.
-const envName = process.env.CLOUDFLARE_ENV?.trim() || 'production'
-if (!process.env.CLOUDFLARE_ENV?.trim()) {
-	process.env.CLOUDFLARE_ENV = envName
-}
-const wranglerConfigPath =
-	process.env.KODY_WRANGLER_CONFIG ?? 'packages/worker/wrangler.jsonc'
-const isOriginDeployBuild = Boolean(process.env.KODY_WRANGLER_CONFIG)
-
-function resolveWorkerEntry(configPath: string) {
-	const absoluteConfig = path.resolve(root, configPath)
-	const config = parseJsonc<{ main?: string }>(
-		readFileSync(absoluteConfig, 'utf8'),
-	)
-	const main = config.main ?? './src/index.ts'
-	return path.relative(root, path.resolve(path.dirname(absoluteConfig), main))
-}
-
-function alias(prefix: string, target: string) {
-	return {
-		find: new RegExp(`^${prefix}/`),
-		replacement: `${target}/`,
-	}
-}
-
-export default defineConfig(async ({ command }) => {
-	await ensureWorkerBundlerModules()
-	await ensureGuideCatalogModules()
-
-	let serveWranglerConfigPath = wranglerConfigPath
-
-	if (command === 'serve' && !isOriginDeployBuild) {
-		// Vite's Cloudflare plugin reads Worker bindings from the Wrangler
-		// config, not process env. Write the same local-dev vars wrangler-env
-		// used to pass with `--var` so origin `env` still sees them.
-		serveWranglerConfigPath = await writeLocalOriginDevConfig({
-			originConfigPath: wranglerConfigPath,
-			envName,
-			vars: collectLocalOriginDevVars(process.env, process.env.PORT),
-		})
-	}
-
+const root = import.meta.dirname
+export default defineConfig(async () => {
+	await Promise.all([
+		ensureWorkerBundlerModules(),
+		ensureGuideCatalogModules(),
+		ensureNodeOAuthProvider(),
+	])
 	return {
 		publicDir: 'packages/worker/public',
-		build: {
-			sourcemap: true,
-			outDir: process.env.KODY_VITE_OUTDIR ?? 'dist',
+		environments: {
+			ssr: { build: { rolldownOptions: { external: [/\.wasm$/] } } },
 		},
+		build: { sourcemap: true, outDir: process.env.KODY_VITE_OUTDIR ?? 'dist' },
 		plugins: [
 			markdownAsText(),
 			remix({
 				serverHandler: false,
 				clientEntry: 'packages/worker/client/entry.tsx',
-				serverEntry: resolveWorkerEntry(serveWranglerConfigPath),
+				serverEntry: 'packages/worker/src/index.ts',
 				serverEnvironments: ['ssr'],
-			}),
-			cloudflare({
-				configPath: serveWranglerConfigPath,
-				viteEnvironment: { name: 'ssr' },
-				remoteBindings: false,
 			}),
 		],
 		resolve: {
 			alias: [
+				...nodeRuntimeAliases,
 				{
 					find: /#app\/hmr\.ts$/,
 					replacement: path.resolve(
@@ -96,18 +45,27 @@ export default defineConfig(async ({ command }) => {
 						'packages/worker/src/app/client-entry-assets.vite.ts',
 					),
 				},
-				alias('#app', path.resolve(root, 'packages/worker/src/app')),
-				alias('#client', path.resolve(root, 'packages/worker/client')),
-				alias('#universal', path.resolve(root, 'packages/worker/universal')),
-				alias('#worker', path.resolve(root, 'packages/worker/src')),
-				alias('#mcp', path.resolve(root, 'packages/worker/src/mcp')),
+				...Object.entries({
+					'#app': 'src/app',
+					'#client': 'client',
+					'#universal': 'universal',
+					'#worker': 'src',
+					'#mcp': 'src/mcp',
+				}).map(([prefix, target]) => ({
+					find: new RegExp(`^${prefix}/`),
+					replacement: `${path.resolve(root, 'packages/worker', target)}/`,
+				})),
 			],
 		},
-		oxc: {
-			jsx: {
-				runtime: 'automatic',
-				importSource: 'remix/ui',
-			},
+		ssr: {
+			noExternal: [
+				'remix',
+				'@modelcontextprotocol/server',
+				'@modelcontextprotocol/sdk',
+				'agents',
+				'@cloudflare/codemode',
+			],
 		},
+		oxc: { jsx: { runtime: 'automatic', importSource: 'remix/ui' } },
 	}
 })

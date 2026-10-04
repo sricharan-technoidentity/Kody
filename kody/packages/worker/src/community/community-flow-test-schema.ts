@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
 import { ensureUserStorageBucketsTestSchema } from '#worker/storage-buckets/test-schema.ts'
 import { ensurePackageInvocationTokensTestSchema } from '#worker/package-invocations/test-schema.ts'
@@ -8,7 +9,7 @@ import { communityForksDeleteCascadeStatements } from './community-forks-delete-
  * Community flow workers-unit schema. Adds the community tables and the
  * profile columns on top of the shared `users` schema.
  */
-export async function ensureCommunityFlowSchema(db: D1Database) {
+export async function ensureCommunityFlowSchema(db: SqlDatabase) {
 	await ensureUsersTestSchema({
 		db,
 		columns: [

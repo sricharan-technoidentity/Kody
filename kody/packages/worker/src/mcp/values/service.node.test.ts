@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { maxRestorableTextColumnBytes } from '@kody-internal/shared/backup-restore-safety.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
@@ -231,7 +232,7 @@ function createValueTestDb() {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	return {
 		db,
@@ -718,7 +719,7 @@ test('saveValue awaits the UserMeter atomic reserve and never writes the retired
 					}
 				},
 			}
-		}) as D1Database['prepare']
+		}) as SqlDatabase['prepare']
 	})
 
 	const env = { APP_DB: testDb.db, ...meter.env }

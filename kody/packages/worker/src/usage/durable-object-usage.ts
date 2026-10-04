@@ -1,4 +1,4 @@
-import { waitUntil } from 'cloudflare:workers'
+import { waitUntil } from '#worker/front-door/host-context.ts'
 import {
 	recordUsage,
 	type UsageEnv,

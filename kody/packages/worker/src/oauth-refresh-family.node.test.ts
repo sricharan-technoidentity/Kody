@@ -1,5 +1,5 @@
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	decideRefreshFamilyAction,

@@ -46,6 +46,7 @@ export function createArtifactsMswHandlers(input: {
 	accountId: string
 	namespace?: string
 	apiBaseUrl: string
+	gitBaseUrl?: string
 }): Array<HttpHandler> {
 	const namespace = input.namespace ?? 'default'
 	const repos = new Map<string, StoredRepo>()
@@ -54,6 +55,24 @@ export function createArtifactsMswHandlers(input: {
 	const reposPath = `/client/v4/accounts/${input.accountId}/artifacts/namespaces/${namespace}/repos`
 
 	return [
+		http.post(
+			`${apiOrigin}${reposPath.replace(/\/repos$/, '')}/tokens`,
+			async ({ request }) => {
+				const body = (await request.json()) as {
+					repo: string
+					scope: string
+					ttl: number
+				}
+				if (!repos.has(body.repo))
+					return errorEnvelope(404, 1002, 'repo not found')
+				return envelope({
+					id: crypto.randomUUID(),
+					plaintext: `demo-token-${body.repo}`,
+					scope: body.scope,
+					expires_at: new Date(Date.now() + body.ttl * 1000).toISOString(),
+				})
+			},
+		),
 		http.get(`${apiOrigin}${reposPath}`, () => {
 			return envelope([...repos.values()], 200)
 		}),
@@ -86,7 +105,7 @@ export function createArtifactsMswHandlers(input: {
 				last_push_at: null,
 				source: null,
 				read_only: body.read_only === true,
-				remote: `http://127.0.0.1:1/git/${namespace}/${repoName}.git`,
+				remote: `${input.gitBaseUrl ?? 'http://127.0.0.1:1/git'}/${namespace}/${repoName}.git`,
 			}
 			repos.set(repoName, repo)
 			return envelope({
@@ -195,4 +214,17 @@ export function createArtifactsMswHandlers(input: {
 			},
 		),
 	]
+}
+
+/** CodeCommit POC uses the existing repository contract and real isomorphic-git bytes. */
+// ponytail: preserves the existing REST contract in the POC; a production CodeCommit SDK binding supplies the same handles in P7.
+export function createCodeCommitMswHandlers(input: {
+	accountId: string
+	namespace?: string
+	apiBaseUrl: string
+}) {
+	return createArtifactsMswHandlers({
+		...input,
+		gitBaseUrl: 'https://git-codecommit.us-east-1.amazonaws.com/v1/repos',
+	})
 }

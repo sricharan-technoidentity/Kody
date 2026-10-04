@@ -1,6 +1,5 @@
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
-import type * as CloudflareWorkers from 'cloudflare:workers'
 import { mcpOAuthRefreshTokenStorageKey } from './oauth-token-recovery.ts'
 
 type FakeServerRow = {
@@ -64,29 +63,6 @@ const mockModule = vi.hoisted(() => ({
 	manager: null as FakeManager | null,
 }))
 
-vi.mock('@sentry/cloudflare', () => ({
-	instrumentDurableObjectWithSentry: (
-		_factory: unknown,
-		durableObjectClass: new (...args: Array<never>) => unknown,
-	) => durableObjectClass,
-}))
-
-vi.mock('cloudflare:workers', async (importOriginal) => {
-	const actual = await importOriginal<CloudflareWorkers>()
-	return {
-		...actual,
-		DurableObject: class {
-			protected readonly ctx: DurableObjectState
-			protected readonly env: Env
-
-			constructor(ctx: DurableObjectState, env: Env) {
-				this.ctx = ctx
-				this.env = env
-			}
-		},
-	}
-})
-
 vi.mock('agents/mcp/do-oauth-client-provider', () => ({
 	DurableObjectOAuthClientProvider: class {
 		serverId = ''
@@ -98,27 +74,6 @@ vi.mock('agents/mcp/do-oauth-client-provider', () => ({
 			_clientName: string,
 			readonly redirectUrl: string,
 		) {}
-	},
-}))
-
-vi.mock('agents/lifecycle', () => ({
-	Lifecycle: class {
-		static install() {
-			return new this()
-		}
-
-		private capabilities: Array<{ onStart?: () => Promise<void> }> = []
-
-		use(capability: { onStart?: () => Promise<void> }) {
-			this.capabilities.push(capability)
-			return this
-		}
-
-		async start() {
-			for (const capability of this.capabilities) {
-				await capability.onStart?.()
-			}
-		}
 	},
 }))
 
@@ -380,7 +335,9 @@ async function seedReadyHomeServer(input: {
 
 test('reconnect repairs stale callbacks and always replaces pending OAuth state', async () => {
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 
@@ -447,7 +404,9 @@ test('reconnect repairs stale callbacks and always replaces pending OAuth state'
 
 test('failed replacement registration restores the saved server and OAuth state', async () => {
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 
@@ -494,7 +453,9 @@ test('failed replacement registration restores the saved server and OAuth state'
 
 test('replayed unusable callbacks leave past-OAuth server credentials intact', async () => {
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const callbackUrl = 'https://kody.codes/account/mcp-servers/oauth/callback'
@@ -531,7 +492,9 @@ test('replayed unusable callbacks leave past-OAuth server credentials intact', a
 
 test('used and missing callback states recover without exposing an internal state error', async () => {
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const callbackUrl = 'https://kody.codes/account/mcp-servers/oauth/callback'
@@ -566,7 +529,9 @@ test('used and missing callback states recover without exposing an internal stat
 
 test('replayed unusable callback settles with stored tokens instead of reminting', async () => {
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { callbackUrl, connection } = await seedReadyHomeServer({
@@ -611,7 +576,9 @@ test('replayed unusable callback settles with stored tokens instead of reminting
 
 test('successful OAuth callback drops a stale no-refresh-token lastError', async () => {
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { callbackUrl, connection } = await seedReadyHomeServer({
@@ -647,7 +614,9 @@ test('successful OAuth callback drops a stale no-refresh-token lastError', async
 test('first-time OAuth grant that stays authenticating does not emit disconnected', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const callbackUrl = 'https://kody.codes/account/mcp-servers/oauth/callback'
@@ -685,7 +654,9 @@ test('first-time OAuth grant that stays authenticating does not emit disconnecte
 
 test('peekServers returns cards without observing or reconnecting', async () => {
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { connection } = await seedReadyHomeServer({ hub, manager })
@@ -705,7 +676,9 @@ test('peekServers returns cards without observing or reconnecting', async () => 
 test('peekServers queues a disconnected episode when a ready server parks on token recovery so the hub client can dispatch it', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { connection } = await seedReadyHomeServer({ hub, manager })
@@ -744,7 +717,9 @@ test('peekServers queues a disconnected episode when a ready server parks on tok
 test('ackConnectionEvents removes only the dispatched ids', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { connection } = await seedReadyHomeServer({ hub, manager })
@@ -775,7 +750,9 @@ test('ackConnectionEvents removes only the dispatched ids', async () => {
 test('token-recovery park with no refresh token still emits disconnected when wasReady was never stored', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	seedServer({
@@ -843,7 +820,9 @@ test('token-recovery park with no refresh token still emits disconnected when wa
 
 test('snapshot retries a previously ready server before emitting disconnect', async () => {
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const callbackUrl = 'https://kody.codes/account/mcp-servers/oauth/callback'
@@ -941,7 +920,9 @@ test('snapshot retries a previously ready server before emitting disconnect', as
 test('reconnect tries stored refresh before wiping tokens and stamps lastError when that parks authenticating', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { callbackUrl, connection } = await seedReadyHomeServer({
@@ -1006,7 +987,9 @@ test('reconnect tries stored refresh before wiping tokens and stamps lastError w
 test('ready grant without a refresh token warns when the authorization server advertised refresh', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { connection } = await seedReadyHomeServer({ hub, manager })
@@ -1045,7 +1028,9 @@ test('ready grant without a refresh token warns when the authorization server ad
 test('snapshot after a prior ready connection parks authenticating with a durable token-recovery lastError', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { connection } = await seedReadyHomeServer({ hub, manager })
@@ -1083,7 +1068,9 @@ test('snapshot after a prior ready connection parks authenticating with a durabl
 
 test('authenticating park drops a leftover incomplete-discover lastError', async () => {
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const callbackUrl = 'https://kody.codes/account/mcp-servers/oauth/callback'
@@ -1115,7 +1102,9 @@ test('authenticating park drops a leftover incomplete-discover lastError', async
 test('refreshServer keeps a token-recovery lastError when the server stays authenticating', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { callbackUrl, connection } = await seedReadyHomeServer({
@@ -1141,7 +1130,9 @@ test('refreshServer keeps a token-recovery lastError when the server stays authe
 
 test('refreshServer returns the recovered ready connection after a lightweight retry', async () => {
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { connection } = await seedReadyHomeServer({ hub, manager })
@@ -1161,7 +1152,9 @@ test('refreshServer returns the recovered ready connection after a lightweight r
 
 test('reconnectServer returns the recovered ready connection after a lightweight retry', async () => {
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { callbackUrl } = await seedReadyHomeServer({ hub, manager })
@@ -1175,7 +1168,9 @@ test('reconnectServer returns the recovered ready connection after a lightweight
 
 test('addServer returns the recovered ready connection after a lightweight retry', async () => {
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { callbackUrl } = await seedReadyHomeServer({ hub, manager })
@@ -1191,7 +1186,9 @@ test('addServer returns the recovered ready connection after a lightweight retry
 
 test('handleOAuthCallback reports success after observe recovers a previously ready server', async () => {
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const { callbackUrl, connection } = await seedReadyHomeServer({
@@ -1214,7 +1211,9 @@ test('handleOAuthCallback reports success after observe recovers a previously re
 test('handleOAuthCallback reports a durable tool-discovery lastError when IdP succeeds but settle stays connected', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const callbackUrl = 'https://kody.codes/account/mcp-servers/oauth/callback'
@@ -1274,7 +1273,9 @@ test('handleOAuthCallback reports a durable tool-discovery lastError when IdP su
 test('replayed unusable callback after incomplete settle reports lastError instead of fake success', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const callbackUrl = 'https://kody.codes/account/mcp-servers/oauth/callback'
@@ -1330,7 +1331,9 @@ test('replayed unusable callback after incomplete settle reports lastError inste
 test('add, reconnect, and refresh treat a discover timeout as a durable lastError', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	const callbackUrl = 'https://kody.codes/account/mcp-servers/oauth/callback'
@@ -1398,7 +1401,9 @@ test('add, reconnect, and refresh treat a discover timeout as a durable lastErro
 test('legacy retry that fails to connect keeps the catalog lastError', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	manager.connectBehaviors = ['connected', 'disconnected']
@@ -1427,7 +1432,9 @@ test('legacy retry that fails to connect keeps the catalog lastError', async () 
 test('a later failed add does not keep a stale catalog lastError', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	manager.connectBehaviors = ['connected', 'disconnected']
@@ -1460,7 +1467,9 @@ test('healthy auto catalog stays on auto; modern-connect catalog timeout falls b
 
 	const { state: healthyState, values: healthyValues } =
 		createDurableObjectState()
-	const healthyHub = new McpClientHub(healthyState, {} as Env)
+	const healthyHub = new McpClientHub(
+		healthyState.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const healthy = mockModule.manager
 	if (!healthy) throw new Error('Fake manager was not constructed.')
 	healthy.connectBehavior = 'connected'
@@ -1481,7 +1490,9 @@ test('healthy auto catalog stays on auto; modern-connect catalog timeout falls b
 	expect(healthyValues.has('mcp-legacy-handshake/server-healthy')).toBe(false)
 
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	manager.connectBehavior = 'connected'
@@ -1561,7 +1572,9 @@ test('healthy auto catalog stays on auto; modern-connect catalog timeout falls b
 test('replacing a server forgets the catalog-timeout legacy mark and probes auto', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	manager.connectBehavior = 'connected'
@@ -1598,7 +1611,9 @@ test('replacing a server forgets the catalog-timeout legacy mark and probes auto
 test('legacy fallback that parks on OAuth remembers the mark and keeps it after ready', async () => {
 	consoleWarn.mockImplementation(() => {})
 	const { state, values } = createDurableObjectState()
-	const hub = new McpClientHub(state, {} as Env)
+	const hub = new McpClientHub(
+		state.storage as unknown as import('./storage.ts').McpClientStorage,
+	)
 	const manager = mockModule.manager
 	if (!manager) throw new Error('Fake manager was not constructed.')
 	manager.connectBehaviors = ['connected', 'oauth']

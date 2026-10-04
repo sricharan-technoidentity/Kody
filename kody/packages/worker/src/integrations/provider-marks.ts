@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { toHex } from '@kody-internal/shared/hex.ts'
 import { canonicalIntegrationName } from '#mcp/capabilities/integrations/integration-shared.ts'
 import { routes } from '#universal/routes.ts'
@@ -310,7 +311,7 @@ export function attachCatalogLogoPath<
 }
 
 export async function listPlatformProviderMarks(input: {
-	db: D1Database
+	db: SqlDatabase
 }): Promise<Array<PlatformProviderMark>> {
 	const result = await input.db
 		.prepare(
@@ -324,7 +325,7 @@ export async function listPlatformProviderMarks(input: {
 }
 
 export async function getPlatformProviderMarkBySlug(input: {
-	db: D1Database
+	db: SqlDatabase
 	slug: string
 }): Promise<PlatformProviderMark | null> {
 	const slug = canonicalIntegrationName(input.slug)
@@ -342,7 +343,7 @@ export async function getPlatformProviderMarkBySlug(input: {
 }
 
 export async function upsertPlatformProviderMark(input: {
-	db: D1Database
+	db: SqlDatabase
 	slug: string
 	label?: string | null
 	aliases?: ReadonlyArray<string>
@@ -401,7 +402,7 @@ export async function upsertPlatformProviderMark(input: {
 }
 
 export async function deletePlatformProviderMark(input: {
-	db: D1Database
+	db: SqlDatabase
 	slug: string
 }): Promise<boolean> {
 	const slug = canonicalIntegrationName(input.slug)
@@ -414,7 +415,7 @@ export async function deletePlatformProviderMark(input: {
 }
 
 export async function setPlatformProviderMarkLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	slug: string
 	sourceBytes: Uint8Array | null

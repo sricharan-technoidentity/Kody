@@ -1,4 +1,5 @@
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import {
 	getEntitySourceById,
 	listEntitySourcesByIds,
@@ -105,7 +106,7 @@ type PendingPackageSourceRowRequest = {
 }
 
 const pendingPackageSourceRowBatches = new WeakMap<
-	D1Database,
+	SqlDatabase,
 	Array<PendingPackageSourceRowRequest>
 >()
 
@@ -123,7 +124,7 @@ export async function loadPackageSourceRowsForUser(input: {
 	const uniqueIds = [...new Set(input.sourceIds)]
 	if (uniqueIds.length === 0) return new Map()
 	const [singleId] = uniqueIds
-	const rows = await runD1WithRetry(async () => {
+	const rows = await runSqlWithRetry(async () => {
 		if (uniqueIds.length === 1 && singleId) {
 			const row = await getEntitySourceById(input.env.APP_DB, singleId)
 			return row ? [row] : []
@@ -179,7 +180,7 @@ export async function loadPackageSourceRowForUser(input: {
 	})
 }
 
-async function flushPackageSourceRowBatch(db: D1Database) {
+async function flushPackageSourceRowBatch(db: SqlDatabase) {
 	const pending = pendingPackageSourceRowBatches.get(db)
 	pendingPackageSourceRowBatches.delete(db)
 	if (!pending || pending.length === 0) return
@@ -197,7 +198,7 @@ async function flushPackageSourceRowBatch(db: D1Database) {
 					})
 				: new Map(
 						(
-							await runD1WithRetry(() => listEntitySourcesByIds(db, uniqueIds))
+							await runSqlWithRetry(() => listEntitySourcesByIds(db, uniqueIds))
 						).map((row) => [row.id, row]),
 					)
 		for (const request of pending) {

@@ -1,3 +1,6 @@
+import { type SqlStatement } from '@kody-internal/shared/sql-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import { getUniqueConstraintField } from '#worker/database-errors.ts'
 /**
  * Hourly credit debit lane. Runs right after `usage_aggregation` recomputes
  * `usage_rollups`, so debits only ever read a freshly recomputed month.
@@ -125,7 +128,7 @@ export async function runCreditDebits(input: {
 	return { scanned, debitedUsers, debitedMicroUsd, autoRefilled, failed, done }
 }
 
-async function readCreditDebitCursor(db: D1Database): Promise<string> {
+async function readCreditDebitCursor(db: SqlDatabase): Promise<string> {
 	const row = await db
 		.prepare(`SELECT position FROM credit_debit_cursor WHERE singleton = 1`)
 		.first<{ position: string }>()
@@ -133,7 +136,7 @@ async function readCreditDebitCursor(db: D1Database): Promise<string> {
 }
 
 async function writeCreditDebitCursor(input: {
-	db: D1Database
+	db: SqlDatabase
 	position: string
 	now: Date
 }) {
@@ -150,7 +153,7 @@ async function writeCreditDebitCursor(input: {
 }
 
 async function listCreditDebitCandidates(input: {
-	db: D1Database
+	db: SqlDatabase
 	startAfter: string
 }): Promise<Array<CreditDebitCandidateRow>> {
 	const rows = await input.db
@@ -241,7 +244,7 @@ type ProgressRow = { meter: string; accounted_units: number }
  * (gift overlay, retired Pro). Exported for tests.
  */
 export async function settleCreditDebitMonth(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	entitlement: UserEntitlement
 	month: string
@@ -303,7 +306,7 @@ export async function settleCreditDebitMonth(input: {
 		]),
 	)
 	const nowIso = input.now.toISOString()
-	const statements: Array<D1PreparedStatement> = []
+	const statements: Array<SqlStatement> = []
 	const forgivenUnits: Record<CreditDebitMeter, number> = {
 		unique_worker_days: 0,
 		durable_object_rows_read: 0,
@@ -347,7 +350,7 @@ export async function settleCreditDebitMonth(input: {
 						(user_id, month, meter, accounted_units, updated_at)
 					 VALUES (?, ?, ?, ?, ?)
 					 ON CONFLICT (user_id, month, meter) DO UPDATE SET
-						accounted_units = MAX(accounted_units, excluded.accounted_units),
+						accounted_units = GREATEST(credit_debit_progress.accounted_units, excluded.accounted_units),
 						updated_at = excluded.updated_at`,
 				)
 				.bind(input.userId, input.month, meter, next, nowIso),
@@ -368,8 +371,7 @@ export async function settleCreditDebitMonth(input: {
 		try {
 			await input.db.batch(statements)
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error)
-			if (!/UNIQUE constraint failed/i.test(message)) throw error
+			if (getUniqueConstraintField(error) === null) throw error
 			// An overlapping run already settled from this starting point.
 			return {
 				month: input.month,

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	buildUserCreatedEvent,
@@ -51,7 +52,7 @@ test('user lifecycle dispatch fans identity snapshots through admin package fan-
 	)
 
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 		APP_BASE_URL: 'https://heykody.dev',
 	}

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { toHex } from '@kody-internal/shared/hex.ts'
 import { routes } from '#universal/routes.ts'
 import {
@@ -66,7 +67,7 @@ async function sha256Hex(bytes: Uint8Array) {
 }
 
 export async function setMcpServerLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	userId: string
 	serverId: string
@@ -171,7 +172,7 @@ export async function getMcpServerLogoObject(input: {
 }
 
 export async function loadFittedMcpServerLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	userId: string
 	serverId: string
@@ -234,7 +235,7 @@ export async function loadFittedMcpServerLogo(input: {
 }
 
 async function serveCurrentMcpServerLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	userId: string
 	serverId: string

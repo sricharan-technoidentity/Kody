@@ -104,24 +104,27 @@ function resolveKodyRuntimeExternalPath(resolveDir: string, specifier: string) {
 const kodyRuntimeExternalsPlugin = createKodyRuntimeExternalsPlugin()
 
 async function createWorkerBundle(input: {
+	env: Env
 	files: Record<string, string>
 	entryPoint: string
 	sourceFiles?: Record<string, string>
 }) {
 	// Keep the experimental bundler out of the Worker's top-level deploy graph.
-	const { createWorker } = await importWorkerBundler()
+	const { createWorker } =
+		input.env.RUNNER_BUNDLER ?? (await importWorkerBundler())
 	// Optional convenience: every package bundle can import `remix/<subpath>`
 	// from the platform's vendored copy. JSX comes from the package
 	// tsconfig when present; otherwise esbuild defaults.
 	const files = await withPlatformRemixFiles(input.files)
-	return await createWorker({
+	const options = {
 		files,
 		entryPoint: input.entryPoint,
 		...createPackageAppJsxBundleOptions(input.sourceFiles ?? input.files),
 		__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: [
 			kodyRuntimeExternalsPlugin,
 		],
-	})
+	}
+	return await createWorker(options)
 }
 
 function serializePreparedFilesRecord(files: Record<string, string>) {
@@ -215,6 +218,7 @@ export async function buildKodyModuleBundle(input: {
 	})
 	const assembleBundle = async (): Promise<RuntimeBundle> => {
 		const bundle = await createWorkerBundle({
+			env: input.env,
 			files,
 			entryPoint: bootstrapPath,
 			sourceFiles: input.sourceFiles,
@@ -301,6 +305,7 @@ export async function buildKodyImportableModuleBundle(input: {
 		),
 	})
 	const bundle = await createWorkerBundle({
+		env: input.env,
 		files,
 		entryPoint: bootstrapPath,
 		sourceFiles: input.sourceFiles,
@@ -364,6 +369,7 @@ export async function buildKodyAppBundle(input: {
 			),
 		})
 		const bundle = await createWorkerBundle({
+			env: input.env,
 			files,
 			entryPoint: bootstrapPath,
 			sourceFiles: input.sourceFiles,

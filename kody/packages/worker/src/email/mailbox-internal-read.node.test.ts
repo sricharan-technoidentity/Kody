@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	countInternalEmailMessages,
@@ -106,12 +107,14 @@ function createEnv() {
 			truncated: false,
 		})),
 	}
-	const idFromName = vi.fn((name: string) => name as unknown as DurableObjectId)
+	const idFromName = vi.fn((_name: string) => rpc)
 	const get = vi.fn(() => rpc)
 	return {
 		env: {
-			APP_DB: {} as D1Database,
-			MAILBOX: { idFromName, get } as unknown as DurableObjectNamespace,
+			APP_DB: {} as SqlDatabase,
+			MAILBOX_STORE: {
+				forUser: idFromName,
+			} as unknown as import('./mailbox-service.ts').MailboxNamespace,
 		},
 		idFromName,
 		rpc,
@@ -146,7 +149,7 @@ test('internal reads route USER owners to Mailbox and system:email to the dedica
 	).resolves.toBe(3)
 	await expect(
 		countInternalUserEmailMessages({
-			env: { MAILBOX: env.MAILBOX },
+			env: { MAILBOX_STORE: env.MAILBOX_STORE },
 			ownerId: 'user-a',
 		}),
 	).resolves.toBe(3)
@@ -167,20 +170,20 @@ test('internal reads route USER owners to Mailbox and system:email to the dedica
 	expect(listSystemEmailAttachmentsMock).not.toHaveBeenCalled()
 	expect(countSystemEmailMessagesMock).not.toHaveBeenCalled()
 
-	const missingMailboxEnv = { APP_DB: {} as D1Database }
+	const missingMailboxEnv = { APP_DB: {} as SqlDatabase }
 	await expect(
 		getInternalEmailMessageById({
 			env: missingMailboxEnv,
 			ownerId: 'user-a',
 			messageId: 'message-1',
 		}),
-	).rejects.toThrow('MAILBOX Durable Object binding is not configured')
+	).rejects.toThrow('MAILBOX_STORE Aurora service is not configured')
 	await expect(
 		countInternalEmailMessages({
 			env: missingMailboxEnv,
 			ownerId: 'user-a',
 		}),
-	).rejects.toThrow('MAILBOX Durable Object binding is not configured')
+	).rejects.toThrow('MAILBOX_STORE Aurora service is not configured')
 	expect(getSystemEmailMessageByIdMock).not.toHaveBeenCalled()
 	expect(countSystemEmailMessagesMock).not.toHaveBeenCalled()
 

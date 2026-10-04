@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	buildFleetEntitlementCrossingIdempotencyKey,
@@ -49,7 +50,7 @@ test('fleet entitlement crossing dispatch fans metadata-only events through admi
 
 	const result = await dispatchFleetEntitlementCrossingSubscriptionEvent({
 		env: {
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 			APP_BASE_URL: 'https://kody.codes',
 		},

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 
@@ -24,7 +25,7 @@ function createUsersDb(emailVerifiedAt: string | null) {
 				first: async () => ({ email_verified_at: emailVerifiedAt }),
 			}),
 		}),
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function createContext(options: { emailVerifiedAt?: string | null } = {}) {

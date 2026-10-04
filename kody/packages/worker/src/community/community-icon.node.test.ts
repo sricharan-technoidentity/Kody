@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	getCommunityPublicCacheVersion,
@@ -116,7 +117,7 @@ function createFakeR2() {
 }
 
 function createCommunityIconTestEnv(input: {
-	db: D1Database
+	db: SqlDatabase
 	kv: KVNamespace
 	bucket: R2Bucket
 	meter?: ReturnType<typeof createInMemoryUserMeterEnv>
@@ -164,7 +165,7 @@ function createCommunityIconDeletionRaceDbMock() {
 		async batch() {
 			return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }]
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	return { db }
 }
 
@@ -267,7 +268,7 @@ test('pinned root SVG icons missing from older snapshots load from Artifacts', a
 	const { kv } = createFakeKv()
 	const { bucket } = createFakeR2()
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: kv,
 		COMMUNITY_ASSETS: bucket,
 		IMAGES: createFakeImagesBinding(),
@@ -306,7 +307,7 @@ test('community SVG icons load directly from the retained listing snapshot', asy
 	const { kv } = createFakeKv()
 	const { bucket } = createFakeR2()
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: kv,
 		COMMUNITY_ASSETS: bucket,
 		IMAGES: createFakeImagesBinding(),
@@ -344,7 +345,7 @@ test('community icon descriptor caches the R2 reference and repairs a dangling r
 	const { kv, values: kvValues } = createFakeKv()
 	const { bucket, values } = createFakeR2()
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: kv,
 		COMMUNITY_ASSETS: bucket,
 		IMAGES: createFakeImagesBinding(),
@@ -439,7 +440,7 @@ test('community icons ahead of the pinned snapshot load from the artifact repo a
 	const { kv } = createFakeKv()
 	const { bucket } = createFakeR2()
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: kv,
 		COMMUNITY_ASSETS: bucket,
 		IMAGES: createFakeImagesBinding(),
@@ -528,7 +529,7 @@ test('refreshCommunityIconForPackagePublish drops superseded icon caches for act
 	const { kv, values: kvValues } = createFakeKv()
 	const { bucket, values: r2Values } = createFakeR2()
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: kv,
 		COMMUNITY_ASSETS: bucket,
 		IMAGES: createFakeImagesBinding(),

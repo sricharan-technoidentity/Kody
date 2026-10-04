@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	getSavedPackageById,
 	getSavedPackageByKodyId,
@@ -19,7 +20,7 @@ type PlatformAccountRef = {
  * private packages stay owner-only.
  */
 async function listPlatformAccounts(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<Array<PlatformAccountRef>> {
 	const result = await db
 		.prepare(
@@ -38,7 +39,7 @@ export type PlatformPackageForSearch = {
 }
 
 export async function listPlatformPackagesForSearch(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<Array<PlatformPackageForSearch>> {
 	const accounts = await listPlatformAccounts(db)
 	const perAccount = await Promise.all(
@@ -68,7 +69,7 @@ export type PlatformPackageByRef = {
  * accounts, for search detail of platform packages the caller does not own.
  */
 export async function findPlatformPackageByRef(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { idOrKodyId: string },
 ): Promise<PlatformPackageByRef | null> {
 	const accounts = await listPlatformAccounts(db)

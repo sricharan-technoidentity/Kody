@@ -1,5 +1,7 @@
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
+
 import { expect, test } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
@@ -8,42 +10,37 @@ import {
 	lockSecretToPackage,
 	saveSecret,
 } from '#mcp/secrets/service.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { secretLockCapability } from './secret-lock.ts'
 
-const migrationsDirectory = new URL('../../../../migrations/', import.meta.url)
+async function createHarness() {
+	const database = await createTestDb({ userId: 'user-secret-lock' })
+	const sqlite = database.pg
 
-function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
 	const env = {
-		APP_DB: createD1FromSqlite(sqlite),
+		APP_DB: database.db,
 		SECRET_KMS: testSecretKms,
 		...createInMemoryUserMeterEnv().env,
 	} as Env
-	return { sqlite, env }
+	return { sqlite, env, [Symbol.asyncDispose]: database[Symbol.asyncDispose] }
 }
 
-function seedPackage(
-	sqlite: DatabaseSync,
+async function seedPackage(
+	sqlite: Awaited<ReturnType<typeof createTestDb>>['pg'],
 	input: { id: string; userId: string; kodyId: string },
 ) {
-	sqlite
-		.prepare(
-			`INSERT INTO saved_packages (
+	await pgQuery(sqlite).run(
+		`INSERT INTO saved_packages (
 				id, user_id, name, kody_id, description, source_id
 			) VALUES (?, ?, ?, ?, ?, ?)`,
-		)
-		.run(
-			input.id,
-			input.userId,
-			input.kodyId,
-			input.kodyId,
-			'',
-			`source-${input.id}`,
-		)
+		input.id,
+		input.userId,
+		input.kodyId,
+		input.kodyId,
+		'',
+		`source-${input.id}`,
+	)
 }
 
 async function allowedPackagesFor(
@@ -56,10 +53,11 @@ async function allowedPackagesFor(
 }
 
 test('secretLock returns an approval URL without widening allowed_packages', async () => {
-	const { sqlite, env } = createHarness()
+	await using harness = await createHarness()
+	const { sqlite, env } = harness
 	const userId = 'user-secret-lock'
-	seedPackage(sqlite, { id: 'pkg-notes', userId, kodyId: 'notes' })
-	seedPackage(sqlite, { id: 'pkg-mail', userId, kodyId: 'mail' })
+	await seedPackage(sqlite, { id: 'pkg-notes', userId, kodyId: 'notes' })
+	await seedPackage(sqlite, { id: 'pkg-mail', userId, kodyId: 'mail' })
 	await saveSecret({
 		env,
 		userId,

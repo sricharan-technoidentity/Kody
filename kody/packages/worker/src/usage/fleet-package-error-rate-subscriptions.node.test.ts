@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	buildFleetPackageErrorRateElevatedEvent,
@@ -88,7 +89,7 @@ test('fleet package error-rate dispatch fans metadata-only events through admin 
 
 	const result = await dispatchFleetPackageErrorRateSubscriptionEvent({
 		env: {
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 			APP_BASE_URL: 'https://kody.codes',
 		},

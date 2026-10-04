@@ -15,7 +15,7 @@
  * traffic stops.
  */
 
-import { type exports as workerExports } from 'cloudflare:workers'
+import { type exports as workerExports } from '#worker/front-door/host-context.ts'
 import { invariant } from '@epic-web/invariant'
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server'
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker'
@@ -115,7 +115,8 @@ function createStatelessRegistrationAgent(input: {
 			)
 			return baseUrl
 		},
-		getLoopbackExports: () => input.ctx.exports as typeof workerExports,
+		getLoopbackExports: () =>
+			input.ctx.exports as unknown as typeof workerExports,
 		waitUntil: (promise) => input.ctx.waitUntil(promise),
 	}
 }

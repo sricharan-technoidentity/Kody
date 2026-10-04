@@ -1,6 +1,13 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { ensureEntitlementTestSchema } from '#worker/entitlements/test-schema.ts'
 
-export async function ensureEmailTestSchema(db: D1Database) {
+export async function ensureEmailTestSchema(db: SqlDatabase) {
+	// PostgreSQL fixtures already apply the full migration catalog, including grants and RLS.
+	if (
+		typeof (db as unknown as { transaction?: unknown }).transaction ===
+		'function'
+	)
+		return
 	// Outbound sends increment the entitlement daily counter, so any suite
 	// exercising email sends needs the entitlement tables too.
 	await ensureEntitlementTestSchema(db)

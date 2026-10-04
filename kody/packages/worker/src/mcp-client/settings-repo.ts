@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	parseAllowedPackages,
 	stringifyAllowedPackages,
@@ -15,7 +16,7 @@ const selectColumns =
 	'id, user_id, name, url, enabled, created_at, updated_at, logo_key, logo_content_type, logo_source, favicon_source_host, usage_mode, allowed_packages_json, last_error'
 
 export async function listMcpServerSettingRows(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<Array<McpServerSettingRow>> {
 	const { results } = await input.db
@@ -31,7 +32,7 @@ export async function listMcpServerSettingRows(input: {
 }
 
 export async function listEnabledMcpServerSettingRows(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }): Promise<Array<McpServerSettingRow>> {
 	const { results } = await input.db
@@ -47,7 +48,7 @@ export async function listEnabledMcpServerSettingRows(input: {
 }
 
 export async function getMcpServerSettingRowById(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	id: string
 }): Promise<McpServerSettingRow | null> {
@@ -64,7 +65,7 @@ export async function getMcpServerSettingRowById(input: {
 }
 
 export async function getMcpServerSettingRowByName(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 }): Promise<McpServerSettingRow | null> {
@@ -81,7 +82,7 @@ export async function getMcpServerSettingRowByName(input: {
 }
 
 export async function insertMcpServerSettingRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<McpServerSettingRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -110,7 +111,7 @@ export async function insertMcpServerSettingRow(input: {
 }
 
 export async function updateMcpServerSettingRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<McpServerSettingRow, 'created_at' | 'updated_at'> & {
 		updated_at?: string
 	}
@@ -138,7 +139,7 @@ export async function updateMcpServerSettingRow(input: {
 }
 
 export async function updateMcpServerSettingUsageRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	id: string
 	usageMode: McpServerUsageMode
@@ -166,7 +167,7 @@ export async function updateMcpServerSettingUsageRow(input: {
 }
 
 export async function updateMcpServerSettingLastErrorRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	id: string
 	lastError: string | null
@@ -186,7 +187,7 @@ export async function updateMcpServerSettingLastErrorRow(input: {
 }
 
 export async function deleteMcpServerSettingRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	id: string
 }): Promise<boolean> {

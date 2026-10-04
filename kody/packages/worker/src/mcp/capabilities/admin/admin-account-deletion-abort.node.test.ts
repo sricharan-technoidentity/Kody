@@ -1,7 +1,9 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { pgQuery } from '#worker/test-support/aws/user-test-env.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as AuditLog from '#worker/audit-log.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
@@ -27,26 +29,21 @@ const { adminAccountDeletionAbortCapability } =
 const stableUserId = testStableUserIdFromEmail('abort-fence@example.com')
 const abortReason = 'Leftover fence after a failed brand-new account delete.'
 
-function createCapabilityTestDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE users (
-			id INTEGER PRIMARY KEY,
-			stable_user_id TEXT UNIQUE NOT NULL,
-			username TEXT NOT NULL,
-			email TEXT NOT NULL,
-			deleting_at TEXT,
-			created_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00.000Z',
-			updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00.000Z'
-		);
-		INSERT INTO users (stable_user_id, username, email)
-		VALUES ('${stableUserId}', 'abort-fence', 'abort-fence@example.com');
+async function createCapabilityTestDb() {
+	const sqlite = await createTestPg()
+	await sqlite.exec(`
+
+		INSERT INTO users (stable_user_id, username, email, password_hash)
+		VALUES ('${stableUserId}', 'abort-fence', 'abort-fence@example.com', 'hash');
 	`)
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+	return {
+		sqlite,
+		db: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	}
 }
 
 function createAdminContext(
-	db: D1Database,
+	db: SqlDatabase,
 	meterEnv: ReturnType<typeof createInMemoryUserMeterEnv>['env'],
 ) {
 	return {
@@ -67,7 +64,7 @@ function createAdminContext(
 }
 
 test('adminAccountDeletionAbort clears D1 and UserMeter fences', async () => {
-	const { sqlite, db } = createCapabilityTestDb()
+	const { sqlite, db } = await createCapabilityTestDb()
 	const meter = createInMemoryUserMeterEnv()
 	const meterStub = userMeterRpc({ env: meter.env, userId: stableUserId })
 	const ctx = createAdminContext(db, meter.env)
@@ -79,7 +76,7 @@ test('adminAccountDeletionAbort clears D1 and UserMeter fences', async () => {
 		env: meter.env,
 	})
 	expect(
-		sqlite.prepare(`SELECT deleting_at FROM users WHERE id = 1`).get(),
+		await pgQuery(sqlite).get(`SELECT deleting_at FROM users WHERE id = 1`),
 	).toEqual({ deleting_at: '2026-08-31 15:22:12' })
 	expect(await meterStub.readDeletionState()).toEqual({
 		deletingAt: '2026-08-31 15:22:12',
@@ -94,7 +91,7 @@ test('adminAccountDeletionAbort clears D1 and UserMeter fences', async () => {
 	)
 	expect(result).toEqual({ aborted: true })
 	expect(
-		sqlite.prepare(`SELECT deleting_at FROM users WHERE id = 1`).get(),
+		await pgQuery(sqlite).get(`SELECT deleting_at FROM users WHERE id = 1`),
 	).toEqual({ deleting_at: null })
 	expect(await meterStub.readDeletionState()).toEqual({ deletingAt: null })
 	expect(mockModule.logAuditEvent).toHaveBeenCalledWith(
@@ -107,7 +104,7 @@ test('adminAccountDeletionAbort clears D1 and UserMeter fences', async () => {
 })
 
 test('adminAccountDeletionAbort fails closed for an unknown user', async () => {
-	const { db } = createCapabilityTestDb()
+	const { db } = await createCapabilityTestDb()
 	const meter = createInMemoryUserMeterEnv()
 	const ctx = createAdminContext(db, meter.env)
 	const missingUserId = testStableUserIdFromEmail('missing@example.com')

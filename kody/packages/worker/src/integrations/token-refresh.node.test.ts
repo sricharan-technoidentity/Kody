@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import {
@@ -44,7 +45,7 @@ async function createHarness(userId: string) {
 	const admin = createPgDatabase({
 		connection: harness.pg,
 		role: 'kody_admin',
-	}) as unknown as D1Database
+	}) as unknown as SqlDatabase
 	return { ...harness, admin, q: pgQuery(harness.pg) }
 }
 

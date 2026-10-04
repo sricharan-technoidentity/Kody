@@ -1,3 +1,4 @@
+import { type MailboxSqlValue, type MailboxSql } from './mailbox-sql.ts'
 /**
  * Mailbox USER inbound effect authority CAS primitives.
  *
@@ -107,17 +108,17 @@ export type MailboxInboundEffectLedgerRpc = {
 	}) => Promise<MailboxListDueInboundEffectWorkResult>
 }
 
-export function claimMailboxInboundUsageEffect(
-	sql: SqlStorage,
+export async function claimMailboxInboundUsageEffect(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		expectedFinalizationToken?: string | null
 		now?: string
 	},
-): MailboxClaimInboundUsageEffectResult {
+): Promise<MailboxClaimInboundUsageEffectResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current || current.state !== 'received') {
 		return { status: 'not-claimable', delivery: current }
 	}
@@ -155,7 +156,7 @@ export function claimMailboxInboundUsageEffect(
 		usageEffectLeaseAt: now,
 		updatedAt: now,
 	}
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			usage_effect_lease = ?,
@@ -173,7 +174,7 @@ export function claimMailboxInboundUsageEffect(
 				OR usage_effect_lease_at IS NULL
 				OR usage_effect_lease_at < ?
 			)
-			AND (? IS NULL OR finalization_token = ?)`,
+			AND (?::text IS NULL OR finalization_token = ?)`,
 		detailJsonFromMailboxInboundSnapshot(next),
 		usageEffectLease,
 		now,
@@ -185,7 +186,7 @@ export function claimMailboxInboundUsageEffect(
 		input.expectedFinalizationToken ?? null,
 		input.expectedFinalizationToken ?? null,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (cursor.rowsWritten > 0 && after?.usageEffectLease === usageEffectLease) {
 		return { status: 'claimed', delivery: after }
 	}
@@ -195,8 +196,8 @@ export function claimMailboxInboundUsageEffect(
 	return { status: 'not-claimable', delivery: after }
 }
 
-export function completeMailboxInboundUsageEffect(
-	sql: SqlStorage,
+export async function completeMailboxInboundUsageEffect(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		usageEffectLease: string
@@ -207,7 +208,7 @@ export function completeMailboxInboundUsageEffect(
 		usageDurationMs: number
 		now?: string
 	},
-): MailboxCompleteInboundUsageEffectResult {
+): Promise<MailboxCompleteInboundUsageEffectResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const usageEffectLease = assertMailboxNonEmptyString(
@@ -219,7 +220,7 @@ export function completeMailboxInboundUsageEffect(
 		'expectedFinalizationToken',
 	)
 	const usageMonth = assertMailboxNonEmptyString(input.usageMonth, 'usageMonth')
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current) return { status: 'lease-lost' }
 	if (
 		current.state !== 'received' ||
@@ -255,7 +256,7 @@ export function completeMailboxInboundUsageEffect(
 	delete next.usageEffectLease
 	delete next.usageEffectLeaseAt
 	delete next.usageEffectRetryAt
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			usage_effect_recorded_at = ?,
@@ -289,7 +290,7 @@ export function completeMailboxInboundUsageEffect(
 		expectedFinalizationToken,
 		usageEffectLease,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!after) return { status: 'lease-lost' }
 	if (
 		cursor.rowsWritten > 0 &&
@@ -311,17 +312,17 @@ export function completeMailboxInboundUsageEffect(
 	return { status: 'lease-lost' }
 }
 
-export function claimMailboxInboundSubscriptionEffect(
-	sql: SqlStorage,
+export async function claimMailboxInboundSubscriptionEffect(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		expectedFinalizationToken?: string | null
 		now?: string
 	},
-): MailboxClaimInboundSubscriptionEffectResult {
+): Promise<MailboxClaimInboundSubscriptionEffectResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current || current.state !== 'received') {
 		return { status: 'not-claimable', delivery: current }
 	}
@@ -362,7 +363,7 @@ export function claimMailboxInboundSubscriptionEffect(
 		subscriptionEffectLeaseAt: now,
 		updatedAt: now,
 	}
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			subscription_effect_state = 'processing',
@@ -373,7 +374,7 @@ export function claimMailboxInboundSubscriptionEffect(
 			AND provider = ?
 			AND event_type = 'received'
 			AND state = 'received'
-			AND (? IS NULL OR finalization_token = ?)
+			AND (?::text IS NULL OR finalization_token = ?)
 			AND (
 				subscription_effect_retry_at IS NULL
 				OR subscription_effect_retry_at <= ?
@@ -400,7 +401,7 @@ export function claimMailboxInboundSubscriptionEffect(
 		now,
 		expiredBefore,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (
 		cursor.rowsWritten > 0 &&
 		after?.subscriptionEffectLease === subscriptionEffectLease
@@ -416,8 +417,8 @@ export function claimMailboxInboundSubscriptionEffect(
 	return { status: 'not-claimable', delivery: after }
 }
 
-export function completeMailboxInboundSubscriptionEffect(
-	sql: SqlStorage,
+export async function completeMailboxInboundSubscriptionEffect(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		subscriptionEffectLease: string
@@ -426,7 +427,7 @@ export function completeMailboxInboundSubscriptionEffect(
 		suppressionReason?: string | null
 		now?: string
 	},
-): MailboxCompleteInboundSubscriptionEffectResult {
+): Promise<MailboxCompleteInboundSubscriptionEffectResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const subscriptionEffectLease = assertMailboxNonEmptyString(
@@ -437,7 +438,7 @@ export function completeMailboxInboundSubscriptionEffect(
 		input.expectedFinalizationToken,
 		'expectedFinalizationToken',
 	)
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current) return { status: 'lease-lost' }
 	if (
 		current.state !== 'received' ||
@@ -471,7 +472,7 @@ export function completeMailboxInboundSubscriptionEffect(
 	delete next.subscriptionEffectLease
 	delete next.subscriptionEffectLeaseAt
 	delete next.subscriptionEffectRetryAt
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			subscription_effect_state = 'complete',
@@ -494,7 +495,7 @@ export function completeMailboxInboundSubscriptionEffect(
 		expectedFinalizationToken,
 		subscriptionEffectLease,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (cursor.rowsWritten > 0 && after?.subscriptionEffectState === 'complete') {
 		return {
 			status: input.mode === 'suppressed' ? 'suppressed' : 'complete',
@@ -510,8 +511,8 @@ export function completeMailboxInboundSubscriptionEffect(
 	return { status: 'lease-lost' }
 }
 
-export function failMailboxInboundSubscriptionEffect(
-	sql: SqlStorage,
+export async function failMailboxInboundSubscriptionEffect(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		subscriptionEffectLease: string
@@ -519,7 +520,7 @@ export function failMailboxInboundSubscriptionEffect(
 		error: string
 		now?: string
 	},
-): MailboxFailInboundSubscriptionEffectResult {
+): Promise<MailboxFailInboundSubscriptionEffectResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const subscriptionEffectLease = assertMailboxNonEmptyString(
@@ -531,7 +532,7 @@ export function failMailboxInboundSubscriptionEffect(
 		'expectedFinalizationToken',
 	)
 	const error = assertMailboxNonEmptyString(input.error, 'error')
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (
 		!current ||
 		current.state !== 'received' ||
@@ -560,7 +561,7 @@ export function failMailboxInboundSubscriptionEffect(
 	delete next.subscriptionEffectLease
 	delete next.subscriptionEffectLeaseAt
 	if (failure.deadLettered) delete next.subscriptionEffectRetryAt
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			subscription_effect_state = ?,
@@ -591,7 +592,7 @@ export function failMailboxInboundSubscriptionEffect(
 		expectedFinalizationToken,
 		subscriptionEffectLease,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (cursor.rowsWritten < 1 || !after) return { status: 'lease-lost' }
 	if (after.subscriptionEffectState === 'dead-letter') {
 		return { status: 'dead-letter', delivery: after }
@@ -602,10 +603,10 @@ export function failMailboxInboundSubscriptionEffect(
 	return { status: 'lease-lost' }
 }
 
-export function listMailboxDueInboundEffectWork(
-	sql: SqlStorage,
+export async function listMailboxDueInboundEffectWork(
+	sql: MailboxSql,
 	input: { now?: string; limit?: number },
-): MailboxListDueInboundEffectWorkResult {
+): Promise<MailboxListDueInboundEffectWorkResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const limit = normalizeMailboxInboundLimit(input.limit)
 	const usageLeaseExpiredBefore = new Date(
@@ -615,8 +616,8 @@ export function listMailboxDueInboundEffectWork(
 		Date.parse(now) - mailboxSubscriptionEffectLeaseMs,
 	).toISOString()
 	const deliveries: Array<MailboxInboundDeliverySnapshot> = []
-	for (const row of sql
-		.exec<Record<string, SqlStorageValue>>(
+	for (const row of (
+		await sql.exec<Record<string, MailboxSqlValue>>(
 			`SELECT * FROM email_delivery_events
 			WHERE provider = ?
 				AND event_type = 'received'
@@ -666,7 +667,7 @@ export function listMailboxDueInboundEffectWork(
 			subscriptionLeaseExpiredBefore,
 			limit,
 		)
-		.toArray()) {
+	).toArray()) {
 		const snapshot = snapshotFromMailboxDeliveryEventRow(
 			mapMailboxDeliveryEventRow(row),
 		)

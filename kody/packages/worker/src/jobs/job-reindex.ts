@@ -10,7 +10,7 @@ import {
 import { userVectorNamespace } from '#worker/search-index/vector-namespaces.ts'
 import { buildJobEmbedText } from '#mcp/jobs-embed.ts'
 import { jobVectorId } from '#mcp/jobs-vectorize.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { jobsData } from './jobs-data.ts'
 import { toJobView } from './schedule.ts'
 
@@ -39,7 +39,7 @@ export async function reindexJobVectors(
 		deadlineMs: options?.deadlineMs,
 		force: options?.force,
 		listPage: ({ afterId, limit }) =>
-			runD1WithRetry(() =>
+			runSqlWithRetry(() =>
 				jobsData(env).listJobsPage({
 					afterId,
 					limit,

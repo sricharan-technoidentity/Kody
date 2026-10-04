@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { type FleetEntitlementCrossingSnapshot } from '#worker/admin/fleet-usage-insights.ts'
@@ -10,7 +11,7 @@ import { type FleetEntitlementCrossedEvent } from '#worker/usage/fleet-entitleme
 const loadFleetEntitlementCrossingSnapshots =
 	vi.fn<
 		(input: {
-			db: D1Database
+			db: SqlDatabase
 			env: Env
 			now: Date
 		}) => Promise<Array<FleetEntitlementCrossingSnapshot>>
@@ -18,7 +19,7 @@ const loadFleetEntitlementCrossingSnapshots =
 
 vi.mock('#worker/admin/fleet-usage-insights.ts', () => ({
 	loadFleetEntitlementCrossingSnapshots: (input: {
-		db: D1Database
+		db: SqlDatabase
 		env: Env
 		now: Date
 	}) => loadFleetEntitlementCrossingSnapshots(input),
@@ -97,7 +98,7 @@ function snapshot(input: {
 
 function createEnv(kv?: KVNamespace) {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		APP_BASE_URL: 'https://heykody.dev/',
 		BUNDLE_ARTIFACTS_KV: kv,
 	}

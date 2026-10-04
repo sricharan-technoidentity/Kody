@@ -35,6 +35,7 @@ import { type SqlDatabase } from '#worker/aws/pg-database.ts'
 import { type FeatureFlagEvaluation } from './service.ts'
 
 export type FeatureFlagExposureEnv = {
+	RECORD_FLAG_EXPOSURES?: (input: ExposureInput) => Promise<void>
 	FLAG_EXPOSURES?: AnalyticsEngineDataset
 	APP_DB?: SqlDatabase
 	WRANGLER_IS_LOCAL_DEV?: string
@@ -60,17 +61,20 @@ export type FeatureFlagExposureRecordingSite = 'evaluation' | 'dedicated'
  * dedicated exposure path (for example `paid-ranked-search`). Pass
  * `'dedicated'` from that path so those flags still write.
  */
+export type ExposureInput = {
+	stableUserId: string
+	evaluations: Partial<Record<FeatureFlagKey, FeatureFlagEvaluation>>
+	timestamp?: string
+	recordingSite?: FeatureFlagExposureRecordingSite
+}
+
 export async function recordFeatureFlagExposures(
 	env: FeatureFlagExposureEnv,
-	input: {
-		stableUserId: string
-		evaluations: Partial<Record<FeatureFlagKey, FeatureFlagEvaluation>>
-		timestamp?: string
-		recordingSite?: FeatureFlagExposureRecordingSite
-	},
+	input: ExposureInput,
 ): Promise<void> {
 	try {
 		if (!input.stableUserId) return
+		if (env.RECORD_FLAG_EXPOSURES) return await env.RECORD_FLAG_EXPOSURES(input)
 		const recordingSite = input.recordingSite ?? 'evaluation'
 		const exposures = Object.entries(input.evaluations).filter(([key]) => {
 			const flagKey = key as FeatureFlagKey

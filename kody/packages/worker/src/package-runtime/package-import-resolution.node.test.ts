@@ -1,10 +1,10 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { collectPackageStorageGrantIds } from '#mcp/run-kody-registry.ts'
 import { createPlatformAccount } from '#worker/identity/platform-account-creation.ts'
 import { insertSavedPackage } from '#worker/package-registry/repo.ts'
-import { applyAllMigrations as applyRepositoryMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { insertEntitySource } from '#worker/repo/entity-sources.ts'
 import {
 	acceptPackageShare,
@@ -13,23 +13,29 @@ import {
 import { enablePackageShareGrantsForTests } from '#worker/package-registry/share-flag.ts'
 import { resolveSavedPackageImport } from './package-import-resolution.ts'
 
-const migrationsDirectory = new URL('../../migrations/', import.meta.url)
-
 async function createHarness() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyRepositoryMigrations(sqlite, migrationsDirectory)
-	const db = createD1FromSqlite(sqlite)
+	const sqlite = await createTestPg()
+
+	const db = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
 	await enablePackageShareGrantsForTests(db)
 	const platform = await createPlatformAccount({
 		db,
+		forUser: (userId) =>
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
 		email: 'kody@example.com',
 		username: 'kody',
 	})
-	return { sqlite, db, platformUserId: platform.stableUserId }
+	return {
+		sqlite,
+		db,
+		forUser: (userId: string) =>
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
+		platformUserId: platform.stableUserId,
+	}
 }
 
 async function seedPackage(
-	db: D1Database,
+	pg: Awaited<ReturnType<typeof createTestPg>>,
 	input: {
 		userId: string
 		name: string
@@ -38,6 +44,11 @@ async function seedPackage(
 		isPrivate?: boolean
 	},
 ) {
+	const db = createPgDatabase({
+		connection: pg,
+		role: 'kody_writer',
+		userId: input.userId,
+	})
 	const id = crypto.randomUUID()
 	await insertSavedPackage(db, {
 		id,
@@ -56,13 +67,13 @@ async function seedPackage(
 }
 
 test('resolveSavedPackageImport resolves platform scopes, prefers caller copies, and rejects hidden or foreign packages', async () => {
-	const { db, platformUserId } = await createHarness()
-	const platformPackageId = await seedPackage(db, {
+	const { db, sqlite, forUser, platformUserId } = await createHarness()
+	const platformPackageId = await seedPackage(sqlite, {
 		userId: platformUserId,
 		name: '@kody/github',
 		kodyId: 'github',
 	})
-	const personPackageId = await seedPackage(db, {
+	const personPackageId = await seedPackage(sqlite, {
 		userId: 'caller-user',
 		name: '@kentcdodds/github',
 		kodyId: 'github',
@@ -70,13 +81,15 @@ test('resolveSavedPackageImport resolves platform scopes, prefers caller copies,
 
 	await expect(
 		resolveSavedPackageImport({
-			db,
+			forUser,
+			db: forUser('caller-user'),
 			userId: 'caller-user',
 			specifier: 'kody:@kody/github/issues',
 		}),
 	).resolves.toBeNull()
 	const platformResolved = await resolveSavedPackageImport({
-		db,
+		forUser,
+		db: forUser('caller-user'),
 		userId: 'caller-user',
 		specifier: 'kody:@kody/github/issues',
 		allowPlatformScopes: true,
@@ -87,7 +100,8 @@ test('resolveSavedPackageImport resolves platform scopes, prefers caller copies,
 	})
 	expect(platformResolved?.row.id).toBe(platformPackageId)
 	const personResolved = await resolveSavedPackageImport({
-		db,
+		forUser,
+		db: forUser('caller-user'),
 		userId: 'caller-user',
 		specifier: 'kody:@kentcdodds/github',
 	})
@@ -99,20 +113,22 @@ test('resolveSavedPackageImport resolves platform scopes, prefers caller copies,
 
 	await expect(
 		resolveSavedPackageImport({
-			db,
+			forUser,
+			db: forUser('caller-user'),
 			userId: 'caller-user',
 			specifier: 'kody:@kody/github',
 			allowPlatformScopes: false,
 		}),
 	).resolves.toBeNull()
 
-	const ownCopyId = await seedPackage(db, {
+	const ownCopyId = await seedPackage(sqlite, {
 		userId: 'copy-user',
 		name: '@kody/github',
 		kodyId: 'github',
 	})
 	const callerResolved = await resolveSavedPackageImport({
-		db,
+		forUser,
+		db: forUser('copy-user'),
 		userId: 'copy-user',
 		specifier: 'kody:@kody/github',
 	})
@@ -122,26 +138,27 @@ test('resolveSavedPackageImport resolves platform scopes, prefers caller copies,
 	})
 	expect(callerResolved?.row.id).toBe(ownCopyId)
 
-	await seedPackage(db, {
+	await seedPackage(sqlite, {
 		userId: platformUserId,
 		name: '@kody/wip-package',
 		kodyId: 'wip-package',
 		hidden: true,
 	})
-	await seedPackage(db, {
+	await seedPackage(sqlite, {
 		userId: platformUserId,
 		name: '@kody/internal-package',
 		kodyId: 'internal-package',
 		isPrivate: true,
 	})
-	await seedPackage(db, {
+	await seedPackage(sqlite, {
 		userId: 'someone-else',
 		name: '@someoneelse/tools',
 		kodyId: 'tools',
 	})
 	await expect(
 		resolveSavedPackageImport({
-			db,
+			forUser,
+			db: forUser('caller-user'),
 			userId: 'caller-user',
 			specifier: 'kody:@kody/wip-package',
 			allowPlatformScopes: true,
@@ -149,7 +166,8 @@ test('resolveSavedPackageImport resolves platform scopes, prefers caller copies,
 	).resolves.toBeNull()
 	await expect(
 		resolveSavedPackageImport({
-			db,
+			forUser,
+			db: forUser('caller-user'),
 			userId: 'caller-user',
 			specifier: 'kody:@kody/internal-package',
 			allowPlatformScopes: true,
@@ -157,7 +175,8 @@ test('resolveSavedPackageImport resolves platform scopes, prefers caller copies,
 	).resolves.toBeNull()
 	await expect(
 		resolveSavedPackageImport({
-			db,
+			forUser,
+			db: forUser('caller-user'),
 			userId: 'caller-user',
 			specifier: 'kody:@someoneelse/tools',
 		}),
@@ -192,7 +211,7 @@ test('platform-owned dependencies are excluded from packageStorage grants', () =
 })
 
 test('resolveSavedPackageImport resolves accepted share grants and not pending ones', async () => {
-	const { db } = await createHarness()
+	const { db, sqlite, forUser } = await createHarness()
 	const ownerUserId = 'aa'.repeat(32)
 	const guestUserId = 'bb'.repeat(32)
 	await db
@@ -209,13 +228,13 @@ test('resolveSavedPackageImport resolves accepted share grants and not pending o
 		)
 		.bind('jesse', 'jesse@example.com', guestUserId, 'standard')
 		.run()
-	const packageId = await seedPackage(db, {
+	const packageId = await seedPackage(sqlite, {
 		userId: ownerUserId,
 		name: '@alice/shared-notes',
 		kodyId: 'shared-notes',
 		isPrivate: true,
 	})
-	await insertEntitySource(db, {
+	await insertEntitySource(forUser(ownerUserId), {
 		id: `source-${packageId}`,
 		user_id: ownerUserId,
 		entity_kind: 'package',
@@ -243,26 +262,28 @@ test('resolveSavedPackageImport resolves accepted share grants and not pending o
 		username: 'jesse',
 	}
 	await invitePackageShare({
-		db,
+		db: forUser(ownerUserId),
 		owner,
 		packageId,
 		invitee: { username: 'jesse' },
 	})
 	await expect(
 		resolveSavedPackageImport({
-			db,
+			forUser,
+			db: forUser(guestUserId),
 			userId: guestUserId,
 			specifier: 'kody:@alice/shared-notes/notes',
 		}),
 	).resolves.toBeNull()
 	await acceptPackageShare({
-		db,
+		db: forUser(guestUserId),
 		guest,
 		packageId,
 		trustLevel: 'follow',
 	})
 	const resolved = await resolveSavedPackageImport({
-		db,
+		forUser,
+		db: forUser(guestUserId),
 		userId: guestUserId,
 		specifier: 'kody:@alice/shared-notes/notes',
 	})
@@ -275,7 +296,7 @@ test('resolveSavedPackageImport resolves accepted share grants and not pending o
 })
 
 test('nested shared imports prefer the owner package over the guest name collision', async () => {
-	const { db } = await createHarness()
+	const { db, sqlite, forUser } = await createHarness()
 	const ownerUserId = 'aa'.repeat(32)
 	const guestUserId = 'bb'.repeat(32)
 	await db
@@ -292,20 +313,21 @@ test('nested shared imports prefer the owner package over the guest name collisi
 		)
 		.bind('jesse', 'jesse@example.com', guestUserId, 'standard')
 		.run()
-	const ownerHelperId = await seedPackage(db, {
+	const ownerHelperId = await seedPackage(sqlite, {
 		userId: ownerUserId,
 		name: '@alice/helper',
 		kodyId: 'helper',
 		isPrivate: true,
 	})
-	const guestHelperId = await seedPackage(db, {
+	const guestHelperId = await seedPackage(sqlite, {
 		userId: guestUserId,
 		name: '@alice/helper',
 		kodyId: 'helper',
 		isPrivate: true,
 	})
 	const resolved = await resolveSavedPackageImport({
-		db,
+		forUser,
+		db: forUser(guestUserId),
 		userId: guestUserId,
 		specifier: 'kody:@alice/helper',
 		nestedShareOwnerUserId: ownerUserId,

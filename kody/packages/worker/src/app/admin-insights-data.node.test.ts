@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { type RunLogAdminInsightsSnapshot } from '#worker/run-records/admin-insights-snapshot.ts'
@@ -410,7 +411,7 @@ function createInsightsTestDb() {
 			}
 		},
 		seenQueries,
-	} as unknown as D1Database & { seenQueries: Array<string> }
+	} as unknown as SqlDatabase & { seenQueries: Array<string> }
 	return db
 }
 

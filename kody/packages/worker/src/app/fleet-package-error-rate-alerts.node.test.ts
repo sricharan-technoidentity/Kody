@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { fleetPackageErrorRateKvKey } from '#worker/usage/fleet-package-error-rate.ts'
@@ -82,7 +83,7 @@ test('refreshFleetPackageErrorRateAndMaybeAlert writes a content-free snapshot a
 	const now = new Date('2026-08-22T19:32:00.000Z')
 	const env = {
 		USAGE_EVENTS: {} as AnalyticsEngineDataset,
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: kv,
 		APP_BASE_URL: 'https://kody.codes',
 		CLOUDFLARE_ACCOUNT_ID: 'account',
@@ -163,7 +164,7 @@ test('refreshFleetPackageErrorRateAndMaybeAlert writes a content-free snapshot a
 	const skipped = await refreshFleetPackageErrorRateAndMaybeAlert({
 		env: {
 			USAGE_EVENTS: {} as AnalyticsEngineDataset,
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			BUNDLE_ARTIFACTS_KV: failedKv.kv,
 			CLOUDFLARE_ACCOUNT_ID: 'account',
 			CLOUDFLARE_API_TOKEN: 'token',
@@ -282,7 +283,7 @@ test('refreshFleetPackageErrorRateAndMaybeAlert names a one-account concentratio
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	const result = await refreshFleetPackageErrorRateAndMaybeAlert({
 		env: {

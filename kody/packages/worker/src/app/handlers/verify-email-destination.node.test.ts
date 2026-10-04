@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createVerifyEmailDestinationHandler } from '#app/handlers/verify-email-destination.ts'
 import { verifyEmailDestinationToken } from '#worker/email/destination-verification.ts'
@@ -26,7 +27,7 @@ test('verified destination CTA returns to the email inbox destinations panel', a
 		email: 'pager@example.com',
 	})
 	const handler = createVerifyEmailDestinationHandler({
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env)
 
 	const response = await handler.handler({
@@ -57,7 +58,7 @@ test('destination verify HEAD peeks without consuming and failures offer a resen
 		email: 'pager@example.com',
 	})
 	const handler = createVerifyEmailDestinationHandler({
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 	} as Env)
 
 	const head = await handler.handler({

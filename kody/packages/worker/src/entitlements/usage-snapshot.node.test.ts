@@ -1,14 +1,15 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { legacyPlanLimits, planLimits } from '#universal/plans.ts'
 import { readEntitlementUsageSnapshot } from '#worker/entitlements/usage-snapshot.ts'
-import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-catalog.ts'
 import { createInMemoryRunLogUsageEnv } from '#worker/test-support/run-log-usage.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { accountUsageEntitlementResources } from '#worker/entitlements/resource-visibility.ts'
 
-function withUsageEnv(env: { APP_DB: D1Database } & Record<string, unknown>) {
+function withUsageEnv(env: { APP_DB: SqlDatabase } & Record<string, unknown>) {
 	const meter = createInMemoryUserMeterEnv()
 	const runLog = createInMemoryRunLogUsageEnv()
 	const repoSessionIndex = createInMemoryRepoSessionIndexEnv(env.APP_DB)
@@ -16,10 +17,9 @@ function withUsageEnv(env: { APP_DB: D1Database } & Record<string, unknown>) {
 		...env,
 		...meter.env,
 		...runLog.env,
-		REPO_SESSION_INDEX: repoSessionIndex.REPO_SESSION_INDEX,
-		MAILBOX: {
-			idFromName: (name: string) => name as unknown as DurableObjectId,
-			get: () => ({ countMessages: async () => ({ total: 0 }) }),
+		REPO_SESSION_CATALOG: repoSessionIndex.REPO_SESSION_CATALOG,
+		MAILBOX_STORE: {
+			forUser: () => ({ countMessages: async () => ({ total: 0 }) }),
 		},
 		meter,
 		runLog,
@@ -81,7 +81,7 @@ function createUsageTestDb(input: {
 					},
 				}
 			},
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 	}
 }
 

@@ -1,9 +1,8 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
-import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
-import { ensureReferralProgramTestSchema } from './test-schema.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { getUserEntitlement } from './service.ts'
 import {
@@ -19,21 +18,8 @@ const now = new Date('2026-09-07T12:00:00.000Z')
 const firstCreditExpiresAt = '2026-10-07T12:00:00.000Z'
 const secondCreditExpiresAt = '2026-11-06T12:00:00.000Z'
 
-async function ensureReferralSchema(db: D1Database) {
-	await ensureUsersTestSchema({
-		db,
-		columns: [
-			'email_verified_at',
-			'account_type',
-			'stripe_customer_id',
-			'stripe_plan',
-		],
-	})
-	await ensureReferralProgramTestSchema(db)
-}
-
 async function insertUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		email: string
 		username?: string
@@ -66,7 +52,7 @@ async function insertUser(
 	return { email: input.email, stableUserId }
 }
 
-async function creditExpiry(db: D1Database, stableUserId: string) {
+async function creditExpiry(db: SqlDatabase, stableUserId: string) {
 	const row = await db
 		.prepare(
 			`SELECT referral_standard_credit_expires_at
@@ -77,7 +63,7 @@ async function creditExpiry(db: D1Database, stableUserId: string) {
 	return row?.referral_standard_credit_expires_at ?? null
 }
 
-async function referralRow(db: D1Database, refereeStableUserId: string) {
+async function referralRow(db: SqlDatabase, refereeStableUserId: string) {
 	return db
 		.prepare(`SELECT * FROM referrals WHERE referee_stable_user_id = ?`)
 		.bind(refereeStableUserId)
@@ -90,9 +76,8 @@ async function referralRow(db: D1Database, refereeStableUserId: string) {
 }
 
 test('referral rewards both parties once on first paid invoice, skips trial, rejects fraud, and stacks without a cap', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureReferralSchema(db)
+	const sqlite = await createTestPg()
+	const db = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
 
 	const referrer = await insertUser(db, {
 		email: 'referrer@example.com',
@@ -360,9 +345,8 @@ test('referral rewards both parties once on first paid invoice, skips trial, rej
 })
 
 test('held rewards release for every pending referee when the referrer verifies', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureReferralSchema(db)
+	const sqlite = await createTestPg()
+	const db = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
 	const referrer = await insertUser(db, {
 		email: 'held-referrer@example.com',
 		username: 'heldreferrer',
@@ -434,9 +418,8 @@ test('held rewards release for every pending referee when the referrer verifies'
 })
 
 test('held rewards stay pending when the referrer period resolver fails', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureReferralSchema(db)
+	const sqlite = await createTestPg()
+	const db = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
 	const referrer = await insertUser(db, {
 		email: 'held-fail-referrer@example.com',
 		username: 'heldfailref',
@@ -490,9 +473,8 @@ test('held rewards stay pending when the referrer period resolver fails', async 
 })
 
 test('referral billing summary counts every row, not only the displayed page', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureReferralSchema(db)
+	const sqlite = await createTestPg()
+	const db = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
 	const referrer = await insertUser(db, {
 		email: 'count-referrer@example.com',
 		username: 'countreferrer',

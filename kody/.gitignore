@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 bun.lock
+*.tsbuildinfo
+coverage/
+
+# Local credentials; keep the checked-in example and synthetic test environment.
+.aws/
+.env.*
+!.env.example
+!.env.test
 
 # Editor directories and files
 .vscode/*
@@ -37,7 +45,8 @@ packages/worker/public/client-manifest.json
 packages/worker/wrangler-*.generated.json
 packages/worker/.generated/
 packages/worker/src/generated/
-packages/runtime-worker/wrangler-local-dev.generated.json
-packages/runtime-worker/wrangler-*.generated.json
-packages/platform-worker/wrangler-local-dev.generated.json
-packages/platform-worker/wrangler-*.generated.json
+
+# Local plans and demo reports
+/planss/
+/demo-walkthrough-2026-10-04/
+/docs/audits/kody-system-report-2026-10-04.md

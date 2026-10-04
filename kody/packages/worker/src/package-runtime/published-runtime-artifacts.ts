@@ -64,7 +64,7 @@ export type BundleArtifactDynamicDependency = {
 	exportName: string
 }
 
-type SerializedWorkerLoaderModule =
+export type SerializedWorkerLoaderModule =
 	| string
 	| {
 			js?: string
@@ -140,7 +140,7 @@ function getBundleArtifactsKv(env: Env) {
 	return kv
 }
 
-function serializeWorkerLoaderModules(
+export function serializeWorkerLoaderModules(
 	modules: WorkerLoaderModules,
 ): Record<string, SerializedWorkerLoaderModule> {
 	return Object.fromEntries(

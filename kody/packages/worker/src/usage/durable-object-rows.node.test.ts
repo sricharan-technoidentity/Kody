@@ -6,7 +6,7 @@ vi.mock('./record-usage.ts', () => ({
 	recordUsage,
 }))
 
-vi.mock('cloudflare:workers', () => ({
+vi.mock('#worker/front-door/host-context.ts', () => ({
 	waitUntil: vi.fn(),
 }))
 

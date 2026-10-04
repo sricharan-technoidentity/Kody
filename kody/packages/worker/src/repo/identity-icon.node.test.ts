@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	buildIdentityIconCacheKey,
@@ -139,7 +140,7 @@ test('getIdentityIconObject prefers .kody/icon and skips package-app icons unles
 	const { kv } = createFakeKv()
 	const { bucket } = createFakeR2()
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: kv,
 		COMMUNITY_ASSETS: bucket,
 		IMAGES: createFakeImagesBinding(),
@@ -188,7 +189,7 @@ test('deleteIdentityIconAssets keeps the current commit and refresh stamps live 
 	const { kv, values: kvValues } = createFakeKv()
 	const { bucket, values: r2Values } = createFakeR2()
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: kv,
 		COMMUNITY_ASSETS: bucket,
 		IMAGES: createFakeImagesBinding(),

@@ -1,7 +1,15 @@
+import { type MailActivities } from '../mail-activities.ts'
+import { type RepoSessionActivities } from './repo-session.ts'
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
 import { type JobRepoCheckPolicy } from '@kody-internal/shared/jobs/types.ts'
 import { type CatalogActivities } from './catalog-types.ts'
 import { type PackageWorkflowActivities } from '../package-workflow-activities.ts'
+import {
+	type HttpRequestPayload,
+	type HttpResponsePayload,
+} from '../../front-door/http-payload.ts'
+import { type ExposureInput } from '../../feature-flags/exposure.ts'
+import { type McpClientOperation } from '../workflows/front-door-mutation.ts'
 /**
  * The activity contract every Kody workflow is written against. Workflows
  * import these types only; implementations are bound per environment
@@ -90,8 +98,13 @@ export type OAuthPurgeStepResult = {
 	continuation: unknown
 }
 
-export type KodyActivities = CatalogActivities &
+export type KodyActivities = MailActivities &
+	RepoSessionActivities &
+	CatalogActivities &
 	PackageWorkflowActivities & {
+		handleHttpMutation(input: HttpRequestPayload): Promise<HttpResponsePayload>
+		recordExposure(input: ExposureInput): Promise<void>
+		operateMcpClient(input: McpClientOperation): Promise<unknown>
 		completeWorkflowStart(input: {
 			userId: string
 			surface: string

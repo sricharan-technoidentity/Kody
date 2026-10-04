@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as EntitlementPlans from '#universal/plans.ts'
 import type * as EntitlementService from '#worker/entitlements/service.ts'
@@ -122,7 +123,7 @@ test('loadAccountEmailData reads USER message graph only through owner Mailbox r
 	const prepare = vi.fn()
 	const meter = createInMemoryUserMeterEnv()
 	const env = {
-		APP_DB: { prepare } as unknown as D1Database,
+		APP_DB: { prepare } as unknown as SqlDatabase,
 		APP_BASE_URL: 'https://example.com',
 		COOKIE_SECRET: 'secret',
 		...meter.env,

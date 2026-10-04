@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test, vi } from 'vitest'
 import type * as IntegrationsService from '#worker/integrations/service.ts'
@@ -381,7 +382,7 @@ function createEnv() {
 					},
 				}
 			},
-		} as unknown as D1Database,
+		} as unknown as SqlDatabase,
 		SECRET_KMS: testSecretKms,
 	} as Env
 }

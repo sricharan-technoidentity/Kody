@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { collectStaticKodyPackageImportsFromFiles } from '#worker/package-runtime/static-kody-imports.ts'
 import { getSavedPackageById } from './repo.ts'
 import {
@@ -60,7 +61,7 @@ export function collectScopedPackageNamesFromSource(input: {
 }
 
 export async function findPlatformScopedPackageName(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageNames: ReadonlyArray<string>
 }): Promise<string | null> {
 	for (const packageName of input.packageNames) {
@@ -74,7 +75,7 @@ export async function findPlatformScopedPackageName(input: {
 }
 
 export async function findPersonPackagePlatformReference(input: {
-	db: D1Database
+	db: SqlDatabase
 	manifestDependencies?: Array<string> | Record<string, string> | null
 	sourceFiles: Record<string, string>
 }): Promise<string | null> {
@@ -90,7 +91,7 @@ export async function findPersonPackagePlatformReference(input: {
  * packages may still compose with each other.
  */
 export async function assertPersonOwnedPackageMayNotRunPlatformDependencies(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	dependencies: ReadonlyArray<{ platformOwned?: boolean }>
@@ -113,7 +114,7 @@ export async function assertPersonOwnedPackageMayNotRunPlatformDependencies(inpu
 
 /** Fail closed only when the missing name is a platform-account scope. */
 export async function throwIfPersonPackagePlatformReference(input: {
-	db: D1Database
+	db: SqlDatabase
 	packageName: string
 }): Promise<void> {
 	const platformName = await findPlatformScopedPackageName({

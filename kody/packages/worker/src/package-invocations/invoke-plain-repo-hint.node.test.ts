@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { findPlainRepoPromotionHint } from '#worker/repo/user-repos.ts'
 
@@ -28,7 +29,7 @@ test('findPlainRepoPromotionHint matches bare names from scoped package lookups'
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 
 	const row = await findPlainRepoPromotionHint(db, {
 		userId: 'user-1',

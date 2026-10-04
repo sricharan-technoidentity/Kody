@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const queryAnalyticsEngineSql = vi.fn()
@@ -68,7 +69,7 @@ function createConcentrationDb(
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 test('fleet package error-rate concentration classifies, names, and stays identifier-safe', async () => {

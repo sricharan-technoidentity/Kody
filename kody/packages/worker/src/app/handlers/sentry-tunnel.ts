@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type Action } from 'remix/router'
 import { checkSentryTunnelRateLimit } from '#app/rate-limit.ts'
 import { type routes } from '#universal/routes.ts'
@@ -24,7 +25,7 @@ const maxEnvelopeBytes = 10 * 1024 * 1024
 
 type SentryTunnelEnv = {
 	SENTRY_DSN?: string
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 	SENTRY_TUNNEL_RATE_LIMITER?: RateLimit
 }
 

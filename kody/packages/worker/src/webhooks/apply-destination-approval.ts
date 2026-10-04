@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { sha256Hex } from '@kody-internal/shared/sha256.ts'
 import { getSavedPackageById } from '#worker/package-registry/repo.ts'
 import {
@@ -207,7 +208,7 @@ export function buildWebhookApplyDestinationApprovalRequiredMessage(input: {
 }
 
 async function readGrantRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	endpointId: string
 	fingerprint: string
@@ -224,7 +225,7 @@ async function readGrantRow(input: {
 }
 
 async function readPendingRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	endpointId: string
 	fingerprint: string
@@ -241,7 +242,7 @@ async function readPendingRow(input: {
 }
 
 export async function hasWebhookApplyDestinationGrant(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	endpointId: string
 	fingerprint: string
@@ -251,7 +252,7 @@ export async function hasWebhookApplyDestinationGrant(input: {
 }
 
 export async function upsertWebhookApplyDestinationPending(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	endpointId: string
 	fingerprint: string
@@ -294,7 +295,7 @@ export async function upsertWebhookApplyDestinationPending(input: {
 }
 
 export async function approveWebhookApplyDestination(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	endpointId: string
 	fingerprint: string
@@ -347,7 +348,7 @@ export async function approveWebhookApplyDestination(input: {
 }
 
 export async function rejectWebhookApplyDestination(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	endpointId: string
 	fingerprint: string
@@ -376,7 +377,7 @@ function parseDestinationJson(raw: string): HttpApplyDestinationSnapshot {
 }
 
 export async function loadWebhookApplyDestinationApprovalView(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	handle: string
 	fingerprint: string
@@ -427,7 +428,7 @@ export async function loadWebhookApplyDestinationApprovalView(input: {
 }
 
 export async function requireWebhookApplyDestinationGrantOrPending(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	handle: string
 	destination: WebhookUrlApplyHttpDestination

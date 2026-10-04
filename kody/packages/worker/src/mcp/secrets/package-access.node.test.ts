@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { beforeEach, expect, test, vi } from 'vitest'
 import { McpCallerError } from '#mcp/caller-error.ts'
@@ -96,7 +97,7 @@ function accessInput(
 	> = {},
 ) {
 	return {
-		env: { APP_DB: {} as D1Database },
+		env: { APP_DB: {} as SqlDatabase },
 		baseUrl: 'https://example.com',
 		userId: 'user-1',
 		storageContext: {
@@ -324,7 +325,7 @@ test('assertCanSetSecrets fails closed for mutate grants before any provider wor
 	await expect(
 		assertCanSetSecrets({
 			env: {
-				APP_DB: {} as D1Database,
+				APP_DB: {} as SqlDatabase,
 				SECRET_KMS: testSecretKms,
 			},
 			userId: 'user-1',
@@ -420,7 +421,7 @@ test('resolvePackageMountedSecret uses the stamped package id even when the run 
 
 	await expect(
 		resolvePackageMountedSecret({
-			env: { APP_DB: {} as D1Database } as Env,
+			env: { APP_DB: {} as SqlDatabase } as Env,
 			packageId: 'pkg-1',
 			alias: 'discordBotToken',
 			callerContext: {
@@ -488,7 +489,7 @@ test('resolvePackageMountedSecret uses the stamped package id even when the run 
 	})
 	await expect(
 		resolvePackageMountedSecret({
-			env: { APP_DB: {} as D1Database } as Env,
+			env: { APP_DB: {} as SqlDatabase } as Env,
 			packageId: 'pkg-1',
 			alias: 'discordBotToken',
 			callerContext: {
@@ -588,7 +589,7 @@ test('package approval helpers parse structured messages and skip trusted packag
 	mockModule.getCommunityForkByForkedPackageId.mockResolvedValueOnce(null)
 	await expect(
 		findMissingPackageApprovals({
-			env: { APP_DB: {} as D1Database } as Env,
+			env: { APP_DB: {} as SqlDatabase } as Env,
 			baseUrl: 'https://example.com',
 			userId: 'user-1',
 			packageId: 'pkg-1',
@@ -606,7 +607,7 @@ test('package approval helpers parse structured messages and skip trusted packag
 	})
 	await expect(
 		findMissingPackageApprovals({
-			env: { APP_DB: {} as D1Database } as Env,
+			env: { APP_DB: {} as SqlDatabase } as Env,
 			baseUrl: 'https://example.com',
 			userId: 'user-1',
 			packageId: 'pkg-1',
@@ -627,7 +628,7 @@ test('package approval helpers parse structured messages and skip trusted packag
 		allowedPackages: [],
 	})
 	const entries = await findMissingPackageApprovals({
-		env: { APP_DB: {} as D1Database } as Env,
+		env: { APP_DB: {} as SqlDatabase } as Env,
 		baseUrl: 'https://example.com',
 		userId: 'user-1',
 		packageId: 'pkg-1',
@@ -686,7 +687,7 @@ test('shared package mounts resolve secrets as the owner, not the guest', async 
 		allowedPackages: [],
 	})
 	const mounted = await resolvePackageMountedSecret({
-		env: { APP_DB: {} as D1Database } as Env,
+		env: { APP_DB: {} as SqlDatabase } as Env,
 		packageId: 'pkg-1',
 		alias: 'notesToken',
 		callerContext: {

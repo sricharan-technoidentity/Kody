@@ -1,3 +1,4 @@
+import { type MailboxContext } from './mailbox-sql.ts'
 import { getMailboxInboundDelivery } from './mailbox-inbound-ledger.ts'
 import { type MailboxMaintenanceCommands } from './mailbox-maintenance-commands.ts'
 import { updateMailboxMessageDelivery } from './mailbox-mutations.ts'
@@ -19,12 +20,12 @@ import {
 } from './mailbox-types.ts'
 
 export class MailboxGraphCommitCommands {
-	private readonly ctx: DurableObjectState
+	private readonly ctx: MailboxContext
 	private readonly store: MailboxStore
 	private readonly maintenance: MailboxMaintenanceCommands
 
 	constructor(
-		ctx: DurableObjectState,
+		ctx: MailboxContext,
 		store: MailboxStore,
 		maintenance: MailboxMaintenanceCommands,
 	) {
@@ -36,27 +37,30 @@ export class MailboxGraphCommitCommands {
 	async upsertMessageGraph(
 		input: MailboxUpsertMessageGraphInput,
 	): Promise<{ ok: true; accepted: boolean }> {
-		if (!input.restore) this.store.assertReadable()
+		if (!input.restore) await this.store.assertReadable()
 		const message = input.message
 		let accepted = false
-		this.ctx.storage.transactionSync(() => {
-			const ownerId = this.store.assertOwner(input.ownerId)
+		await this.ctx.storage.transaction(async () => {
+			const ownerId = await this.store.assertOwner(input.ownerId)
 			if (message === null) {
-				accepted = this.store.upsertThreadRow(input.thread).accepted
+				accepted = (await this.store.upsertThreadRow(input.thread)).accepted
 				return
 			}
 			assertMailboxNonEmptyString(message.id, 'message.id')
-			if (this.store.isMessageTombstoned(message.id)) return
+			if (await this.store.isMessageTombstoned(message.id)) return
 			this.store.validateMessageBlobKeys({
 				ownerId,
 				message,
 				attachments: input.attachments,
 			})
-			if (input.thread) this.store.upsertThreadRow(input.thread)
-			const messageResult = this.store.upsertMessageRow(message)
+			if (input.thread) await this.store.upsertThreadRow(input.thread)
+			const messageResult = await this.store.upsertMessageRow(message)
 			accepted = messageResult.accepted
 			if (accepted && input.attachments !== undefined) {
-				this.store.replaceAttachmentsForMessage(message.id, input.attachments)
+				await this.store.replaceAttachmentsForMessage(
+					message.id,
+					input.attachments,
+				)
 			}
 		})
 		if (!input.restore) await this.maintenance.markDirtyAndEnsure()
@@ -74,13 +78,13 @@ export class MailboxGraphCommitCommands {
 		let result: MailboxCommitInboundMessageGraphResult = {
 			status: 'lease-lost',
 		}
-		this.ctx.storage.transactionSync(() => {
-			const ownerId = this.store.assertOwner(input.ownerId)
-			const delivery = getMailboxInboundDelivery(
+		await this.ctx.storage.transaction(async () => {
+			const ownerId = await this.store.assertOwner(input.ownerId)
+			const delivery = await getMailboxInboundDelivery(
 				this.ctx.storage.sql,
 				input.deliveryId,
 			)
-			const existing = this.store.getMessage(input.message.id)
+			const existing = await this.store.getMessage(input.message.id)
 			if (
 				delivery?.state === 'received' &&
 				delivery.messageId === input.message.id &&
@@ -119,18 +123,18 @@ export class MailboxGraphCommitCommands {
 				message: input.message,
 				attachments: input.attachments,
 			})
-			this.store.upsertThreadRow(input.thread)
-			const written = this.store.upsertMessageRow(input.message)
+			await this.store.upsertThreadRow(input.thread)
+			const written = await this.store.upsertMessageRow(input.message)
 			if (!written.accepted) {
 				throw new Error(
 					'Inbound graph commit was rejected by a newer snapshot.',
 				)
 			}
-			this.store.replaceAttachmentsForMessage(
+			await this.store.replaceAttachmentsForMessage(
 				input.message.id,
 				input.attachments,
 			)
-			const message = this.store.getMessage(input.message.id)
+			const message = await this.store.getMessage(input.message.id)
 			if (!message) {
 				throw new Error('Inbound graph commit did not persist its message.')
 			}
@@ -148,20 +152,23 @@ export class MailboxGraphCommitCommands {
 		let result:
 			| { message: MailboxMessageRecord; eventInserted: boolean }
 			| undefined
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			const mutation = updateMailboxMessageDelivery(this.ctx.storage.sql, {
-				messageId: input.messageId,
-				processingStatus: input.processingStatus,
-				providerMessageId: input.providerMessageId,
-				error: input.error,
-				sentAt: input.sentAt,
-				updatedAt: input.event.updatedAt,
-			})
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			const mutation = await updateMailboxMessageDelivery(
+				this.ctx.storage.sql,
+				{
+					messageId: input.messageId,
+					processingStatus: input.processingStatus,
+					providerMessageId: input.providerMessageId,
+					error: input.error,
+					sentAt: input.sentAt,
+					updatedAt: input.event.updatedAt,
+				},
+			)
 			if (mutation.status === 'missing') {
 				throw new Error('Outbound terminal message is missing from Mailbox.')
 			}
-			const eventWrite = this.store.writeDeliveryEventRow(input.event)
+			const eventWrite = await this.store.writeDeliveryEventRow(input.event)
 			if (input.providerIndexRepair) {
 				if (
 					input.processingStatus !== 'sent' ||
@@ -173,12 +180,12 @@ export class MailboxGraphCommitCommands {
 						'Outbound provider-index repair must match the accepted terminal message.',
 					)
 				}
-				upsertMailboxProviderIndexRepair(
+				await upsertMailboxProviderIndexRepair(
 					this.ctx.storage.sql,
 					input.providerIndexRepair,
 				)
 			}
-			const message = this.store.getMessage(input.messageId)
+			const message = await this.store.getMessage(input.messageId)
 			if (!message) {
 				throw new Error('Outbound terminal message disappeared from Mailbox.')
 			}
@@ -195,16 +202,19 @@ export class MailboxGraphCommitCommands {
 		provider: string
 		providerMessageId: string
 	}): Promise<{ cleared: boolean }> {
-		this.store.assertOwner(input.ownerId)
+		await this.store.assertOwner(input.ownerId)
 		const result = {
-			cleared: clearMailboxProviderIndexRepair(this.ctx.storage.sql, input),
+			cleared: await clearMailboxProviderIndexRepair(
+				this.ctx.storage.sql,
+				input,
+			),
 		}
 		await this.maintenance.syncProviderRepairHealth()
 		return result
 	}
 
-	getOutboundProviderIndexRepairStatus(ownerId: string) {
-		this.store.assertOwner(ownerId)
-		return getMailboxProviderIndexRepairStatus(this.ctx.storage.sql)
+	async getOutboundProviderIndexRepairStatus(ownerId: string) {
+		await this.store.assertOwner(ownerId)
+		return await getMailboxProviderIndexRepairStatus(this.ctx.storage.sql)
 	}
 }

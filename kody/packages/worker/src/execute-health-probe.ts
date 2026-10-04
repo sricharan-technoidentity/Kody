@@ -144,20 +144,8 @@ export async function handleExecuteHealthProbeRequest(
 	})
 }
 
-let legacyMcpFetchMemo: Promise<LegacyMcpFetch> | null = null
-
 function loadLegacyMcpFetch(): Promise<LegacyMcpFetch> {
-	legacyMcpFetchMemo ??= import('./mcp/index.ts')
-		.then(
-			({ MCP }) =>
-				MCP.serve(mcpResourcePath, { binding: 'MCP_OBJECT' })
-					.fetch as LegacyMcpFetch,
-		)
-		.catch((error: unknown) => {
-			legacyMcpFetchMemo = null
-			throw error
-		})
-	return legacyMcpFetchMemo
+	return import('./mcp/index.ts').then(({ fetchLegacyMcp }) => fetchLegacyMcp)
 }
 
 function mcpJsonRpcRequest(input: {

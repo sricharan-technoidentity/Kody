@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { z } from 'zod'
 import { recordDeliveryAlertEvent } from './delivery-alert-events.ts'
 import { type MailboxEnv } from './mailbox-client.ts'
@@ -93,11 +94,13 @@ export function parseCloudflareEmailDeliveryEvent(input: unknown) {
 }
 
 export async function processCloudflareEmailDeliveryEvent(input: {
-	env: MailboxEnv & { APP_DB: D1Database }
+	env: MailboxEnv & { APP_DB: SqlDatabase }
 	reportingEnv?: EmailReportingEnv
 	body: unknown
 }) {
-	const providerEvent = parseCloudflareEmailDeliveryEvent(input.body)
+	const providerEvent =
+		parseCloudflareEmailDeliveryEvent(input.body) ??
+		parseSesEmailDeliveryEvent(input.body)
 	if (!providerEvent) {
 		return {
 			outcome: 'invalid' as const,
@@ -162,5 +165,76 @@ export async function processCloudflareEmailDeliveryEvent(input: {
 		providerEvent,
 		event: transactional.event,
 		message: null,
+	}
+}
+
+/** SES notification payload normalized to the stable delivery-event contract. */
+export function parseSesEmailDeliveryEvent(
+	body: unknown,
+): CloudflareEmailDeliveryEvent | null {
+	const result = z
+		.object({
+			notificationType: z.enum(['Delivery', 'Bounce', 'Complaint']),
+			mail: z.object({
+				messageId: z.string().min(1),
+				timestamp: z.iso.datetime(),
+				source: z.string().min(1),
+				destination: z.array(z.string()).min(1),
+			}),
+			delivery: z.object({ timestamp: z.iso.datetime() }).optional(),
+			bounce: z
+				.object({ timestamp: z.iso.datetime(), feedbackId: z.string().min(1) })
+				.passthrough()
+				.optional(),
+			complaint: z
+				.object({ timestamp: z.iso.datetime(), feedbackId: z.string().min(1) })
+				.passthrough()
+				.optional(),
+		})
+		.safeParse(body)
+	if (!result.success) return null
+	const event = result.data
+	const status =
+		event.notificationType === 'Delivery'
+			? 'delivered'
+			: event.notificationType === 'Bounce'
+				? 'bounced'
+				: 'complained'
+	const details =
+		event.notificationType === 'Delivery'
+			? event.delivery
+			: event.notificationType === 'Bounce'
+				? event.bounce
+				: event.complaint
+	if (!details) return null
+	return {
+		type: `cf.email.sending.message.${status}`,
+		source: {
+			type: 'email.sending',
+			zoneId: 'ses',
+			domain: event.mail.source.split('@')[1] ?? 'ses',
+		},
+		payload: {
+			eventId:
+				'feedbackId' in details
+					? String(details.feedbackId)
+					: `${event.mail.messageId}:delivery:${details.timestamp}`,
+			messageId: event.mail.messageId,
+			sender: event.mail.source,
+			recipient: event.mail.destination[0]!,
+			terminal: true,
+			delivery: { status, provider: 'ses' },
+			...(status === 'bounced'
+				? { bounce: details }
+				: status === 'complained'
+					? { complaint: details }
+					: {}),
+		},
+		metadata: {
+			accountId: 'ses',
+			eventSubscriptionId: 'ses',
+			eventSchemaVersion: 1,
+			eventTimestamp: details.timestamp,
+		},
 	}
 }

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createTestDb as createPgTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
@@ -15,7 +16,7 @@ import {
 async function createTestDb() {
 	const database = await createPgTestDb({ userId: 'user-a' })
 	return {
-		db: database.db as unknown as D1Database,
+		db: database.db as unknown as SqlDatabase,
 		pg: database.pg,
 		q: pgQuery(database.pg),
 		[Symbol.asyncDispose]: () => database[Symbol.asyncDispose](),

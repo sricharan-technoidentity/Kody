@@ -1,9 +1,10 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Workers-unit D1 does not apply migrations. Suites that still read
  * package invocation token metadata need this table. packageGet secret
  * FYI metadata uses `#worker/secrets-test-schema`.
  */
-export async function ensurePackageInvocationTokensTestSchema(db: D1Database) {
+export async function ensurePackageInvocationTokensTestSchema(db: SqlDatabase) {
 	await db
 		.prepare(
 			`CREATE TABLE IF NOT EXISTS package_invocation_tokens (

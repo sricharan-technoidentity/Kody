@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { buildUserAvatarUrl } from './public-urls.ts'
 import {
@@ -12,7 +13,7 @@ import { AccountDeletionInProgressError } from '#worker/account/deletion-state.t
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 
 function createAvatarTestEnv(input: {
-	db: D1Database
+	db: SqlDatabase
 	communityAssets: R2Bucket
 	meter?: ReturnType<typeof createInMemoryUserMeterEnv>
 }) {
@@ -58,7 +59,7 @@ function createAvatarDeletionRaceDbMock() {
 		async batch() {
 			return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }]
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 	return {
 		db,
 		setDeleting(value: boolean) {

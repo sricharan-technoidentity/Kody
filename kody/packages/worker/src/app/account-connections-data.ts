@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { type AccountConnectionsLoaderData } from '#universal/loader-data.ts'
 import { isDiscordGuildRoleSyncConfigured } from '#worker/discord/guild-role.ts'
 import {
@@ -15,7 +16,7 @@ type ConnectionRow = {
 	created_at: string
 }
 
-async function listConnections(db: D1Database, userId: number) {
+async function listConnections(db: SqlDatabase, userId: number) {
 	const result = await db
 		.prepare(
 			`SELECT id, provider_name, provider_display_name, created_at
@@ -28,7 +29,7 @@ async function listConnections(db: D1Database, userId: number) {
 	return result.results ?? []
 }
 
-async function hasUsablePassword(db: D1Database, userId: number) {
+async function hasUsablePassword(db: SqlDatabase, userId: number) {
 	const row = await db
 		.prepare(`SELECT password_hash FROM users WHERE id = ?`)
 		.bind(userId)

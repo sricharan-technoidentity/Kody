@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import {
 	accountExportForeignUserIdColumnsByTable,
@@ -42,7 +43,7 @@ import {
 	repoSessionIndexNamespace,
 	repoSessionIndexRpc,
 } from '#worker/repo/repo-session-index-client.ts'
-import { type RepoSessionIndexExportResult } from '#worker/repo/repo-session-index-do.ts'
+import { type RepoSessionIndexExportResult } from '#worker/repo/repo-session-catalog.ts'
 import { resolveUserStableId } from '#worker/user-id.ts'
 import { listAccountUserStorageIds } from '#worker/account/user-inventory.ts'
 
@@ -1435,7 +1436,7 @@ async function exportRepoSessionIndexRows(input: {
 	try {
 		if (!repoSessionIndexNamespace(input.env)) {
 			input.warnings.push(
-				'REPO_SESSION_INDEX binding was unavailable; repo session catalog rows were omitted from the export.',
+				'REPO_SESSION_CATALOG binding was unavailable; repo session catalog rows were omitted from the export.',
 			)
 			return null
 		}
@@ -1602,7 +1603,7 @@ function buildManifest(input: {
 		warnings: input.warnings.filter(
 			(warning) =>
 				warning.startsWith('Repo session index ') ||
-				warning.startsWith('REPO_SESSION_INDEX '),
+				warning.startsWith('REPO_SESSION_CATALOG '),
 		),
 		discovery: { section: 'repo_session_index' },
 	}
@@ -1704,6 +1705,16 @@ export async function createAccountExportManifest(input: {
 	mcpUserId: string
 	generatedAt?: string
 }): Promise<AccountExportManifest> {
+	if (input.env.ACCOUNT_SUBJECT_READER)
+		input = {
+			...input,
+			env: {
+				...input.env,
+				APP_DB: input.env.ACCOUNT_SUBJECT_READER(
+					input.mcpUserId,
+				) as unknown as SqlDatabase,
+			},
+		}
 	const warnings: Array<string> = []
 	const generatedAt = input.generatedAt ?? new Date().toISOString()
 	const [d1Sections, inventoryCounts, oauthGrantCount] = await Promise.all([
@@ -1742,6 +1753,16 @@ export async function createAccountExport(input: {
 	mcpUserId: string
 	generatedAt?: string
 }): Promise<AccountExportFile> {
+	if (input.env.ACCOUNT_SUBJECT_READER)
+		input = {
+			...input,
+			env: {
+				...input.env,
+				APP_DB: input.env.ACCOUNT_SUBJECT_READER(
+					input.mcpUserId,
+				) as unknown as SqlDatabase,
+			},
+		}
 	const warnings: Array<string> = []
 	const generatedAt = input.generatedAt ?? new Date().toISOString()
 	const [d1, inventory, oauthGrants] = await Promise.all([
@@ -1821,6 +1842,16 @@ export async function readAccountExportSection(input: {
 	pageSize?: number
 	startAfter?: string
 }): Promise<AccountExportSectionResult> {
+	if (input.env.ACCOUNT_SUBJECT_READER)
+		input = {
+			...input,
+			env: {
+				...input.env,
+				APP_DB: input.env.ACCOUNT_SUBJECT_READER(
+					input.mcpUserId,
+				) as unknown as SqlDatabase,
+			},
+		}
 	const warnings: Array<string> = []
 	if (input.section === 'r2_object') {
 		return await readR2ObjectSection({
@@ -1940,7 +1971,7 @@ export async function readAccountExportSection(input: {
 	}
 	if (input.section === 'repo_session_index') {
 		if (!repoSessionIndexNamespace(input.env)) {
-			throw new Error('REPO_SESSION_INDEX binding was unavailable.')
+			throw new Error('REPO_SESSION_CATALOG binding was unavailable.')
 		}
 		const pageSize = normalizePageSize(input.pageSize)
 		const page = await repoSessionIndexRpc({

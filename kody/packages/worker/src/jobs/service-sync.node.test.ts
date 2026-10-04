@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi, afterEach } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
@@ -44,7 +45,7 @@ vi.mock('#worker/repo/repo-sessions.ts', async () =>
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionsMock(),
 )
-vi.mock('#worker/repo/repo-session-do.ts', async () =>
+vi.mock('#worker/repo/repo-session-service.ts', async () =>
 	(
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionDoMock(),
@@ -354,7 +355,7 @@ test('free plan rejects new or changed schedules faster than 15 minutes and gran
 	const paidEmail = 'interval-floor-paid@example.com'
 	const paidUserId = await createStableUserIdFromEmail(paidEmail)
 	identityMockModule.resolveBackgroundMcpUser.mockImplementation(
-		async (_db: D1Database, id: string) => ({
+		async (_db: SqlDatabase, id: string) => ({
 			userId: id,
 			email:
 				id === paidUserId
@@ -458,7 +459,7 @@ test('public Standard rejects new schedules faster than 15 minutes', async () =>
 	const email = 'public-standard-interval@example.com'
 	const userId = await createStableUserIdFromEmail(email)
 	identityMockModule.resolveBackgroundMcpUser.mockImplementation(
-		async (_db: D1Database, id: string) => ({
+		async (_db: SqlDatabase, id: string) => ({
 			userId: id,
 			email: id === userId ? email : `${id}@example.com`,
 			username: id,
@@ -505,7 +506,7 @@ test('package job sync preflights interval floors so a later invalid job writes 
 	const email = 'interval-preflight@example.com'
 	const userId = await createStableUserIdFromEmail(email)
 	identityMockModule.resolveBackgroundMcpUser.mockImplementation(
-		async (_db: D1Database, id: string) => ({
+		async (_db: SqlDatabase, id: string) => ({
 			userId: id,
 			email: id === userId ? email : `${id}@example.com`,
 			username: id,
@@ -598,7 +599,7 @@ test('syncPackageJobsForPackage enforces scheduled job entitlements for plan use
 	const maxEmail = 'max@example.com'
 	const maxUserId = await createStableUserIdFromEmail(maxEmail)
 	identityMockModule.resolveBackgroundMcpUser.mockImplementation(
-		async (_db: D1Database, userId: string) => ({
+		async (_db: SqlDatabase, userId: string) => ({
 			userId,
 			email:
 				userId === plannedUserId

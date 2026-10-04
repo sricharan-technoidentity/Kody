@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as CommunityRepo from './repo.ts'
 import { type CommunityListingRecord } from './types.ts'
@@ -33,7 +34,7 @@ const {
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 	} as Env
 }

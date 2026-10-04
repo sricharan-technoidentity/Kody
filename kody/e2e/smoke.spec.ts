@@ -1,4 +1,4 @@
-import { expect, test } from './playwright-utils.ts'
+import { expect, test, waitForClientHydration } from './playwright-utils.ts'
 import { ensurePrimaryUserExists, primaryTestUser } from './auth-test-user.ts'
 import { clearAuthRateLimitsInE2eDatabase } from './d1-utils.ts'
 
@@ -22,8 +22,9 @@ test('smoke test covers shell, auth redirect, and login', async ({ page }) => {
 	await expect(page).toHaveURL(/\/login\?redirectTo=%2Faccount$/)
 	await expect(page.getByLabel('Email')).toBeVisible()
 	await expect(page.getByLabel('Password')).toBeVisible()
+	await waitForClientHydration(page)
 
-	clearAuthRateLimitsInE2eDatabase()
+	await clearAuthRateLimitsInE2eDatabase()
 	await page.getByLabel('Email').fill(primaryTestUser.email)
 	await page.getByLabel('Password').fill(primaryTestUser.password)
 	await page.getByRole('button', { name: 'Sign in', exact: true }).click()

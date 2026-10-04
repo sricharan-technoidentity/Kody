@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { createDynamoInvocationLedger } from '#worker/aws/dynamo-invocation-ledger.ts'
 import { createFakeDynamo } from './aws/fake-dynamo.ts'
 import { expect, vi } from 'vitest'
@@ -230,7 +231,7 @@ export function createDatabase(
 			}
 		},
 		runLog,
-	} as unknown as D1Database & {
+	} as unknown as SqlDatabase & {
 		runLog: ReturnType<typeof createFakeRunLog>
 	}
 	return db
@@ -713,7 +714,7 @@ export default async function handleDiscordMessageCreated(input: { event: { id: 
 	return { gateway, manifests, sourceFiles, sources, subscriber }
 }
 
-export function createRuntimeDispatchTools(db: D1Database) {
+export function createRuntimeDispatchTools(db: SqlDatabase) {
 	return createPackageRuntimeInvokeTools({
 		env: createEnv(db),
 		baseUrl: 'https://kody.dev',
@@ -743,7 +744,7 @@ export function createRuntimeDispatchTools(db: D1Database) {
 }
 
 export function createRuntimeEventTools(
-	db: D1Database,
+	db: SqlDatabase,
 	options: {
 		envOverrides?: Record<string, unknown>
 		packageInvokeDepth?: number

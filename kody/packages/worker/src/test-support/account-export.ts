@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	mailboxBlobRefAttachmentCursorPrefix,
 	mailboxBlobRefRawMimeCursorPrefix,
@@ -45,7 +46,7 @@ export async function createMigratedDb(observer: QueryObserver = {}) {
 				userId: subject,
 			}),
 			observer,
-		) as unknown as D1Database
+		) as unknown as SqlDatabase
 	return {
 		pg: database.pg,
 		exec: (sql: string) => database.pg.exec(sql),
@@ -103,8 +104,7 @@ export function createMailboxBinding(input?: {
 		}
 	}
 	return {
-		idFromName: (name: string) => name as unknown as DurableObjectId,
-		get: () => ({
+		forUser: (_name: string) => ({
 			countMailbox: async () => ({
 				threads: 0,
 				messages: 0,

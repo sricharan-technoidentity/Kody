@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { beforeEach, expect, test, vi } from 'vitest'
 import {
 	alreadyDispatchedWorkflowStatusExclusion,
@@ -188,7 +189,7 @@ function envStub() {
 	return {
 		// Create still types APP_DB for entitlement/plan lookup; unused here
 		// because createDynamicCallableWorkflow is mocked.
-		APP_DB: undefined as unknown as D1Database,
+		APP_DB: undefined as unknown as SqlDatabase,
 		DYNAMIC_CALLABLE_WORKFLOWS: {} as Workflow,
 		RUN_LOG: {} as DurableObjectNamespace,
 	} as Env

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { toHex } from '@kody-internal/shared/hex.ts'
 import { routes } from '#universal/routes.ts'
 import {
@@ -77,7 +78,7 @@ async function sha256Hex(bytes: Uint8Array) {
 }
 
 export async function setUserOauthAppLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	userId: string
 	slug: string
@@ -222,7 +223,7 @@ export async function getUserOauthAppLogoObject(input: {
 }
 
 export async function loadFittedUserOauthAppLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	userId: string
 	app: UserOauthApp
@@ -277,7 +278,7 @@ export async function loadFittedUserOauthAppLogo(input: {
 }
 
 async function serveCurrentUserOauthAppLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	userId: string
 	app: UserOauthApp

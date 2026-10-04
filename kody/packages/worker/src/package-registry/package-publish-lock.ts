@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { routes } from '#universal/routes.ts'
 import { getSavedPackageById } from './repo.ts'
 import { type SavedPackageRecord } from './types.ts'
@@ -120,7 +121,7 @@ export function createPackagePublishLockedError(input: {
 }
 
 export async function loadLockedSavedPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 }): Promise<SavedPackageRecord | null> {

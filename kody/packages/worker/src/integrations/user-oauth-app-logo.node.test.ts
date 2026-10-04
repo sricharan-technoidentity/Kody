@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { createTestObjectBucket } from '#worker/test-support/aws/fake-s3.ts'
@@ -17,7 +18,7 @@ import {
 
 async function createHarness() {
 	const database = await createTestDb({ userId: 'user-1' })
-	const db = database.db as unknown as D1Database
+	const db = database.db as unknown as SqlDatabase
 	const r2 = createTestObjectBucket('kody-test-community-assets')
 	const env = {
 		APP_DB: db,

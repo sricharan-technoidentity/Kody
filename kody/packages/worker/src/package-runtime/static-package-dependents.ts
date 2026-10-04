@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	countStaticDependentBundleArtifactPackages,
 	listStaticDependentBundleArtifactRows,
@@ -172,7 +173,7 @@ export function buildStaticPackageDependentsSummary(
 }
 
 export async function getStaticPackageDependentsSummary(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	sourceId: string
 	currentDependencyCommit: string

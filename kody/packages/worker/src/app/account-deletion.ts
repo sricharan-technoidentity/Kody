@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import {
 	type OAuthGrantHelpers,
@@ -32,7 +33,6 @@ import { savedPackageVectorId } from '#worker/package-registry/repo.ts'
 import { getCapabilityVectorIndex } from '#worker/search-index/embedding.ts'
 import { cleanupAllUserArtifactRepos } from '#worker/repo/artifact-repo-cleanup.ts'
 import { repoSessionRpc } from '#worker/repo/repo-session-rpc.ts'
-import { mcpClientHubDurableObjectName } from '#worker/user-scoped-durable-object-name.ts'
 import { packageRealtimeSessionRpc } from '#worker/package-runtime/realtime-session.ts'
 import { clearRunRecords } from '#worker/run-records/service.ts'
 import {
@@ -352,9 +352,9 @@ async function listUserSavedPackages(env: Env, userId: string) {
 }
 
 async function listUserRepoSessions(env: Env, userId: string) {
-	if (!env.REPO_SESSION_INDEX) {
+	if (!env.REPO_SESSION_CATALOG) {
 		throw new Error(
-			'REPO_SESSION_INDEX binding is required for account deletion.',
+			'REPO_SESSION_CATALOG service is required for account deletion.',
 		)
 	}
 	return (await listRepoSessionsByUser(env, userId)).map((row) => ({
@@ -1125,19 +1125,15 @@ async function purgeMcpClientHub(input: {
 	// Always purge, even when no mcp_server_settings rows remain: the hub DO
 	// can still hold OAuth tokens and SDK registrations (for example after a
 	// failed add), and those must not survive account deletion.
-	const namespace = input.env.MCP_CLIENT_HUB
+	const namespace = input.env.MCP_CLIENTS
 	if (!namespace) {
 		input.warnings.push(
-			'MCP_CLIENT_HUB binding was unavailable; the MCP client hub was not purged.',
+			'MCP_CLIENTS service was unavailable; the MCP client hub was not purged.',
 		)
 		return 0
 	}
 	try {
-		const stub = namespace.get(
-			namespace.idFromName(mcpClientHubDurableObjectName(input.userId)),
-		) as unknown as {
-			purgeForAccountDeletion: () => Promise<void>
-		}
+		const stub = namespace.forUser(input.userId)
 		await stub.purgeForAccountDeletion()
 		return 1
 	} catch (error) {
@@ -1463,6 +1459,16 @@ export async function deleteUserAccount(input: {
 	dbUserId: number
 	mcpUserId: string
 }): Promise<AccountDeletionResult> {
+	if (input.env.ACCOUNT_SUBJECT_PURGER)
+		input = {
+			...input,
+			env: {
+				...input.env,
+				APP_DB: input.env.ACCOUNT_SUBJECT_PURGER(
+					input.mcpUserId,
+				) as unknown as SqlDatabase,
+			},
+		}
 	const marked = await markAccountDeleting({
 		db: input.env.APP_DB,
 		dbUserId: input.dbUserId,

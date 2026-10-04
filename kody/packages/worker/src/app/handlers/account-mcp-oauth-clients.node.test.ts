@@ -1,5 +1,7 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
 	createAuthCookie,
@@ -8,21 +10,19 @@ import {
 } from '#app/auth-session.ts'
 import { createAccountMcpOauthClientsApiHandler } from '#app/handlers/account-mcp-oauth-clients.ts'
 import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
 async function seedUser(
-	sqlite: DatabaseSync,
+	sqlite: Awaited<ReturnType<typeof createTestPg>>,
 	input: { id: number; email: string; username: string; verified?: boolean },
 ) {
 	const passwordHash = await createPasswordHash('test-password')
 	const stableUserId = await createStableUserIdFromEmail(input.email)
 	const verifiedSql = input.verified === false ? 'NULL' : 'CURRENT_TIMESTAMP'
-	sqlite.exec(`
+	await sqlite.exec(`
 		INSERT INTO users (
 			id, username, email, stable_user_id, password_hash, email_verified_at
 		) VALUES (
@@ -37,7 +37,7 @@ async function seedUser(
 }
 
 function createAppEnv(
-	db: D1Database,
+	db: SqlDatabase,
 	helpers?: {
 		createClient: ReturnType<typeof vi.fn>
 		deleteClient: ReturnType<typeof vi.fn>
@@ -72,9 +72,13 @@ const userOneSession: AuthSession = {
 
 test('account MCP OAuth clients API mints, lists without the secret, isolates users, and gates auth', async () => {
 	setAuthSessionSecret(testCookieSecret)
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../../migrations/', import.meta.url))
-	const db = createD1FromSqlite(sqlite)
+	const sqlite = await createTestPg()
+
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: testStableUserIdFromEmail('one@example.com'),
+	})
 	await seedUser(sqlite, { id: 1, email: 'one@example.com', username: 'one' })
 	await seedUser(sqlite, { id: 2, email: 'two@example.com', username: 'two' })
 
@@ -151,7 +155,16 @@ test('account MCP OAuth clients API mints, lists without the secret, isolates us
 		rememberMe: false,
 	}
 	const otherList = await runHandler(
-		handler,
+		createAccountMcpOauthClientsApiHandler(
+			createAppEnv(
+				createPgDatabase({
+					connection: sqlite,
+					role: 'kody_writer',
+					userId: testStableUserIdFromEmail('two@example.com'),
+				}),
+				helpers,
+			),
+		),
 		new Request('http://example.com/account/mcp-oauth-clients.json', {
 			headers: {
 				Cookie: await createAuthCookie(otherSession, false),
@@ -184,12 +197,13 @@ test('account MCP OAuth clients API mints, lists without the secret, isolates us
 	}
 	expect(revokedPayload.clients[0]?.revokedAt).toBeTruthy()
 
-	const unverifiedSqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(
-		unverifiedSqlite,
-		new URL('../../../migrations/', import.meta.url),
-	)
-	const unverifiedDb = createD1FromSqlite(unverifiedSqlite)
+	const unverifiedSqlite = await createTestPg()
+
+	const unverifiedDb = createPgDatabase({
+		connection: unverifiedSqlite,
+		role: 'kody_writer',
+		userId: testStableUserIdFromEmail('one@example.com'),
+	})
 	await seedUser(unverifiedSqlite, {
 		id: 1,
 		email: 'one@example.com',

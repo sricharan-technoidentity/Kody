@@ -1,3 +1,4 @@
+import { type MailboxContext } from './mailbox-sql.ts'
 import {
 	computeMailboxRetentionReschedule,
 	deleteMailboxRetentionCandidate,
@@ -24,11 +25,11 @@ import { type MailboxRunRetentionNowResult } from './mailbox-types.ts'
 export class MailboxMaintenanceCommands {
 	private alarmArmed = false
 	private idleConfirmed = false
-	private readonly ctx: DurableObjectState
+	private readonly ctx: MailboxContext
 	private readonly env: Env
 	private readonly store: MailboxStore
 
-	constructor(ctx: DurableObjectState, env: Env, store: MailboxStore) {
+	constructor(ctx: MailboxContext, env: Env, store: MailboxStore) {
 		this.ctx = ctx
 		this.env = env
 		this.store = store
@@ -45,7 +46,7 @@ export class MailboxMaintenanceCommands {
 	private async ensureAlarm() {
 		if (this.alarmArmed || this.idleConfirmed) return
 		const proposedAtMs = mailboxRetentionAlarmAtMs({
-			dueAtMs: this.nextAlarmDueAtMs(),
+			dueAtMs: await this.nextAlarmDueAtMs(),
 		})
 		const existingAtMs = await this.ctx.storage.getAlarm()
 		const selection = selectMailboxRetentionWriteAlarm({
@@ -81,16 +82,16 @@ export class MailboxMaintenanceCommands {
 		await this.ensureAlarm()
 	}
 
-	private nextAlarmDueAtMs(nowMs: number = Date.now()) {
-		const inboundDueAt = getMailboxInboundDueAt(
+	private async nextAlarmDueAtMs(nowMs: number = Date.now()) {
+		const inboundDueAt = await getMailboxInboundDueAt(
 			this.ctx.storage.sql,
 			new Date(nowMs),
 		)
 		const inboundDueAtMs =
 			inboundDueAt == null ? null : Date.parse(inboundDueAt)
 		const dueTimes = [
-			nextMailboxRetentionDueAtMs(this.store, nowMs),
-			nextMailboxProviderIndexRepairDueAtMs(this.ctx.storage.sql),
+			await nextMailboxRetentionDueAtMs(this.store, nowMs),
+			await nextMailboxProviderIndexRepairDueAtMs(this.ctx.storage.sql),
 			...(inboundDueAtMs != null && Number.isFinite(inboundDueAtMs)
 				? [inboundDueAtMs]
 				: []),
@@ -99,13 +100,13 @@ export class MailboxMaintenanceCommands {
 	}
 
 	private async syncInboundDueOwnerHint() {
-		const ownerId = this.store.getOwnerId()
+		const ownerId = await this.store.getOwnerId()
 		if (!ownerId) return
 		try {
 			await replaceInboundDueOwnerHint({
 				db: this.env.APP_DB,
 				userId: ownerId,
-				dueAt: getMailboxInboundDueAt(this.ctx.storage.sql),
+				dueAt: await getMailboxInboundDueAt(this.ctx.storage.sql),
 				reason: 'mailbox-due-work',
 			})
 		} catch (error) {
@@ -114,13 +115,13 @@ export class MailboxMaintenanceCommands {
 	}
 
 	async syncProviderRepairHealth() {
-		const ownerId = this.store.getOwnerId()
+		const ownerId = await this.store.getOwnerId()
 		if (!ownerId) return
 		try {
 			await syncProviderIndexRepairOwnerHealth({
 				db: this.env.APP_DB,
 				userId: ownerId,
-				status: getMailboxProviderIndexRepairStatus(this.ctx.storage.sql),
+				status: await getMailboxProviderIndexRepairStatus(this.ctx.storage.sql),
 			})
 		} catch (error) {
 			console.warn('mailbox-provider-index-repair-health-sync-failed', {
@@ -149,9 +150,12 @@ export class MailboxMaintenanceCommands {
 		cutoff: string,
 	): Promise<MailboxRetentionMessageDeleteResult | null> {
 		return await this.blockConcurrencySafely(async () => {
-			const candidate = selectMailboxRetentionCandidate(this.store, cutoff)
+			const candidate = await selectMailboxRetentionCandidate(
+				this.store,
+				cutoff,
+			)
 			if (candidate == null) return null
-			const ownerId = this.store.getOwnerId()
+			const ownerId = await this.store.getOwnerId()
 			if (ownerId == null) {
 				throw new Error('Mailbox retention candidate has no bound owner.')
 			}
@@ -166,18 +170,18 @@ export class MailboxMaintenanceCommands {
 	}
 
 	private async runRetentionPass(): Promise<MailboxRunRetentionNowResult> {
-		const before = this.store.countMailbox()
+		const before = await this.store.countMailbox()
 		const result = await enforceMailboxRetention({
 			store: this.store,
 			deleteMessage: (cutoff) => this.deleteRetentionMessage(cutoff),
 		})
-		const after = this.store.countMailbox()
+		const after = await this.store.countMailbox()
 		const nowMs = Date.now()
 		const reschedule = computeMailboxRetentionReschedule({
 			nowMs,
 			eligibleExpiredWorkRemaining: result.eligibleExpiredWorkRemaining,
 			earliestRetryAtMs: result.earliestRetryAtMs,
-			nextDueAtMs: this.nextAlarmDueAtMs(nowMs),
+			nextDueAtMs: await this.nextAlarmDueAtMs(nowMs),
 		})
 		if (reschedule.atMs == null) {
 			this.alarmArmed = false
@@ -197,7 +201,7 @@ export class MailboxMaintenanceCommands {
 
 	async alarm() {
 		await this.syncInboundDueOwnerHint()
-		const ownerId = this.store.getOwnerId()
+		const ownerId = await this.store.getOwnerId()
 		if (ownerId) {
 			await repairPendingMailboxProviderIndexes({
 				sql: this.ctx.storage.sql,
@@ -212,7 +216,7 @@ export class MailboxMaintenanceCommands {
 	async runRetentionNow(
 		ownerId: string,
 	): Promise<MailboxRunRetentionNowResult> {
-		this.store.assertOwner(ownerId)
+		await this.store.assertOwner(ownerId)
 		return await this.runRetentionPass()
 	}
 

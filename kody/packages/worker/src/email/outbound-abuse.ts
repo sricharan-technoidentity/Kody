@@ -33,7 +33,7 @@ export const emailOutboundPausedMessage =
 
 type OutboundAbuseEnv = Pick<
 	Env,
-	'APP_DB' | 'APP_BASE_URL' | 'BUNDLE_ARTIFACTS_KV' | 'MAILBOX'
+	'APP_DB' | 'APP_BASE_URL' | 'BUNDLE_ARTIFACTS_KV' | 'MAILBOX_STORE'
 >
 
 /**

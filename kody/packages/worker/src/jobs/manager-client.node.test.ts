@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import type * as ExecutionSafety from './execution-safety.ts'
 import { expect, test, vi } from 'vitest'
 import {
@@ -58,7 +59,7 @@ async function insert(
 	record: JobRecord,
 ) {
 	await insertJobRow({
-		db: database.forUser(record.userId).db as unknown as D1Database,
+		db: database.forUser(record.userId).db as unknown as SqlDatabase,
 		userId: record.userId,
 		job: record,
 		callerContextJson: 'null',

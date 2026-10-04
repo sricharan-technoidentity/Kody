@@ -83,6 +83,7 @@ export const leftoverSrcGeneratedBundlerNames = [
 ] as const
 export const packageAppRemixModuleName = 'package-app-remix.mjs'
 const generatedArtifactNames = [
+	'codemode-host.mjs',
 	'worker-bundler.mjs',
 	'worker-bundler-typescript.mjs',
 	'oauth-provider.mjs',
@@ -395,6 +396,35 @@ export async function ensureWorkerBundlerModules() {
 		outExtension: { '.js': '.mjs' },
 		plugins: [externalsPlugin],
 		logLevel: 'silent',
+	})
+	// The host needs codemode's codec and pure helpers, not its Workers runtime.
+	await build({
+		stdin: {
+			contents:
+				"export {normalizeCode, sanitizeToolName, resolveProvider, ToolDispatcher} from '@cloudflare/codemode'",
+			resolveDir: repoRoot,
+		},
+		bundle: true,
+		format: 'esm',
+		platform: 'node',
+		target: 'es2022',
+		minify: true,
+		outfile: path.join(workerBundlerGeneratedDir, 'codemode-host.mjs'),
+		plugins: [
+			{
+				name: 'codemode-host',
+				setup(build) {
+					build.onResolve({ filter: /^cloudflare:workers$/ }, () => ({
+						path: 'host-markers',
+						namespace: 'codemode-host',
+					}))
+					build.onLoad({ filter: /.*/, namespace: 'codemode-host' }, () => ({
+						contents:
+							'export class RpcTarget {} export class DurableObject {} export class WorkerEntrypoint {}',
+					}))
+				},
+			},
+		],
 	})
 	await copyFile(
 		path.join(bundlerPackageDir, 'dist/esbuild.wasm'),

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
 import { type StorageContext } from '#mcp/storage.ts'
@@ -716,7 +717,7 @@ function normalizeLimit(value: number | undefined | null) {
 }
 
 async function filterSuppressedMatches(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	conversationId: string | null
 	includeSuppressedInConversation: boolean

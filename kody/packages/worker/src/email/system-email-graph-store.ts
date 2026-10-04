@@ -1,3 +1,5 @@
+import { type SqlStatement } from '@kody-internal/shared/sql-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	boundedEmailBody,
 	emailRawMimeKey,
@@ -54,7 +56,7 @@ function messageRecord(row: Record<string, unknown>): EmailMessageRecord {
 }
 
 export async function getSystemEmailMessageById(input: {
-	db: D1Database
+	db: SqlDatabase
 	messageId: string
 }) {
 	await assertSystemEmailGraphAuthority(input.db)
@@ -70,7 +72,7 @@ export async function getSystemEmailMessageById(input: {
 }
 
 export async function countSystemEmailMessages(input: {
-	db: D1Database
+	db: SqlDatabase
 	direction?: 'inbound' | 'outbound'
 }) {
 	await assertSystemEmailGraphAuthority(input.db)
@@ -78,7 +80,7 @@ export async function countSystemEmailMessages(input: {
 		.prepare(
 			`SELECT COUNT(*) AS count
 			FROM system_email_messages
-			WHERE (? IS NULL OR direction = ?)`,
+			WHERE (?::text IS NULL OR direction = ?)`,
 		)
 		.bind(input.direction ?? null, input.direction ?? null)
 		.first<{ count: number }>()
@@ -86,7 +88,7 @@ export async function countSystemEmailMessages(input: {
 }
 
 export async function listSystemEmailMessages(input: {
-	db: D1Database
+	db: SqlDatabase
 	inboxId?: string | null
 	classification?: EmailClassification | null
 	limit: number
@@ -95,8 +97,8 @@ export async function listSystemEmailMessages(input: {
 	const result = await input.db
 		.prepare(
 			`${messageSelect()}
-			WHERE (? IS NULL OR message.inbox_id = ?)
-				AND (? IS NULL OR message.classification = ?)
+			WHERE (?::text IS NULL OR message.inbox_id = ?)
+				AND (?::text IS NULL OR message.classification = ?)
 			ORDER BY message.created_at DESC, message.id DESC
 			LIMIT ?`,
 		)
@@ -112,7 +114,7 @@ export async function listSystemEmailMessages(input: {
 }
 
 export async function findSystemEmailThreadForInboundMessage(input: {
-	db: D1Database
+	db: SqlDatabase
 	inboxId?: string | null
 	references: Array<string>
 	inReplyToHeader?: string | null
@@ -128,7 +130,7 @@ export async function findSystemEmailThreadForInboundMessage(input: {
 				`SELECT thread.*, '${systemEmailOwnerId}' AS user_id
 				FROM system_email_threads thread
 				JOIN system_email_messages message ON message.thread_id = thread.id
-				WHERE (? IS NULL OR thread.inbox_id = ?)
+				WHERE (?::text IS NULL OR thread.inbox_id = ?)
 					AND message.message_id_header = ?
 				LIMIT 1`,
 			)
@@ -140,7 +142,7 @@ export async function findSystemEmailThreadForInboundMessage(input: {
 }
 
 export async function createSystemEmailThread(input: {
-	db: D1Database
+	db: SqlDatabase
 	id?: string
 	inboxId?: string | null
 	subjectNormalized?: string | null
@@ -170,9 +172,9 @@ export async function createSystemEmailThread(input: {
 		row.updated_at,
 	]
 	const fence = input.inboundDeliveryFence
-	const prefix = input.ignoreConflict ? 'INSERT OR IGNORE' : 'INSERT'
+	const prefix = 'INSERT'
 	const placeholders = systemEmailThreadColumns.map(() => '?').join(', ')
-	const ownerFence = `(? IS NULL OR EXISTS (
+	const ownerFence = `(?::text IS NULL OR EXISTS (
 		SELECT 1 FROM email_inboxes
 		WHERE id = ? AND user_id = ?
 	))`
@@ -190,8 +192,8 @@ export async function createSystemEmailThread(input: {
 								AND state = 'storing'
 								AND storage_lease = ?
 						)`
-						: '1'
-				}`,
+						: 'TRUE'
+				} ${input.ignoreConflict ? 'ON CONFLICT DO NOTHING' : ''}`,
 		)
 		.bind(
 			...values,
@@ -256,7 +258,7 @@ type SystemInboundMessageInput = {
 }
 
 export async function insertSystemEmailMessage(input: {
-	db: D1Database
+	db: SqlDatabase
 	inboundDeliveryFence?: SystemInboundDeliveryFence
 	message: SystemInboundMessageInput
 }) {
@@ -309,11 +311,11 @@ export async function insertSystemEmailMessage(input: {
 				SELECT 1 FROM system_email_delivery_events
 				WHERE id = ? AND state = 'storing' AND storage_lease = ?
 			)`
-		: '1'
-	const sharedReferenceFenceSql = `(? IS NULL OR EXISTS (
+		: 'TRUE'
+	const sharedReferenceFenceSql = `(?::text IS NULL OR EXISTS (
 			SELECT 1 FROM email_inboxes WHERE id = ? AND user_id = ?
 		))
-		AND (? IS NULL OR EXISTS (
+		AND (?::text IS NULL OR EXISTS (
 			SELECT 1 FROM email_sender_identities WHERE id = ? AND user_id = ?
 		))`
 	const sharedReferenceValues = [
@@ -329,7 +331,7 @@ export async function insertSystemEmailMessage(input: {
 			`INSERT INTO system_email_messages (${columns.join(', ')})
 			SELECT ${placeholders}
 			WHERE ${sharedReferenceFenceSql}
-				AND (? IS NULL OR EXISTS (
+				AND (?::text IS NULL OR EXISTS (
 					SELECT 1 FROM system_email_threads WHERE id = ?
 				))
 				AND ${deliveryFenceSql}`,
@@ -359,7 +361,7 @@ export async function insertSystemEmailMessage(input: {
 }
 
 export async function insertSystemEmailAttachments(input: {
-	db: D1Database
+	db: SqlDatabase
 	messageId: string
 	ignoreConflicts?: boolean
 	inboundDeliveryFence?: SystemInboundDeliveryFence
@@ -377,15 +379,15 @@ export async function insertSystemEmailAttachments(input: {
 	await assertSystemEmailGraphAuthority(input.db)
 	if (input.attachments.length === 0) return
 	const timestamp = nowIso()
-	const prefix = input.ignoreConflicts ? 'INSERT OR IGNORE' : 'INSERT'
+	const prefix = 'INSERT'
 	const fence = input.inboundDeliveryFence
 	const deliveryFenceSql = fence
 		? `EXISTS (
 				SELECT 1 FROM system_email_delivery_events
 				WHERE id = ? AND state = 'storing' AND storage_lease = ?
 			)`
-		: '1'
-	const statements: Array<D1PreparedStatement> = []
+		: 'TRUE'
+	const statements: Array<SqlStatement> = []
 	const attachmentIds: Array<string> = []
 	for (const attachment of input.attachments) {
 		const attachmentId = attachment.id ?? crypto.randomUUID()
@@ -409,7 +411,7 @@ export async function insertSystemEmailAttachments(input: {
 					) SELECT ${systemEmailAttachmentColumns.map(() => '?').join(', ')}
 					WHERE EXISTS (
 						SELECT 1 FROM system_email_messages WHERE id = ?
-					) AND ${deliveryFenceSql}`,
+					) AND ${deliveryFenceSql} ${input.ignoreConflicts ? 'ON CONFLICT DO NOTHING' : ''}`,
 			)
 			.bind(
 				...values,
@@ -455,7 +457,7 @@ export async function insertSystemEmailAttachments(input: {
 }
 
 export async function listSystemEmailAttachments(input: {
-	db: D1Database
+	db: SqlDatabase
 	messageId: string
 }) {
 	await assertSystemEmailGraphAuthority(input.db)
@@ -472,7 +474,7 @@ export async function listSystemEmailAttachments(input: {
 }
 
 export async function getSystemEmailAttachmentById(input: {
-	db: D1Database
+	db: SqlDatabase
 	attachmentId: string
 }) {
 	await assertSystemEmailGraphAuthority(input.db)
@@ -489,7 +491,7 @@ export async function getSystemEmailAttachmentById(input: {
 }
 
 export async function touchSystemEmailThread(input: {
-	db: D1Database
+	db: SqlDatabase
 	threadId: string
 	lastMessageAt?: string | null
 }) {
@@ -510,7 +512,7 @@ export async function touchSystemEmailThread(input: {
 }
 
 export async function updateSystemEmailMessageClassification(input: {
-	db: D1Database
+	db: SqlDatabase
 	messageId: string
 	classification: EmailClassification
 	classificationReason?: string | null
@@ -538,7 +540,7 @@ export async function updateSystemEmailMessageClassification(input: {
 }
 
 export async function deleteEmptySystemEmailThreads(input: {
-	db: D1Database
+	db: SqlDatabase
 	before: string
 	limit: number
 }) {
@@ -580,7 +582,7 @@ export async function deleteEmptySystemEmailThreads(input: {
 }
 
 export async function deleteSystemEmailMessageById(input: {
-	db: D1Database
+	db: SqlDatabase
 	blobs: R2Bucket
 	messageId: string
 }): Promise<DeleteSystemEmailMessageByIdResult> {
@@ -669,7 +671,7 @@ const adminSystemInboxJoin = `LEFT JOIN email_inboxes AS inbox
 	AND inbox.user_id = ?`
 
 export async function listSystemEmailAdminMessages(input: {
-	db: D1Database
+	db: SqlDatabase
 	pageSize: number
 	offset: number
 }) {
@@ -704,7 +706,7 @@ export async function listSystemEmailAdminMessages(input: {
 }
 
 export async function getSystemEmailAdminMessageRow(input: {
-	db: D1Database
+	db: SqlDatabase
 	messageId: string
 }) {
 	await assertSystemEmailGraphAuthority(input.db)

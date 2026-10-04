@@ -59,7 +59,7 @@ export type PlatformAccountRow = {
  * compose with each other.
  */
 export async function listPlatformAccountUsernames(
-	db: D1Database,
+	db: SqlDatabase,
 ): Promise<Array<string>> {
 	try {
 		const result = await db
@@ -79,7 +79,7 @@ export async function listPlatformAccountUsernames(
 }
 
 export async function getPlatformAccountByUsername(
-	db: D1Database,
+	db: SqlDatabase,
 	username: string,
 ): Promise<PlatformAccountRow | null> {
 	try {
@@ -115,7 +115,7 @@ export async function getPlatformAccountByUsername(
 }
 
 export async function isPlatformAccountStableUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ) {
 	const trimmed = normalizeStableUserId(stableUserId)
@@ -137,7 +137,7 @@ export async function isPlatformAccountStableUserId(
 }
 
 export async function hasPackageScopeGrant(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		scopeOwnerUserId: string
 		granteeUserId: string
@@ -155,7 +155,7 @@ export async function hasPackageScopeGrant(
 }
 
 export async function insertPackageScopeGrant(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		scopeOwnerUserId: string
 		granteeUserId: string
@@ -180,7 +180,7 @@ export async function insertPackageScopeGrant(
 }
 
 export async function deletePackageScopeGrant(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		scopeOwnerUserId: string
 		granteeUserId: string
@@ -197,7 +197,7 @@ export async function deletePackageScopeGrant(
 }
 
 export async function listPackageScopeGrants(
-	db: D1Database,
+	db: SqlDatabase,
 	input: {
 		scopeOwnerUserId?: string
 	} = {},

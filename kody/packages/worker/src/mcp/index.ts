@@ -1,156 +1,100 @@
-import * as Sentry from '@sentry/cloudflare'
-import { type exports as workerExports } from 'cloudflare:workers'
-import { invariant } from '@epic-web/invariant'
-import { type McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker-provider.js'
-import { McpAgent } from 'agents/mcp'
-import { buildSentryOptions } from '../sentry-options.ts'
 import { parseMcpCallerContext, type McpServerProps } from './context.ts'
 import { assembleMcpServerInstructionsForCaller } from './assemble-mcp-server-instructions.ts'
 import { registerTools } from './register-tools.ts'
-import {
-	asMcpToolServer,
-	type McpRegistrationAgent,
-} from './mcp-registration-agent.ts'
+import { asMcpToolServer } from './mcp-registration-agent.ts'
 import { createKodyMcpServer } from './sentry-mcp-server.ts'
-import { type RawFetchHostNudgeState } from '#mcp/raw-fetch-host-nudge.ts'
-import {
-	purgePersistedMcpAgentSession,
-	registerMcpAgentSession,
-} from './session-registry.ts'
-import { stampFirstMcpConnected } from '#worker/identity/activation-stamps.ts'
-import { scheduleKitSubscriberSync } from '#worker/kit/subscriber-sync.ts'
-import { runWithDynamicWorkerEvaluationBudget } from '#worker/dynamic-worker-evaluation-budget.ts'
 import { runWithInboundRequestSignal } from './inbound-request-signal.ts'
 
 export type State = {
 	searchConversationIdsWithPreamble?: Array<string>
 	onboardingNoticeConversationIds?: Array<string>
 	onboardingNoticeLastShownAtMs?: number
-	rawFetchHostNudges?: RawFetchHostNudgeState
+	rawFetchHostNudges?: import('./raw-fetch-host-nudge.ts').RawFetchHostNudgeState
 }
 export type Props = McpServerProps
 
-class MCPBase extends McpAgent<Env, State, Props> {
-	initialState: State = {
-		searchConversationIdsWithPreamble: [],
-		onboardingNoticeConversationIds: [],
-		rawFetchHostNudges: {
-			conversationOrder: [],
-			byConversation: {},
-		},
-	}
-	declare server: McpServer
-	async init() {
-		const caller = this.getCallerContext()
-		const userId = caller.user?.userId ?? null
-		const [, instructions] = await Promise.all([
-			userId !== null &&
-				registerMcpAgentSession({
-					db: this.env.APP_DB,
-					userId,
-					doId: this.ctx.id.toString(),
-				}),
-			assembleMcpServerInstructionsForCaller({
-				env: this.env,
-				callerContext: caller,
-			}),
-		])
-		if (userId !== null) {
-			this.ctx.waitUntil(
-				(async () => {
-					const before = await this.env.APP_DB.prepare(
-						`SELECT first_mcp_connected_at FROM users WHERE stable_user_id = ?`,
-					)
-						.bind(userId)
-						.first<{ first_mcp_connected_at: string | null }>()
-					await stampFirstMcpConnected(this.env.APP_DB, {
-						stableUserId: userId,
-					})
-					if (!before?.first_mcp_connected_at) {
-						scheduleKitSubscriberSync({
-							env: this.env,
-							stableUserId: userId,
-							email: caller.user?.email,
-						})
-					}
-				})().catch((error) => {
-					console.warn('mcp-first-connected-kit-sync-failed', error)
-				}),
-			)
-		}
-		this.server = createKodyMcpServer({
-			instructions,
-			jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
-		})
-		await registerTools(this.getRegistrationAgent())
-	}
-	/**
-	 * Registration surface shared with the stateless lane (see
-	 * `asMcpToolServer` for the SDK v1/v2 seam). `state`/`setState` are
-	 * forwarded live so tool runners keep their per-session behavior
-	 * (search preamble dedup, raw-fetch host nudges) on this lane.
-	 */
-	getRegistrationAgent() {
-		// oxlint-disable-next-line typescript/no-this-alias -- object literal methods must close over the McpAgent instance
-		const self = this
-		const agent: McpRegistrationAgent & {
-			state?: State
-			setState?: (state: State) => void
-		} = {
-			server: asMcpToolServer(this.server),
-			getEnv: () => self.getEnv(),
-			getCallerContext: () => self.getCallerContext(),
-			requireDomain: () => self.requireDomain(),
-			getLoopbackExports: () => self.getLoopbackExports(),
-			waitUntil: (promise) => self.waitUntil(promise),
-			get state() {
-				return self.state
-			},
-			setState: (state) => self.setState(state),
-		}
-		return agent
-	}
-	getCallerContext() {
-		return parseMcpCallerContext(this.props)
-	}
-	getEnv() {
-		return this.env
-	}
-	getLoopbackExports() {
-		return this.ctx.exports as typeof workerExports
-	}
-	waitUntil(promise: Promise<unknown>) {
-		this.ctx.waitUntil(promise)
-	}
-	override async fetch(request: Request): Promise<Response> {
-		return runWithInboundRequestSignal(request.signal, async () =>
-			runWithDynamicWorkerEvaluationBudget(
-				async () => await super.fetch(request),
-			),
-		)
-	}
-	requireDomain() {
-		const { baseUrl } = this.getCallerContext()
-		invariant(
-			baseUrl,
-			'This should never happen, but somehow we did not get the baseUrl from the request handler',
-		)
-		return baseUrl
-	}
-	async purgeForAccountDeletion(input: { userId: string }) {
-		await purgePersistedMcpAgentSession({
-			storage: this.ctx.storage,
-			doId: this.ctx.id.toString(),
-			userId: input.userId,
-		})
-	}
+/** Owner-bound session handles map directly to an AgentCore runtime session. */
+export function mcpRuntimeSessionId(userId: string, sessionId: string) {
+	return createHmac('sha256', userId).update(sessionId).digest('hex')
+}
+function signature(env: Env, userId: string, id: string) {
+	return createHmac('sha256', env.COOKIE_SECRET)
+		.update(`${userId}:${id}`)
+		.digest('hex')
+}
+function validSession(env: Env, userId: string, value: string) {
+	const [id, mac] = value.split('.')
+	if (!id || !mac || !/^[a-f0-9]{64}$/.test(mac)) return false
+	return timingSafeEqual(
+		Buffer.from(mac, 'hex'),
+		Buffer.from(signature(env, userId, id), 'hex'),
+	)
 }
 
-export const MCP = Sentry.instrumentDurableObjectWithSentry(
-	(env: Env) => buildSentryOptions(env),
-	MCPBase,
-)
-
-/** Agent instance type for tool/resource registration (the Durable Object export is a wrapped class). */
-export type MCP = InstanceType<typeof MCP>
+/** A fresh SDK server per request, with no Durable Object or global caller state. */
+export async function fetchLegacyMcp(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext<Props>,
+): Promise<Response> {
+	const caller = parseMcpCallerContext(ctx.props)
+	const userId = caller.user?.userId
+	if (!userId) return new Response('Unauthorized', { status: 401 })
+	const sessionId = request.headers.get('Mcp-Session-Id')
+	if (sessionId && !validSession(env, userId, sessionId))
+		return new Response('Unknown MCP session', { status: 404 })
+	if (request.method === 'DELETE') return new Response(null, { status: 200 })
+	if (request.method !== 'POST') return new Response(null, { status: 405 })
+	const parsed = (await request.clone().json()) as { method?: string }
+	const initialized = parsed?.method === 'initialize'
+	const instructions = initialized
+		? await assembleMcpServerInstructionsForCaller({
+				env,
+				callerContext: caller,
+			})
+		: undefined
+	const server = createKodyMcpServer({
+		instructions,
+		jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
+	})
+	await registerTools({
+		server: asMcpToolServer(server),
+		getEnv: () => env,
+		getCallerContext: () => caller,
+		requireDomain: () => caller.baseUrl!,
+		getLoopbackExports: () =>
+			ctx.exports as unknown as import('#worker/front-door/host-context.ts').HostLoopbackExports,
+		waitUntil: (promise) => ctx.waitUntil(promise),
+	})
+	const transport = new WebStandardStreamableHTTPServerTransport({
+		sessionIdGenerator: undefined,
+		enableJsonResponse: true,
+	})
+	await server.connect(transport)
+	const response = await runWithInboundRequestSignal(request.signal, () =>
+		transport.handleRequest(request, { parsedBody: parsed }),
+	)
+	if (initialized) {
+		const id = randomUUID()
+		const handle = `${id}.${signature(env, userId, id)}`
+		response.headers.set('Mcp-Session-Id', handle)
+		response.headers.set(
+			'X-Kody-Runtime-Session-Id',
+			mcpRuntimeSessionId(userId, handle),
+		)
+	} else if (sessionId)
+		response.headers.set(
+			'X-Kody-Runtime-Session-Id',
+			mcpRuntimeSessionId(userId, sessionId),
+		)
+	// JSON responses are complete; disconnect after the result is buffered.
+	const body = await response.arrayBuffer()
+	await server.close()
+	return new Response(response.status === 204 ? null : body, {
+		status: response.status,
+		headers: response.headers,
+	})
+}

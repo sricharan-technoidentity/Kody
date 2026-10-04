@@ -1,3 +1,5 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import { type MailboxSql } from './mailbox-sql.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
 
@@ -19,7 +21,7 @@ export type InboundDueOwnersHealth = {
 }
 
 export async function hintInboundDueOwner(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	dueAt: string
 	reason: string
@@ -33,7 +35,7 @@ export async function hintInboundDueOwner(input: {
 				user_id, due_at, reason, attempt_count, last_error, updated_at
 			) VALUES (?, ?, ?, 0, NULL, ?)
 			ON CONFLICT(user_id) DO UPDATE SET
-				due_at = MIN(email_inbound_due_owners.due_at, excluded.due_at),
+				due_at = LEAST(email_inbound_due_owners.due_at, excluded.due_at),
 				reason = CASE
 					WHEN excluded.due_at <= email_inbound_due_owners.due_at
 					THEN excluded.reason
@@ -46,7 +48,7 @@ export async function hintInboundDueOwner(input: {
 }
 
 export async function replaceInboundDueOwnerHint(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	dueAt: string | null
 	reason: string
@@ -78,7 +80,7 @@ export async function replaceInboundDueOwnerHint(input: {
 }
 
 export async function listDueInboundOwners(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 	limit?: number
 }): Promise<Array<InboundDueOwner>> {
@@ -109,7 +111,7 @@ export async function listDueInboundOwners(input: {
 }
 
 export async function deferInboundDueOwner(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	error: unknown
 	now?: Date
@@ -132,7 +134,7 @@ export async function deferInboundDueOwner(input: {
 }
 
 export async function loadInboundDueOwnersHealth(input: {
-	db: D1Database
+	db: SqlDatabase
 	now?: Date
 }): Promise<InboundDueOwnersHealth> {
 	const row = await input.db
@@ -156,14 +158,14 @@ export async function loadInboundDueOwnersHealth(input: {
 	}
 }
 
-export function getMailboxInboundDueAt(
-	sql: SqlStorage,
+export async function getMailboxInboundDueAt(
+	sql: MailboxSql,
 	now?: Date,
-): string | null {
+): Promise<string | null> {
 	const nowMs = (now ?? new Date()).getTime()
 	const candidates: Array<string> = []
-	const stale = sql
-		.exec<{
+	const stale = (
+		await sql.exec<{
 			created_at: string
 			reconcile_after: string | null
 		}>(
@@ -175,7 +177,7 @@ export function getMailboxInboundDueAt(
 			ORDER BY created_at ASC
 			LIMIT 1`,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	if (stale) {
 		candidates.push(
 			stale.reconcile_after ??
@@ -187,17 +189,17 @@ export function getMailboxInboundDueAt(
 				).toISOString(),
 		)
 	}
-	const dedupe = sql
-		.exec<{ due_at: string }>(
+	const dedupe = (
+		await sql.exec<{ due_at: string }>(
 			`SELECT MIN(dedupe_expires_at) AS due_at
 			FROM email_delivery_events
 			WHERE provider = 'cloudflare-email-routing-dedupe'
 				AND dedupe_expires_at IS NOT NULL`,
 		)
-		.toArray()[0]?.due_at
+	).toArray()[0]?.due_at
 	if (dedupe) candidates.push(dedupe)
-	const effects = sql
-		.exec<{ due_at: string }>(
+	const effects = (
+		await sql.exec<{ due_at: string }>(
 			`SELECT MIN(COALESCE(
 				usage_effect_retry_at, subscription_effect_retry_at, created_at
 			)) AS due_at
@@ -206,7 +208,7 @@ export function getMailboxInboundDueAt(
 				AND event_type = 'received'
 				AND needs_effect_reconcile = 1`,
 		)
-		.toArray()[0]?.due_at
+	).toArray()[0]?.due_at
 	if (effects) candidates.push(effects)
 	return candidates.sort()[0] ?? null
 }

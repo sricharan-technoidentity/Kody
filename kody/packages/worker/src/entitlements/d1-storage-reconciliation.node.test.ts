@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test } from 'vitest'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
@@ -26,11 +27,11 @@ async function createReconcileHarness(userIds: Array<string>) {
 		role: 'kody_admin',
 	})
 	const writerFor = (userId: string) =>
-		database.forUser(userId).db as unknown as D1Database
+		database.forUser(userId).db as unknown as SqlDatabase
 	return {
 		database,
 		meter,
-		admin: admin as unknown as D1Database,
+		admin: admin as unknown as SqlDatabase,
 		writerFor,
 		envWith(meters: UserMeterEnv = meter.env) {
 			return {

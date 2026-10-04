@@ -1,4 +1,4 @@
-import { readE2eCloudflareMockState } from '../tools/e2e-cloudflare-mock-state.ts'
+import { pocControl } from '../tools/e2e-poc-state.ts'
 
 export const verificationEmailSubject =
 	'Verify your email to finish setting up Kody'
@@ -27,17 +27,7 @@ export function extractVerifyEmailPath(body: string) {
 }
 
 export async function listE2eCloudflareMockMessages() {
-	const mock = readE2eCloudflareMockState()
-	const url = new URL('/__mocks/messages', mock.origin)
-	url.searchParams.set('token', mock.token)
-	url.searchParams.set('limit', '100')
-	const response = await fetch(url)
-	if (!response.ok) {
-		throw new Error(
-			`Cloudflare mock message list failed (${String(response.status)}).`,
-		)
-	}
-	return (await response.json()) as MockEmailListResponse
+	return (await pocControl('messages')) as MockEmailListResponse
 }
 
 export function findVerificationEmail(

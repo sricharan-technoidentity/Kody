@@ -1,3 +1,6 @@
+import { type SqlStatement } from '@kody-internal/shared/sql-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import { getUniqueConstraintField } from '#worker/database-errors.ts'
 /**
  * Prepaid credit wallet storage (D1). Balances are integer micro-USD.
  *
@@ -96,7 +99,7 @@ export function toCreditWallet(row: CreditWalletRow): CreditWallet {
 
 /** Wallet for a user, or the defaults (zero balance, auto-refill off). */
 export async function readCreditWallet(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<CreditWallet> {
 	const row = await db
@@ -119,7 +122,7 @@ export async function readCreditWallet(
  * already above the include (see {@link forgiveUnchargedCreditUsage}).
  */
 export async function ensureCreditWallet(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	entitlement: UserEntitlement
 	now: Date
@@ -127,8 +130,8 @@ export async function ensureCreditWallet(input: {
 	const nowIso = input.now.toISOString()
 	const created = await input.db
 		.prepare(
-			`INSERT OR IGNORE INTO credit_wallets (user_id, created_at, updated_at)
-			 VALUES (?, ?, ?)`,
+			`INSERT INTO credit_wallets (user_id, created_at, updated_at)
+			 VALUES (?, ?, ?) ON CONFLICT (user_id) DO NOTHING`,
 		)
 		.bind(input.userId, nowIso, nowIso)
 		.run()
@@ -144,13 +147,13 @@ export async function ensureCreditWallet(input: {
  * reached `usage_rollups` yet (under an hour) is still debited later.
  */
 export async function forgiveUnchargedCreditUsage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	entitlement: UserEntitlement
 	now: Date
 }): Promise<void> {
 	const nowIso = input.now.toISOString()
-	const statements: Array<D1PreparedStatement> = []
+	const statements: Array<SqlStatement> = []
 	for (const month of creditDebitMonths(input.now)) {
 		const usage = await readMonthlyComputeUsage({
 			db: input.db,
@@ -176,7 +179,7 @@ export async function forgiveUnchargedCreditUsage(input: {
 							(user_id, month, meter, accounted_units, updated_at)
 						 VALUES (?, ?, ?, ?, ?)
 						 ON CONFLICT (user_id, month, meter) DO UPDATE SET
-							accounted_units = MAX(accounted_units, excluded.accounted_units),
+							accounted_units = GREATEST(credit_debit_progress.accounted_units, excluded.accounted_units),
 							updated_at = excluded.updated_at`,
 					)
 					.bind(input.userId, month, meter, billableByMeter[meter], nowIso),
@@ -195,7 +198,7 @@ export async function forgiveUnchargedCreditUsage(input: {
  * leaves the account locked so a retry forgives again.
  */
 export async function forgiveCreditUsageBeforeUnlock(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	current: UserEntitlementRow
 	next: UserEntitlementRow
@@ -226,7 +229,7 @@ export async function forgiveCreditUsageBeforeUnlock(input: {
 
 /** Forgive uncharged usage when a credit is about to fund an empty wallet. */
 async function forgiveBeforeFunding(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	now: Date
 }) {
@@ -252,8 +255,7 @@ export function creditDebitMonths(now: Date): [string, string] {
 }
 
 function isUniqueConstraintError(error: unknown) {
-	const message = error instanceof Error ? error.message : String(error)
-	return /UNIQUE constraint failed/i.test(message)
+	return getUniqueConstraintField(error) !== null
 }
 
 export type CreditTopUpResult = {
@@ -266,7 +268,7 @@ export type CreditTopUpResult = {
  * (webhook plus success redirect, retried refills) are no-ops.
  */
 export async function applyCreditPayment(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	kind: Extract<CreditLedgerEntryKind, 'top_up' | 'auto_refill'>
 	amountCents: number
@@ -282,8 +284,8 @@ export async function applyCreditPayment(input: {
 		await input.db.batch([
 			input.db
 				.prepare(
-					`INSERT OR IGNORE INTO credit_wallets (user_id, created_at, updated_at)
-					 VALUES (?, ?, ?)`,
+					`INSERT INTO credit_wallets (user_id, created_at, updated_at)
+					 VALUES (?, ?, ?) ON CONFLICT (user_id) DO NOTHING`,
 				)
 				.bind(input.userId, nowIso, nowIso),
 			input.db
@@ -339,7 +341,7 @@ export type CreditAdminGrantResult = {
  * recipient, time, and note.
  */
 export async function grantAdminCredits(input: {
-	db: D1Database
+	db: SqlDatabase
 	recipientUserId: string
 	grantedByUserId: string
 	amountCents: number
@@ -357,8 +359,8 @@ export async function grantAdminCredits(input: {
 	await input.db.batch([
 		input.db
 			.prepare(
-				`INSERT OR IGNORE INTO credit_wallets (user_id, created_at, updated_at)
-				 VALUES (?, ?, ?)`,
+				`INSERT INTO credit_wallets (user_id, created_at, updated_at)
+				 VALUES (?, ?, ?) ON CONFLICT (user_id) DO NOTHING`,
 			)
 			.bind(input.recipientUserId, nowIso, nowIso),
 		input.db
@@ -398,7 +400,7 @@ export async function grantAdminCredits(input: {
  * balance; its first funding forgives earlier usage above the include.
  */
 export async function updateCreditWalletSettings(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	autoRefill: CreditAutoRefillSettings
 	notify: CreditNotifySettings
@@ -440,7 +442,7 @@ export async function updateCreditWalletSettings(input: {
 }
 
 export async function markCreditAutoRefillFailed(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	now: Date
 }) {
@@ -455,7 +457,7 @@ export async function markCreditAutoRefillFailed(input: {
 
 /** Whole cents auto-refilled in one UTC month (for the monthly cap). */
 export async function sumCreditAutoRefillCents(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	month: string
 }): Promise<number> {
@@ -471,7 +473,7 @@ export async function sumCreditAutoRefillCents(input: {
 }
 
 export async function countCreditAutoRefills(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	month: string
 }): Promise<number> {
@@ -498,7 +500,7 @@ type CreditLedgerRow = {
 }
 
 export async function listCreditLedgerEntries(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	limit: number
 }): Promise<Array<CreditLedgerEntry>> {

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { env } from 'cloudflare:workers'
 import { expect, test } from 'vitest'
 import { buildKodyModuleBundle } from '#worker/package-runtime/module-graph.ts'
@@ -194,11 +195,11 @@ async function seedPublishedProbePackage(input: {
 function createCountingEnv() {
 	const counters = { d1Prepare: 0, kvGet: 0 }
 	const countedDb = {
-		prepare(...args: Parameters<D1Database['prepare']>) {
+		prepare(...args: Parameters<SqlDatabase['prepare']>) {
 			counters.d1Prepare += 1
 			return env.APP_DB.prepare(...args)
 		},
-	} as D1Database
+	} as SqlDatabase
 	const realKv = env.BUNDLE_ARTIFACTS_KV as KVNamespace
 	const countedKv = {
 		get(...args: Parameters<KVNamespace['get']>) {

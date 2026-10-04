@@ -185,6 +185,7 @@ async function resolvePackageAppClientArtifactUncached(input: {
 		bundleLabel: `Saved package app client "${input.savedPackage.kodyId}"`,
 	})
 	const compiled = await buildKodyAppClientBundle({
+		env: input.env,
 		sourceFiles,
 		entryPoint: rebuildEntry,
 	})

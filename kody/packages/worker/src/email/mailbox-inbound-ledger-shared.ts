@@ -1,3 +1,4 @@
+import { type MailboxSqlValue, type MailboxSql } from './mailbox-sql.ts'
 /**
  * Shared snapshot / detail helpers and constants for Mailbox inbound authority.
  */
@@ -315,36 +316,36 @@ export function detailJsonFromMailboxInboundSnapshot(
 	return JSON.stringify({ ...rest, ...extra })
 }
 
-export function readMailboxDeliveryEventRow(
-	sql: SqlStorage,
+export async function readMailboxDeliveryEventRow(
+	sql: MailboxSql,
 	id: string,
-): MailboxDeliveryEventRecord | null {
-	const row = sql
-		.exec<Record<string, SqlStorageValue>>(
+): Promise<MailboxDeliveryEventRecord | null> {
+	const row = (
+		await sql.exec<Record<string, MailboxSqlValue>>(
 			`SELECT * FROM email_delivery_events WHERE id = ? LIMIT 1`,
 			id,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	return row ? mapMailboxDeliveryEventRow(row) : null
 }
 
-export function readMailboxInboundDeliveryById(
-	sql: SqlStorage,
+export async function readMailboxInboundDeliveryById(
+	sql: MailboxSql,
 	deliveryId: string,
-): MailboxInboundDeliverySnapshot | null {
-	const row = readMailboxDeliveryEventRow(sql, deliveryId)
+): Promise<MailboxInboundDeliverySnapshot | null> {
+	const row = await readMailboxDeliveryEventRow(sql, deliveryId)
 	if (!row || row.provider !== mailboxInboundProvider) return null
 	return snapshotFromMailboxDeliveryEventRow(row)
 }
 
-export function mailboxMessageExists(sql: SqlStorage, messageId: string) {
+export async function mailboxMessageExists(sql: MailboxSql, messageId: string) {
 	return (
-		sql
-			.exec<{ ok: number }>(
+		(
+			await sql.exec<{ ok: number }>(
 				`SELECT 1 AS ok FROM email_messages WHERE id = ? LIMIT 1`,
 				messageId,
 			)
-			.toArray()[0] != null
+		).toArray()[0] != null
 	)
 }
 

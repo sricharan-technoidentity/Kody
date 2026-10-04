@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { CommunityListingPublishedDispatchCancelledError } from './errors.ts'
 import {
@@ -51,7 +52,7 @@ test('community listing published dispatch builds metadata-only events through a
 
 	const result = await dispatchCommunityListingPublishedSubscriptionEvent({
 		env: {
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 			APP_BASE_URL: 'https://heykody.dev',
 		},
@@ -98,7 +99,7 @@ test('community listing published dispatch builds metadata-only events through a
 	await expect(
 		dispatchCommunityListingPublishedSubscriptionEvent({
 			env: {
-				APP_DB: {} as D1Database,
+				APP_DB: {} as SqlDatabase,
 				BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 				APP_BASE_URL: 'https://heykody.dev',
 			},

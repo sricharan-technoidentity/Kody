@@ -8,6 +8,6 @@ import { type SqlDatabase } from '#worker/aws/pg-database.ts'
  * admin environment's `APP_DB`.
  */
 export function getCommunityDb(env: Pick<Env, 'APP_DB'>): SqlDatabase {
-	// ponytail: legacy Env has no COMMUNITY_DB; drop the APP_DB fallback when P7 builds AwsEnv.
+	// ponytail: legacy fixtures can omit COMMUNITY_DB; require the community reader after those fixtures are converted.
 	return (env as { COMMUNITY_DB?: SqlDatabase }).COMMUNITY_DB ?? env.APP_DB
 }

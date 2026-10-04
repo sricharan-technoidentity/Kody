@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { base64ToBytes } from '@kody-internal/shared/base64.ts'
 import { safeParseHost } from '@kody-internal/shared/url-hosts.ts'
 import { toIntegrationAuthFailureView } from '#universal/connection-trouble.ts'
@@ -246,7 +247,7 @@ export async function getJoinedIntegration(input: {
 }
 
 async function refreshPlatformIntegrationRequiredHosts(
-	db: D1Database,
+	db: SqlDatabase,
 	joined: JoinedIntegration,
 ): Promise<JoinedIntegration> {
 	if (joined.lane === 'user') return joined
@@ -1026,7 +1027,7 @@ function normalizeOauthAppConfig(
  * `upsertOauthAppWithoutConnection` (setup with zero connections).
  */
 async function resolveOrCreateOauthApp(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	config: OauthAppWriteConfig
 	existingConnectionApp: UserOauthApp | null
@@ -1180,7 +1181,7 @@ function providerFromSlug(slug: string) {
 }
 
 async function allocateAppSlug(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	preferredSlug: string
 }): Promise<string> {

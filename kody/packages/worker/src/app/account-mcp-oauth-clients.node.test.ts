@@ -1,7 +1,6 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { expect, test, vi } from 'vitest'
-import { DatabaseSync } from 'node:sqlite'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import {
 	listActiveUserMcpOauthClientIds,
 	listUserMcpOauthClients,
@@ -12,10 +11,17 @@ import {
 	revokeUserMcpOauthClient,
 } from './account-mcp-oauth-clients.ts'
 
-function createMigratedDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+async function createMigratedDb() {
+	const sqlite = await createTestPg()
+
+	return {
+		sqlite,
+		db: createPgDatabase({
+			connection: sqlite,
+			role: 'kody_writer',
+			userId: 'user-one',
+		}),
+	}
 }
 
 test('parseClientLabel and parseRedirectUriText reject empty and unsafe values', () => {
@@ -47,8 +53,8 @@ test('parseClientLabel and parseRedirectUriText reject empty and unsafe values',
 })
 
 test('mint stores ownership without the secret and revoke deletes the provider client', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	const { sqlite, db } = await createMigratedDb()
+	await sqlite.exec(`
 		INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
 		VALUES (1, 'one', 'one@example.com', 'user-one', 'hash', CURRENT_TIMESTAMP);
 	`)
@@ -102,7 +108,7 @@ test('mint stores ownership without the secret and revoke deletes the provider c
 })
 
 test('mint rolls back the provider client when D1 insert fails', async () => {
-	const { db } = createMigratedDb()
+	const { db } = await createMigratedDb()
 	const deleteClient = vi.fn(async () => undefined)
 	const helpers = {
 		createClient: vi.fn(async () => ({
@@ -120,13 +126,13 @@ test('mint rolls back the provider client when D1 insert fails', async () => {
 			label: 'Broken',
 			redirectUris: ['https://example.com/callback'],
 		}),
-	).rejects.toThrow(/FOREIGN KEY|constraint/i)
+	).rejects.toThrow(/FOREIGN KEY|constraint|row-level security/i)
 	expect(deleteClient).toHaveBeenCalledWith('oauth-client-orphan')
 })
 
 test('mint rejects an eleventh active client and deletes the unused provider client', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	const { sqlite, db } = await createMigratedDb()
+	await sqlite.exec(`
 		INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
 		VALUES (1, 'one', 'one@example.com', 'user-one', 'hash', CURRENT_TIMESTAMP);
 	`)
@@ -170,8 +176,8 @@ test('mint rejects an eleventh active client and deletes the unused provider cli
 })
 
 test('quota-race mint keeps a revoked ownership row when deleteClient fails', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	const { sqlite, db } = await createMigratedDb()
+	await sqlite.exec(`
 		INSERT INTO users (id, username, email, stable_user_id, password_hash, email_verified_at)
 		VALUES (1, 'one', 'one@example.com', 'user-one', 'hash', CURRENT_TIMESTAMP);
 	`)
@@ -206,7 +212,7 @@ test('quota-race mint keeps a revoked ownership row when deleteClient fails', as
 		db,
 		helpers: {
 			createClient: async () => {
-				sqlite.exec(`
+				await sqlite.exec(`
 					INSERT INTO user_mcp_oauth_clients (
 						id, user_id, client_id, label, redirect_uris_json, created_at
 					) VALUES (

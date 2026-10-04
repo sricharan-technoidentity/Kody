@@ -285,12 +285,9 @@ test('deferred bundle check still typechecks in an isolate and does not start bu
 		put: vi.fn(async () => undefined),
 		delete: vi.fn(async () => undefined),
 	}
-	const namespace = {
-		idFromName: vi.fn((name: string) => ({ name })),
-		get: vi.fn(() => stub),
-	}
+	const namespace = vi.fn((_name: string) => stub)
 	const env = {
-		REPO_SESSION: namespace,
+		REPO_SESSIONS: namespace,
 		BUNDLE_ARTIFACTS_KV: kv,
 	} as unknown as Env
 	const phaseTimings: PublishPhaseTimings = {}

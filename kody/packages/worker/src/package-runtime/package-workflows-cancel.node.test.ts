@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 vi.mock('#worker/temporal/package-workflow.ts', () => ({
 	createTemporalPackageWorkflowBinding: (binding: unknown) => binding,
 }))
@@ -410,7 +411,7 @@ function createAppDbStub() {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 test('cancelWorkflowRunForUser cancels a queued run and is idempotent', async () => {

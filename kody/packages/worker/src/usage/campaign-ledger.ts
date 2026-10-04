@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	isUsageCampaignOrigin,
 	isUsageCampaignState,
@@ -53,7 +54,7 @@ export function campaignRowToPersisted(
 }
 
 export async function readUsageCampaign(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: string,
 ): Promise<UsageCampaignRow | null> {
 	const row = await db
@@ -70,7 +71,7 @@ export async function readUsageCampaign(
 }
 
 export async function upsertUsageCampaign(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	state: UsageCampaignState
 	enteredAt: string
@@ -163,7 +164,7 @@ export async function upsertUsageCampaign(input: {
  * the claim idempotent across overlapping hourly sweeps.
  */
 export async function claimUsageCampaignSend(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	state: UsageCampaignState
 	template: UsageCampaignMailTemplate
@@ -189,7 +190,7 @@ export async function claimUsageCampaignSend(input: {
 }
 
 export async function releaseUsageCampaignSend(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	state: UsageCampaignState
 	sendIndex: number
@@ -203,7 +204,7 @@ export async function releaseUsageCampaignSend(input: {
 		.run()
 }
 
-export async function listUsageCampaignSends(db: D1Database, userId: string) {
+export async function listUsageCampaignSends(db: SqlDatabase, userId: string) {
 	const result = await db
 		.prepare(
 			`SELECT user_id, state, template, send_index, sent_at

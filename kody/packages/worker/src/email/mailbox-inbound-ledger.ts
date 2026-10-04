@@ -1,3 +1,4 @@
+import { type MailboxSqlValue, type MailboxSql } from './mailbox-sql.ts'
 /**
  * Mailbox USER inbound ledger authority CAS primitives.
  *
@@ -292,24 +293,24 @@ function pendingSnapshotFromInsert(
 	}
 }
 
-export function getMailboxInboundDelivery(
-	sql: SqlStorage,
+export async function getMailboxInboundDelivery(
+	sql: MailboxSql,
 	deliveryId: string,
-): MailboxInboundDeliverySnapshot | null {
-	return readMailboxInboundDeliveryById(
+): Promise<MailboxInboundDeliverySnapshot | null> {
+	return await readMailboxInboundDeliveryById(
 		sql,
 		assertMailboxNonEmptyString(deliveryId, 'deliveryId'),
 	)
 }
 
-export function getMailboxInboundDeliveryWindow(
-	sql: SqlStorage,
+export async function getMailboxInboundDeliveryWindow(
+	sql: MailboxSql,
 	input: { fingerprint: string; now?: string },
-): MailboxInboundDeliverySnapshot | null {
+): Promise<MailboxInboundDeliverySnapshot | null> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const pointerId = mailboxInboundDedupePointerId(input.fingerprint)
-	const row = sql
-		.exec<Record<string, SqlStorageValue>>(
+	const row = (
+		await sql.exec<Record<string, MailboxSqlValue>>(
 			`SELECT * FROM email_delivery_events
 			WHERE id = ? AND provider = ? AND dedupe_expires_at > ?
 			LIMIT 1`,
@@ -317,20 +318,20 @@ export function getMailboxInboundDeliveryWindow(
 			mailboxInboundDedupeProvider,
 			now,
 		)
-		.toArray()[0]
+	).toArray()[0]
 	return row
 		? snapshotFromMailboxDeliveryEventRow(mapMailboxDeliveryEventRow(row))
 		: null
 }
 
-export function claimMailboxInboundDeliveryWindow(
-	sql: SqlStorage,
+export async function claimMailboxInboundDeliveryWindow(
+	sql: MailboxSql,
 	input: {
 		ownerId: string
 		delivery: MailboxInboundDeliveryInsertInput
 		now?: string
 	},
-): MailboxInboundDeliverySnapshot {
+): Promise<MailboxInboundDeliverySnapshot> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const ownerId = assertMailboxNonEmptyString(input.ownerId, 'ownerId')
 	const validated = assertInsertInput(ownerId, input.delivery)
@@ -347,7 +348,7 @@ export function claimMailboxInboundDeliveryWindow(
 		createdAt: now,
 		updatedAt: now,
 	})
-	sql.exec(
+	await sql.exec(
 		`INSERT INTO email_delivery_events (
 			id, message_id, inbox_id, event_type, provider, provider_event_id,
 			detail_json, needs_effect_reconcile, state, fingerprint,
@@ -378,7 +379,7 @@ export function claimMailboxInboundDeliveryWindow(
 		mailboxInboundDedupeProvider,
 		now,
 	)
-	const row = readMailboxDeliveryEventRow(sql, pointerId)
+	const row = await readMailboxDeliveryEventRow(sql, pointerId)
 	if (row?.provider !== mailboxInboundDedupeProvider) {
 		throw new Error('Mailbox inbound dedupe pointer failed its provider fence.')
 	}
@@ -393,18 +394,21 @@ export function claimMailboxInboundDeliveryWindow(
  * Persist a UserMeter-accepted pending delivery. Explicit inserted/existed
  * matches the UserMeter consume replay shape.
  */
-export function insertMailboxChargedPendingInboundDelivery(
-	sql: SqlStorage,
+export async function insertMailboxChargedPendingInboundDelivery(
+	sql: MailboxSql,
 	input: {
 		ownerId: string
 		delivery: MailboxInboundDeliveryInsertInput
 		now?: string
 	},
-): MailboxInsertChargedPendingInboundDeliveryResult {
+): Promise<MailboxInsertChargedPendingInboundDeliveryResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const ownerId = assertMailboxNonEmptyString(input.ownerId, 'ownerId')
 	const validated = assertInsertInput(ownerId, input.delivery)
-	const existing = readMailboxInboundDeliveryById(sql, validated.deliveryId)
+	const existing = await readMailboxInboundDeliveryById(
+		sql,
+		validated.deliveryId,
+	)
 	if (existing) return { status: 'existed', delivery: existing }
 
 	const base = pendingSnapshotFromInsert(
@@ -412,7 +416,7 @@ export function insertMailboxChargedPendingInboundDelivery(
 		validated,
 		mailboxInboundProvider,
 	)
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`INSERT OR IGNORE INTO email_delivery_events (
 			id, message_id, inbox_id, event_type, provider, provider_event_id,
 			detail_json, needs_effect_reconcile, state, fingerprint,
@@ -433,7 +437,7 @@ export function insertMailboxChargedPendingInboundDelivery(
 		now,
 		now,
 	)
-	const after = readMailboxInboundDeliveryById(sql, validated.deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, validated.deliveryId)
 	if (!after) {
 		throw new Error(
 			'Inbound delivery charge was accepted but the delivery event was not persisted.',
@@ -445,15 +449,15 @@ export function insertMailboxChargedPendingInboundDelivery(
 	}
 }
 
-export function claimMailboxInboundDeliveryStorage(
-	sql: SqlStorage,
+export async function claimMailboxInboundDeliveryStorage(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		expectedAttachmentCount: number
 		usageStartedAt?: string | null
 		now?: string
 	},
-): MailboxClaimInboundDeliveryStorageResult {
+): Promise<MailboxClaimInboundDeliveryStorageResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const storageLease = crypto.randomUUID()
@@ -466,7 +470,7 @@ export function claimMailboxInboundDeliveryStorage(
 			'expectedAttachmentCount',
 		),
 	)
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current) return { status: 'not-claimed', delivery: null }
 
 	const canClaim =
@@ -475,7 +479,7 @@ export function claimMailboxInboundDeliveryStorage(
 			current.storageLeaseAt != null &&
 			current.storageLeaseAt < expiredBefore) ||
 		(current.state === 'received' &&
-			!mailboxMessageExists(sql, current.messageId))
+			!(await mailboxMessageExists(sql, current.messageId)))
 	if (!canClaim) return { status: 'not-claimed', delivery: current }
 
 	const usageStartedAt = current.usageStartedAt ?? input.usageStartedAt ?? null
@@ -504,7 +508,7 @@ export function claimMailboxInboundDeliveryStorage(
 	delete next.subscriptionEffectLease
 	delete next.subscriptionEffectLeaseAt
 	delete next.subscriptionEffectRetryAt
-	sql.exec(
+	await sql.exec(
 		`UPDATE email_delivery_events
 		SET event_type = 'receive_started',
 			message_id = NULL,
@@ -547,28 +551,28 @@ export function claimMailboxInboundDeliveryStorage(
 		expiredBefore,
 		current.messageId,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (after?.storageLease === storageLease && after.state === 'storing') {
 		return { status: 'claimed', delivery: after }
 	}
 	return { status: 'not-claimed', delivery: after }
 }
 
-export function releaseMailboxInboundDeliveryStorage(
-	sql: SqlStorage,
+export async function releaseMailboxInboundDeliveryStorage(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		storageLease: string
 		now?: string
 	},
-): MailboxReleaseInboundDeliveryStorageResult {
+): Promise<MailboxReleaseInboundDeliveryStorageResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const storageLease = assertMailboxNonEmptyString(
 		input.storageLease,
 		'storageLease',
 	)
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (
 		!current ||
 		current.state !== 'storing' ||
@@ -583,7 +587,7 @@ export function releaseMailboxInboundDeliveryStorage(
 	}
 	delete next.storageLease
 	delete next.storageLeaseAt
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?,
 			state = 'pending',
@@ -601,13 +605,13 @@ export function releaseMailboxInboundDeliveryStorage(
 		storageLease,
 	)
 	if (cursor.rowsWritten < 1) return { status: 'not-held' }
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!after) return { status: 'not-held' }
 	return { status: 'released', delivery: after }
 }
 
-export function markMailboxInboundDeliveryRejected(
-	sql: SqlStorage,
+export async function markMailboxInboundDeliveryRejected(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		reason: string
@@ -615,17 +619,17 @@ export function markMailboxInboundDeliveryRejected(
 		expectedState?: MailboxInboundDeliveryState
 		now?: string
 	},
-): MailboxMarkInboundDeliveryRejectedResult {
+): Promise<MailboxMarkInboundDeliveryRejectedResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const reason = assertMailboxNonEmptyString(input.reason, 'reason')
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current) return { status: 'lease-lost' }
 	if (current.state === 'rejected') {
 		return { status: 'already-rejected', delivery: current }
 	}
 	if (current.state === 'received') {
-		return mailboxMessageExists(sql, current.messageId)
+		return (await mailboxMessageExists(sql, current.messageId))
 			? { status: 'already-received', delivery: current }
 			: { status: 'lease-lost' }
 	}
@@ -643,7 +647,7 @@ export function markMailboxInboundDeliveryRejected(
 		rejectionReason: reason,
 		updatedAt: now,
 	}
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET event_type = 'rejected',
 			detail_json = ?,
@@ -654,7 +658,7 @@ export function markMailboxInboundDeliveryRejected(
 			AND event_type = 'receive_started'
 			AND state = ?
 			AND (
-				(? IS NULL AND storage_lease IS NULL)
+				(?::text IS NULL AND storage_lease IS NULL)
 				OR storage_lease = ?
 			)`,
 		detailJsonFromMailboxInboundSnapshot(next),
@@ -665,7 +669,7 @@ export function markMailboxInboundDeliveryRejected(
 		expectedLease,
 		expectedLease,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (cursor.rowsWritten > 0 && after?.state === 'rejected') {
 		return { status: 'rejected', delivery: after }
 	}
@@ -674,15 +678,15 @@ export function markMailboxInboundDeliveryRejected(
 	}
 	if (
 		after?.state === 'received' &&
-		mailboxMessageExists(sql, after.messageId)
+		(await mailboxMessageExists(sql, after.messageId))
 	) {
 		return { status: 'already-received', delivery: after }
 	}
 	return { status: 'lease-lost' }
 }
 
-export function markMailboxInboundDeliveryReceived(
-	sql: SqlStorage,
+export async function markMailboxInboundDeliveryReceived(
+	sql: MailboxSql,
 	input: {
 		deliveryId: string
 		storageLease: string
@@ -691,7 +695,7 @@ export function markMailboxInboundDeliveryReceived(
 		usageBytes: number
 		now?: string
 	},
-): MailboxMarkInboundDeliveryReceivedResult {
+): Promise<MailboxMarkInboundDeliveryReceivedResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
 	const storageLease = assertMailboxNonEmptyString(
@@ -699,7 +703,7 @@ export function markMailboxInboundDeliveryReceived(
 		'storageLease',
 	)
 	const usageMonth = assertMailboxNonEmptyString(input.usageMonth, 'usageMonth')
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current) return { status: 'lease-lost' }
 	if (current.state === 'received') {
 		return { status: 'already-received', delivery: current }
@@ -728,10 +732,13 @@ export function markMailboxInboundDeliveryReceived(
 	}
 	delete next.storageLease
 	delete next.storageLeaseAt
-	const attachedMessageId = isMailboxMessageTombstoned(sql, current.messageId)
+	const attachedMessageId = (await isMailboxMessageTombstoned(
+		sql,
+		current.messageId,
+	))
 		? null
 		: current.messageId
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET message_id = ?,
 			event_type = 'received',
@@ -765,7 +772,7 @@ export function markMailboxInboundDeliveryReceived(
 		mailboxInboundProvider,
 		storageLease,
 	)
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (cursor.rowsWritten > 0 && after?.state === 'received') {
 		return { status: 'received', delivery: after }
 	}
@@ -775,14 +782,14 @@ export function markMailboxInboundDeliveryReceived(
 	return { status: 'lease-lost' }
 }
 
-export function pruneMailboxExpiredInboundDedupePointers(
-	sql: SqlStorage,
+export async function pruneMailboxExpiredInboundDedupePointers(
+	sql: MailboxSql,
 	input: { now?: string; limit?: number },
-): MailboxPruneExpiredInboundDedupeResult {
+): Promise<MailboxPruneExpiredInboundDedupeResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const limit = normalizeMailboxInboundLimit(input.limit)
-	const ids = sql
-		.exec<{ id: string }>(
+	const ids = (
+		await sql.exec<{ id: string }>(
 			`SELECT id FROM email_delivery_events
 			WHERE provider = ? AND dedupe_expires_at <= ?
 			ORDER BY created_at ASC, id ASC
@@ -791,11 +798,12 @@ export function pruneMailboxExpiredInboundDedupePointers(
 			now,
 			limit,
 		)
+	)
 		.toArray()
 		.map((row) => String(row.id))
 	const prunedEventIds: Array<string> = []
 	for (const id of ids) {
-		const cursor = sql.exec(
+		const cursor = await sql.exec(
 			`DELETE FROM email_delivery_events
 			WHERE id = ? AND provider = ? AND dedupe_expires_at <= ?`,
 			id,
@@ -807,13 +815,13 @@ export function pruneMailboxExpiredInboundDedupePointers(
 	return { pruned: prunedEventIds.length, prunedEventIds }
 }
 
-export function deferMailboxInboundDeliveryReconciliation(
-	sql: SqlStorage,
+export async function deferMailboxInboundDeliveryReconciliation(
+	sql: MailboxSql,
 	input: { deliveryId: string; now?: string },
-): MailboxDeferInboundDeliveryReconcileResult {
+): Promise<MailboxDeferInboundDeliveryReconcileResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const deliveryId = assertMailboxNonEmptyString(input.deliveryId, 'deliveryId')
-	const current = readMailboxInboundDeliveryById(sql, deliveryId)
+	const current = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!current) return { status: 'missing' }
 	if (current.state === 'received' || current.state === 'rejected') {
 		return { status: 'not-applicable' }
@@ -826,7 +834,7 @@ export function deferMailboxInboundDeliveryReconciliation(
 		reconcileAfter,
 		updatedAt: now,
 	}
-	const cursor = sql.exec(
+	const cursor = await sql.exec(
 		`UPDATE email_delivery_events
 		SET detail_json = ?, reconcile_after = ?, updated_at = ?
 		WHERE id = ? AND provider = ? AND event_type = 'receive_started'`,
@@ -837,15 +845,15 @@ export function deferMailboxInboundDeliveryReconciliation(
 		mailboxInboundProvider,
 	)
 	if (cursor.rowsWritten < 1) return { status: 'not-applicable' }
-	const after = readMailboxInboundDeliveryById(sql, deliveryId)
+	const after = await readMailboxInboundDeliveryById(sql, deliveryId)
 	if (!after) return { status: 'missing' }
 	return { status: 'deferred', delivery: after }
 }
 
-export function listMailboxDueStaleInboundDeliveries(
-	sql: SqlStorage,
+export async function listMailboxDueStaleInboundDeliveries(
+	sql: MailboxSql,
 	input: { now?: string; limit?: number },
-): MailboxListDueStaleInboundDeliveriesResult {
+): Promise<MailboxListDueStaleInboundDeliveriesResult> {
 	const now = normalizeMailboxInboundNow(input.now)
 	const limit = normalizeMailboxInboundLimit(input.limit)
 	const cutoff = new Date(
@@ -855,8 +863,8 @@ export function listMailboxDueStaleInboundDeliveries(
 		Date.parse(now) - mailboxInboundStorageLeaseMs,
 	).toISOString()
 	const deliveries: Array<MailboxInboundDeliverySnapshot> = []
-	for (const row of sql
-		.exec<Record<string, SqlStorageValue>>(
+	for (const row of (
+		await sql.exec<Record<string, MailboxSqlValue>>(
 			`SELECT * FROM email_delivery_events
 			WHERE provider = ?
 				AND event_type = 'receive_started'
@@ -878,7 +886,7 @@ export function listMailboxDueStaleInboundDeliveries(
 			now,
 			limit,
 		)
-		.toArray()) {
+	).toArray()) {
 		const snapshot = snapshotFromMailboxDeliveryEventRow(
 			mapMailboxDeliveryEventRow(row),
 		)

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { z } from 'zod'
 import {
 	featureFlagKeys,
@@ -81,7 +82,7 @@ export function assertFeatureFlagKey(key: string): FeatureFlagKey {
 }
 
 export async function resolveTargetUser(
-	db: D1Database,
+	db: SqlDatabase,
 	input: { stableUserId?: string; username?: string },
 ): Promise<{ dbUserId: number; stableUserId: string }> {
 	if (input.stableUserId !== undefined && input.username !== undefined) {

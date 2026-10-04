@@ -43,7 +43,7 @@ test('a new user signs up, verifies email from the message, and reaches MCP conn
 	const username = `e2e-su-${runId}`
 	const password = 'e2e-signup-password'
 
-	clearAuthRateLimitsInE2eDatabase()
+	await clearAuthRateLimitsInE2eDatabase()
 	await page.context().clearCookies()
 
 	try {
@@ -134,7 +134,8 @@ test('a new user signs up, verifies email from the message, and reaches MCP conn
 		expect(sessionAfterBody.session?.emailVerified).toBe(true)
 
 		await page.getByRole('link', { name: 'Continue to onboarding' }).click()
-		await expect(page).toHaveURL(/\/onboarding/)
+		// First navigation compiles the onboarding route on the local Vite server.
+		await expect(page).toHaveURL(/\/onboarding/, { timeout: 30_000 })
 		await waitForClientHydration(page)
 		await expect(
 			page.getByRole('heading', { name: /Get started with\s*Kody/i }),
@@ -183,6 +184,6 @@ test('a new user signs up, verifies email from the message, and reaches MCP conn
 			`${origin}/.well-known/oauth-protected-resource`,
 		)
 	} finally {
-		deleteUserInE2eDatabase(email)
+		await deleteUserInE2eDatabase(email)
 	}
 })

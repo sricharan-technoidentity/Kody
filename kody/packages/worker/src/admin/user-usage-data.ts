@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { cachified, type Cache } from '@epic-web/cachified'
 import { utcDayKey, utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 import { toAdminDynamicWorkerCost } from '#universal/dynamic-worker-cost.ts'
@@ -181,7 +182,7 @@ export async function loadAdminUserUsageData(
  * A missing table (pre-migration test databases) reads as no data.
  */
 async function loadMeasuredDurableObjectDuration(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	currentMonth: string
 }) {
@@ -210,7 +211,7 @@ async function loadMeasuredDurableObjectDuration(input: {
 	}
 }
 
-async function userHasAdminRole(db: D1Database, stableUserId: string) {
+async function userHasAdminRole(db: SqlDatabase, stableUserId: string) {
 	const row = await db
 		.prepare(
 			`SELECT 1 AS present
@@ -227,7 +228,7 @@ async function userHasAdminRole(db: D1Database, stableUserId: string) {
 }
 
 async function loadUserMonthRollups(input: {
-	db: D1Database
+	db: SqlDatabase
 	cache: Cache | null
 	userId: string
 	currentMonth: string
@@ -244,7 +245,7 @@ async function loadUserMonthRollups(input: {
 }
 
 async function queryUserMonthRollups(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }) {
 	const result = await input.db

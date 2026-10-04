@@ -1,14 +1,11 @@
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import { insertEntitySource } from './entity-sources.ts'
 import { insertUserRepo, listUserRepos } from './user-repos.ts'
 
 test('listUserRepos joins entity_sources without ambiguous columns and prefers indexed_commit', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	const db = createD1FromSqlite(sqlite)
+	await using database = await createTestDb({ userId: 'user-1' })
+	const db = database.db
 	const now = '2026-09-14T00:00:00.000Z'
 
 	await insertUserRepo(db, {
@@ -68,7 +65,7 @@ test('listUserRepos joins entity_sources without ambiguous columns and prefers i
 		updated_at: now,
 	})
 
-	await insertUserRepo(db, {
+	await insertUserRepo(database.forUser('user-2').db, {
 		id: 'repo-other',
 		user_id: 'user-2',
 		name: 'other-notes',

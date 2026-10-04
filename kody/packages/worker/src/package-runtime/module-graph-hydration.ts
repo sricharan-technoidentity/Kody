@@ -1,3 +1,4 @@
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 import { throwIfPersonPackagePlatformReference } from '#worker/package-registry/platform-package-policy.ts'
 import { loadPackageSourceBySourceId } from '#worker/package-registry/source.ts'
 import {
@@ -53,6 +54,7 @@ export async function resolveCurrentDynamicPackageArtifact(input: {
 	assertNotSealedSecretProviderExport(parsed.exportName)
 	// Person accounts never resolve platform-owned sources here.
 	const resolution = await resolveSavedPackageImport({
+		forUser: getAccountWriterFactory(input.env),
 		db: input.env.APP_DB,
 		userId: input.userId,
 		specifier: parsed,

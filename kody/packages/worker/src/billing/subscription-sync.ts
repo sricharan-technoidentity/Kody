@@ -1,4 +1,5 @@
-import { waitUntil } from 'cloudflare:workers'
+import { waitUntil } from '#worker/front-door/host-context.ts'
+import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { scheduleKitSubscriberSync } from '#worker/kit/subscriber-sync.ts'
 import {
@@ -107,13 +108,15 @@ export async function refreshStripePlanForUser(input: {
 			input.customerId,
 		)
 		.run()
-	waitUntil(
-		maybeSyncDiscordGuildRolesForUser({
-			env: input.env,
-			userId: input.userId,
-			stripePlan: resolved.stripePlan,
-		}),
-	)
+	if (previous?.stable_user_id) {
+		waitUntil(
+			maybeSyncDiscordGuildRolesForUser({
+				env: getAccountEnv(input.env, previous.stable_user_id),
+				userId: input.userId,
+				stripePlan: resolved.stripePlan,
+			}),
+		)
+	}
 	if (previous?.email) {
 		const previousPlan = parseStripePlanName(previous.stripe_plan)
 		const nextPlan = resolved.stripePlan

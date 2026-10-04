@@ -179,7 +179,10 @@ async function loadMatchingEmailSubscriptions(input: {
 }
 
 export async function dispatchInboundEmailSubscriptionEvents(input: {
-	env: Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV' | 'APP_BASE_URL' | 'MAILBOX'>
+	env: Pick<
+		Env,
+		'APP_DB' | 'BUNDLE_ARTIFACTS_KV' | 'APP_BASE_URL' | 'MAILBOX_STORE'
+	>
 	userId: string
 	message: EmailMessageRecord
 	waitUntil?: (promise: Promise<unknown>) => void

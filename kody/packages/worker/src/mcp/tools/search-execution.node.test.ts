@@ -180,7 +180,7 @@ test('executeSearchList shares one dynamic-worker budget across memory and searc
 		releases: [],
 	}
 	const env = {
-		LOADER: createBlockingLoader(state),
+		RUNNER_LOADER: { forContext: () => createBlockingLoader(state) },
 		APP_COMMIT_SHA: 'commit-for-test',
 	} as Env
 

@@ -1,3 +1,4 @@
+import { type MailboxStorage, type MailboxSqlValue } from './mailbox-sql.ts'
 import {
 	assertMailboxCanonicalIsoTimestamp,
 	assertMailboxClassification,
@@ -122,9 +123,9 @@ function buildMailboxMessageFilterClauses(input: {
 	deliveryStatus?: EmailDeliveryStatus | null
 	classification?: EmailClassification | null
 	query?: string | null
-}): { clauses: Array<string>; params: Array<SqlStorageValue> } {
+}): { clauses: Array<string>; params: Array<MailboxSqlValue> } {
 	const clauses: Array<string> = ['1 = 1']
-	const params: Array<SqlStorageValue> = []
+	const params: Array<MailboxSqlValue> = []
 	if (typeof input.query === 'string') {
 		// Substring match via INSTR — DO SQLite rejects LIKE/GLOB patterns over
 		// 50 bytes (Cloudflare limit), and MCP allows queries up to 256 chars.
@@ -168,9 +169,9 @@ function buildMailboxMessageFilterClauses(input: {
  * only the missing-row bootstrap bridge may insert those snapshots.
  */
 export class MailboxStore {
-	private readonly storage: DurableObjectStorage
+	private readonly storage: MailboxStorage
 
-	constructor(storage: DurableObjectStorage) {
+	constructor(storage: MailboxStorage) {
 		this.storage = storage
 	}
 
@@ -178,34 +179,34 @@ export class MailboxStore {
 		return this.storage.sql
 	}
 
-	initializeSchema() {
-		initializeMailboxSchema(this.storage)
+	async initializeSchema() {
+		await initializeMailboxSchema(this.storage)
 	}
 
-	getOwnerId(): string | null {
-		const row = this.sql
-			.exec<{ owner_id: string }>(
+	async getOwnerId(): Promise<string | null> {
+		const row = (
+			await this.sql.exec<{ owner_id: string }>(
 				`SELECT owner_id FROM mailbox_owner_identity
 				WHERE singleton = 1
 				LIMIT 1`,
 			)
-			.toArray()[0]
+		).toArray()[0]
 		return row?.owner_id ?? null
 	}
 
-	isMessageTombstoned(messageId: string): boolean {
-		return isMailboxMessageTombstoned(this.sql, messageId)
+	async isMessageTombstoned(messageId: string): Promise<boolean> {
+		return await isMailboxMessageTombstoned(this.sql, messageId)
 	}
 
 	/**
 	 * Persist owner once; reject cross-user writes. DO name is not
 	 * introspectable — see mailbox_owner_identity DDL comment.
 	 */
-	assertOwner(ownerId: string): string {
+	async assertOwner(ownerId: string): Promise<string> {
 		const id = assertMailboxNonEmptyString(ownerId, 'ownerId')
-		const existing = this.getOwnerId()
+		const existing = await this.getOwnerId()
 		if (existing == null) {
-			this.sql.exec(
+			await this.sql.exec(
 				`INSERT INTO mailbox_owner_identity (singleton, owner_id)
 				VALUES (1, ?)`,
 				id,
@@ -220,26 +221,26 @@ export class MailboxStore {
 		return id
 	}
 
-	isRestorePending(): boolean {
-		const row = this.sql
-			.exec<{ value: number }>(
+	async isRestorePending(): Promise<boolean> {
+		const row = (
+			await this.sql.exec<{ value: number }>(
 				`SELECT value FROM mailbox_meta WHERE key = ? LIMIT 1`,
 				mailboxRestorePendingMetaKey,
 			)
-			.toArray()[0]
+		).toArray()[0]
 		return Number(row?.value ?? 0) === 1
 	}
 
-	assertReadable(): void {
-		if (this.isRestorePending()) {
+	async assertReadable(): Promise<void> {
+		if (await this.isRestorePending()) {
 			throw new Error('Mailbox restore is in progress.')
 		}
 	}
 
-	beginRestore(ownerId: string): void {
-		this.assertOwner(ownerId)
-		this.clearDrillResult()
-		this.sql.exec(
+	async beginRestore(ownerId: string): Promise<void> {
+		await this.assertOwner(ownerId)
+		await this.clearDrillResult()
+		await this.sql.exec(
 			`INSERT INTO mailbox_meta (key, value)
 			VALUES (?, 1)
 			ON CONFLICT(key) DO UPDATE SET value = 1`,
@@ -247,16 +248,16 @@ export class MailboxStore {
 		)
 	}
 
-	finalizeRestore(ownerId: string): void {
-		this.assertOwner(ownerId)
-		this.sql.exec(
+	async finalizeRestore(ownerId: string): Promise<void> {
+		await this.assertOwner(ownerId)
+		await this.sql.exec(
 			`DELETE FROM mailbox_meta WHERE key = ?`,
 			mailboxRestorePendingMetaKey,
 		)
 	}
 
-	private clearDrillResult(): void {
-		this.sql.exec(
+	private async clearDrillResult(): Promise<void> {
+		await this.sql.exec(
 			`DELETE FROM mailbox_meta WHERE key IN (?, ?, ?, ?, ?)`,
 			mailboxDrillResultMetaKeys.present,
 			mailboxDrillResultMetaKeys.threads,
@@ -266,9 +267,9 @@ export class MailboxStore {
 		)
 	}
 
-	readDrillResult(): MailboxCountResult | null {
-		const rows = this.sql
-			.exec<{ key: string; value: number }>(
+	async readDrillResult(): Promise<MailboxCountResult | null> {
+		const rows = (
+			await this.sql.exec<{ key: string; value: number }>(
 				`SELECT key, value FROM mailbox_meta
 				WHERE key IN (?, ?, ?, ?, ?)`,
 				mailboxDrillResultMetaKeys.present,
@@ -277,7 +278,7 @@ export class MailboxStore {
 				mailboxDrillResultMetaKeys.attachments,
 				mailboxDrillResultMetaKeys.deliveryEvents,
 			)
-			.toArray()
+		).toArray()
 		const values = new Map(rows.map((row) => [row.key, Number(row.value)]))
 		if (values.get(mailboxDrillResultMetaKeys.present) !== 1) return null
 		return {
@@ -289,17 +290,20 @@ export class MailboxStore {
 		}
 	}
 
-	completeDrill(ownerId: string, result: MailboxCountResult): void {
-		this.assertOwner(ownerId)
-		this.storage.transactionSync(() => {
-			this.sql.exec(`DELETE FROM email_delivery_events`)
-			this.sql.exec(`DELETE FROM email_attachments`)
-			this.sql.exec(`DELETE FROM email_message_retention_retries`)
-			this.sql.exec(`DELETE FROM email_messages`)
-			this.sql.exec(`DELETE FROM email_threads`)
-			this.sql.exec(`DELETE FROM email_outbound_provider_index_repairs`)
-			this.sql.exec(`DELETE FROM email_message_deletion_tombstones`)
-			this.sql.exec(
+	async completeDrill(
+		ownerId: string,
+		result: MailboxCountResult,
+	): Promise<void> {
+		await this.assertOwner(ownerId)
+		await this.storage.transaction(async () => {
+			await this.sql.exec(`DELETE FROM email_delivery_events`)
+			await this.sql.exec(`DELETE FROM email_attachments`)
+			await this.sql.exec(`DELETE FROM email_message_retention_retries`)
+			await this.sql.exec(`DELETE FROM email_messages`)
+			await this.sql.exec(`DELETE FROM email_threads`)
+			await this.sql.exec(`DELETE FROM email_outbound_provider_index_repairs`)
+			await this.sql.exec(`DELETE FROM email_message_deletion_tombstones`)
+			await this.sql.exec(
 				`DELETE FROM mailbox_meta WHERE key <> ?`,
 				mailboxMetaSchemaVersionKey,
 			)
@@ -310,7 +314,7 @@ export class MailboxStore {
 				[mailboxDrillResultMetaKeys.attachments, result.attachments],
 				[mailboxDrillResultMetaKeys.deliveryEvents, result.deliveryEvents],
 			] as const) {
-				this.sql.exec(
+				await this.sql.exec(
 					`INSERT INTO mailbox_meta (key, value) VALUES (?, ?)`,
 					key,
 					value,
@@ -373,7 +377,9 @@ export class MailboxStore {
 		}
 	}
 
-	upsertThreadRow(thread: MailboxThreadInput): MailboxUpsertResult {
+	async upsertThreadRow(
+		thread: MailboxThreadInput,
+	): Promise<MailboxUpsertResult> {
 		const id = assertMailboxNonEmptyString(thread.id, 'thread.id')
 		const lastMessageAt = assertMailboxCanonicalIsoTimestamp(
 			thread.lastMessageAt,
@@ -387,16 +393,16 @@ export class MailboxStore {
 			thread.updatedAt,
 			'thread.updatedAt',
 		)
-		const existing = this.sql
-			.exec<{ updated_at: string }>(
+		const existing = (
+			await this.sql.exec<{ updated_at: string }>(
 				`SELECT updated_at FROM email_threads WHERE id = ? LIMIT 1`,
 				id,
 			)
-			.toArray()[0]
+		).toArray()[0]
 		if (existing && updatedAt < existing.updated_at) {
 			return { created: false, accepted: false }
 		}
-		this.sql.exec(
+		await this.sql.exec(
 			`INSERT INTO email_threads (
 				id, inbox_id, subject_normalized, root_message_id_header,
 				last_message_at, created_at, updated_at
@@ -424,9 +430,11 @@ export class MailboxStore {
 	 * `updatedAt`. Delivery status remains monotonic by `delivery_status_at`
 	 * within an accepted snapshot.
 	 */
-	upsertMessageRow(message: MailboxMessageInput): MailboxUpsertResult {
+	async upsertMessageRow(
+		message: MailboxMessageInput,
+	): Promise<MailboxUpsertResult> {
 		const id = assertMailboxNonEmptyString(message.id, 'message.id')
-		if (this.isMessageTombstoned(id)) {
+		if (await this.isMessageTombstoned(id)) {
 			return { created: false, accepted: false }
 		}
 		const direction = assertMailboxDirection(message.direction)
@@ -463,16 +471,16 @@ export class MailboxStore {
 			message.sentAt,
 			'message.sentAt',
 		)
-		const existing = this.sql
-			.exec<{ updated_at: string }>(
+		const existing = (
+			await this.sql.exec<{ updated_at: string }>(
 				`SELECT updated_at FROM email_messages WHERE id = ? LIMIT 1`,
 				id,
 			)
-			.toArray()[0]
+		).toArray()[0]
 		if (existing && updatedAt < existing.updated_at) {
 			return { created: false, accepted: false }
 		}
-		this.sql.exec(
+		await this.sql.exec(
 			`INSERT INTO email_messages (
 				id, direction, inbox_id, thread_id, sender_identity_id,
 				from_address, envelope_from, to_addresses_json, cc_addresses_json,
@@ -570,11 +578,11 @@ export class MailboxStore {
 		return { created: existing == null, accepted: true }
 	}
 
-	replaceAttachmentsForMessage(
+	async replaceAttachmentsForMessage(
 		messageId: string,
 		attachments: Array<MailboxAttachmentInput>,
 	) {
-		this.sql.exec(
+		await this.sql.exec(
 			`DELETE FROM email_attachments WHERE message_id = ?`,
 			messageId,
 		)
@@ -597,7 +605,7 @@ export class MailboxStore {
 			if (!Number.isFinite(attachment.size)) {
 				throw new Error('Mailbox attachment.size must be a finite number.')
 			}
-			this.sql.exec(
+			await this.sql.exec(
 				`INSERT INTO email_attachments (
 					id, message_id, filename, content_type, content_id, disposition,
 					size, storage_kind, storage_key, created_at
@@ -616,25 +624,25 @@ export class MailboxStore {
 		}
 	}
 
-	writeDeliveryEventRow(event: MailboxDeliveryEventInput): {
+	async writeDeliveryEventRow(event: MailboxDeliveryEventInput): Promise<{
 		inserted: boolean
 		accepted: boolean
-	} {
-		return writeMailboxDeliveryEventRow(this.sql, event)
+	}> {
+		return await writeMailboxDeliveryEventRow(this.sql, event)
 	}
 
-	updateLatestDeliveryStatus(input: {
+	async updateLatestDeliveryStatus(input: {
 		messageId: string
 		deliveryStatus: EmailDeliveryStatus
 		deliveryStatusAt: string
-	}): boolean {
+	}): Promise<boolean> {
 		const messageId = assertMailboxNonEmptyString(input.messageId, 'messageId')
 		const deliveryStatus = assertMailboxDeliveryStatus(input.deliveryStatus)
 		const deliveryStatusAt = assertMailboxCanonicalIsoTimestamp(
 			input.deliveryStatusAt,
 			'deliveryStatusAt',
 		)
-		const cursor = this.sql.exec(
+		const cursor = await this.sql.exec(
 			`UPDATE email_messages
 			SET delivery_status = ?,
 				delivery_status_at = ?,
@@ -650,87 +658,87 @@ export class MailboxStore {
 		return cursor.rowsWritten > 0
 	}
 
-	deliveryEventOwnsMessage(eventId: string, messageId: string) {
-		return deliveryEventOwnsMessage(this.sql, eventId, messageId)
+	async deliveryEventOwnsMessage(eventId: string, messageId: string) {
+		return await deliveryEventOwnsMessage(this.sql, eventId, messageId)
 	}
 
-	getThread(threadId: string): MailboxThreadRecord | null {
-		const row = this.sql
-			.exec<Record<string, SqlStorageValue>>(
+	async getThread(threadId: string): Promise<MailboxThreadRecord | null> {
+		const row = (
+			await this.sql.exec<Record<string, MailboxSqlValue>>(
 				`SELECT * FROM email_threads WHERE id = ? LIMIT 1`,
 				assertMailboxNonEmptyString(threadId, 'threadId'),
 			)
-			.toArray()[0]
+		).toArray()[0]
 		return row ? mapMailboxThreadRow(row) : null
 	}
 
-	findThreadForInboundMessage(input: {
+	async findThreadForInboundMessage(input: {
 		inboxId?: string | null
 		references: Array<string>
 		inReplyToHeader?: string | null
-	}): MailboxThreadRecord | null {
+	}): Promise<MailboxThreadRecord | null> {
 		const headers = [
 			...input.references,
 			...(input.inReplyToHeader ? [input.inReplyToHeader] : []),
 		].filter(Boolean)
 		for (const header of headers) {
-			const row = this.sql
-				.exec<Record<string, SqlStorageValue>>(
+			const row = (
+				await this.sql.exec<Record<string, MailboxSqlValue>>(
 					`SELECT thread.*
 					FROM email_threads AS thread
 					JOIN email_messages AS message ON message.thread_id = thread.id
-					WHERE (? IS NULL OR thread.inbox_id = ?)
+					WHERE (?::text IS NULL OR thread.inbox_id = ?)
 						AND message.message_id_header = ?
 					LIMIT 1`,
 					input.inboxId ?? null,
 					input.inboxId ?? null,
 					header,
 				)
-				.toArray()[0]
+			).toArray()[0]
 			if (row) return mapMailboxThreadRow(row)
 		}
 		return null
 	}
 
-	getMessage(messageId: string): MailboxMessageRecord | null {
-		const row = this.sql
-			.exec<Record<string, SqlStorageValue>>(
+	async getMessage(messageId: string): Promise<MailboxMessageRecord | null> {
+		const row = (
+			await this.sql.exec<Record<string, MailboxSqlValue>>(
 				`SELECT * FROM email_messages WHERE id = ? LIMIT 1`,
 				assertMailboxNonEmptyString(messageId, 'messageId'),
 			)
-			.toArray()[0]
+		).toArray()[0]
 		return row ? mapMailboxMessageRow(row) : null
 	}
 
-	getMessageByMessageIdHeader(
+	async getMessageByMessageIdHeader(
 		messageIdHeader: string,
-	): MailboxMessageRecord | null {
-		const row = this.sql
-			.exec<Record<string, SqlStorageValue>>(
+	): Promise<MailboxMessageRecord | null> {
+		const row = (
+			await this.sql.exec<Record<string, MailboxSqlValue>>(
 				`SELECT * FROM email_messages
 				WHERE message_id_header = ?
 				LIMIT 1`,
 				assertMailboxNonEmptyString(messageIdHeader, 'messageIdHeader'),
 			)
-			.toArray()[0]
+		).toArray()[0]
 		return row ? mapMailboxMessageRow(row) : null
 	}
 
-	getOutboundMessageByProviderMessageId(
+	async getOutboundMessageByProviderMessageId(
 		providerMessageId: string,
-	): MailboxMessageRecord | null {
+	): Promise<MailboxMessageRecord | null> {
 		const id = assertMailboxNonEmptyString(
 			providerMessageId,
 			'providerMessageId',
 		)
-		const rows = this.sql
-			.exec<Record<string, SqlStorageValue>>(
+		const rows = (
+			await this.sql.exec<Record<string, MailboxSqlValue>>(
 				`SELECT * FROM email_messages
 				WHERE direction = 'outbound' AND provider_message_id = ?
 				LIMIT 2`,
 				id,
 			)
-			.toArray()
+		).toArray()
 		if (rows.length > 1) {
 			throw new Error(
 				`Multiple outbound email messages share provider id: ${id}`,
@@ -746,14 +754,14 @@ export class MailboxStore {
 	 * RPC does not carry them. `getMessage` and the other single-row reads
 	 * still return bodies. List and search rows report those fields as null.
 	 */
-	private queryMessageMetadataPage(input: {
+	private async queryMessageMetadataPage(input: {
 		clauses: Array<string>
-		params: Array<SqlStorageValue>
+		params: Array<MailboxSqlValue>
 		limit: number
 		offset: number
-	}): Array<Record<string, SqlStorageValue>> {
-		return this.sql
-			.exec<Record<string, SqlStorageValue>>(
+	}): Promise<Array<Record<string, MailboxSqlValue>>> {
+		return (
+			await this.sql.exec<Record<string, MailboxSqlValue>>(
 				`SELECT ${mailboxMessageMetadataColumns} FROM email_messages
 				WHERE ${input.clauses.join(' AND ')}
 				ORDER BY created_at DESC, id DESC
@@ -762,13 +770,13 @@ export class MailboxStore {
 				input.limit,
 				input.offset,
 			)
-			.toArray()
+		).toArray()
 	}
 
-	listMessages(input: MailboxListMessagesInput): {
+	async listMessages(input: MailboxListMessagesInput): Promise<{
 		messages: Array<MailboxMessageRecord>
 		nextCursor: string | null
-	} {
+	}> {
 		const limit = normalizeMailboxPageSize(input.limit)
 		const { clauses, params } = buildMailboxMessageFilterClauses(input)
 		if (input.cursor) {
@@ -778,7 +786,7 @@ export class MailboxStore {
 		}
 		const offset =
 			input.cursor == null ? normalizeMailboxOffset(input.offset) : 0
-		const rows = this.queryMessageMetadataPage({
+		const rows = await this.queryMessageMetadataPage({
 			clauses,
 			params,
 			limit: limit + 1,
@@ -799,9 +807,9 @@ export class MailboxStore {
 		}
 	}
 
-	searchMessages(input: MailboxSearchMessagesInput): {
+	async searchMessages(input: MailboxSearchMessagesInput): Promise<{
 		messages: Array<MailboxMessageRecord>
-	} {
+	}> {
 		if (typeof input.query !== 'string') {
 			throw new Error('Mailbox search query must be a string.')
 		}
@@ -811,7 +819,7 @@ export class MailboxStore {
 			...input,
 			query: input.query,
 		})
-		const rows = this.queryMessageMetadataPage({
+		const rows = await this.queryMessageMetadataPage({
 			clauses,
 			params,
 			limit,
@@ -820,61 +828,76 @@ export class MailboxStore {
 		return { messages: rows.map(mapMailboxMessageRow) }
 	}
 
-	countMessages(input: MailboxCountMessagesInput): { total: number } {
+	async countMessages(
+		input: MailboxCountMessagesInput,
+	): Promise<{ total: number }> {
 		const { clauses, params } = buildMailboxMessageFilterClauses(input)
-		const row = this.sql
-			.exec<{ n: number }>(
+		const row = (
+			await this.sql.exec<{ n: number }>(
 				`SELECT COUNT(*) AS n FROM email_messages
 				WHERE ${clauses.join(' AND ')}`,
 				...params,
 			)
-			.one()
+		).one()
 		return { total: Number(row.n ?? 0) || 0 }
 	}
 
-	getAttachment(attachmentId: string): MailboxAttachmentRecord | null {
-		const row = this.sql
-			.exec<Record<string, SqlStorageValue>>(
+	async getAttachment(
+		attachmentId: string,
+	): Promise<MailboxAttachmentRecord | null> {
+		const row = (
+			await this.sql.exec<Record<string, MailboxSqlValue>>(
 				`SELECT * FROM email_attachments WHERE id = ? LIMIT 1`,
 				assertMailboxNonEmptyString(attachmentId, 'attachmentId'),
 			)
-			.toArray()[0]
+		).toArray()[0]
 		return row ? mapMailboxAttachmentRow(row) : null
 	}
 
-	listAttachmentsForMessage(messageId: string): Array<MailboxAttachmentRecord> {
-		return this.sql
-			.exec<Record<string, SqlStorageValue>>(
+	async listAttachmentsForMessage(
+		messageId: string,
+	): Promise<Array<MailboxAttachmentRecord>> {
+		return (
+			await this.sql.exec<Record<string, MailboxSqlValue>>(
 				`SELECT * FROM email_attachments
 				WHERE message_id = ?
 				ORDER BY created_at ASC, id ASC`,
 				assertMailboxNonEmptyString(messageId, 'messageId'),
 			)
+		)
 			.toArray()
 			.map(mapMailboxAttachmentRow)
 	}
 
-	listDeliveryEvents(input: {
+	async listDeliveryEvents(input: {
 		messageId?: string | null
 		eventType?: EmailDeliveryEventType | null
 		limit?: number
-	}): Array<MailboxDeliveryEventRecord> {
-		return listMailboxDeliveryEvents(this.sql, input)
+	}): Promise<Array<MailboxDeliveryEventRecord>> {
+		return await listMailboxDeliveryEvents(this.sql, input)
 	}
 
-	countMailbox(): MailboxCountResult {
-		const threads = this.sql
-			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM email_threads`)
-			.one()
-		const messages = this.sql
-			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM email_messages`)
-			.one()
-		const attachments = this.sql
-			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM email_attachments`)
-			.one()
-		const deliveryEvents = this.sql
-			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM email_delivery_events`)
-			.one()
+	async countMailbox(): Promise<MailboxCountResult> {
+		const threads = (
+			await this.sql.exec<{ n: number }>(
+				`SELECT COUNT(*) AS n FROM email_threads`,
+			)
+		).one()
+		const messages = (
+			await this.sql.exec<{ n: number }>(
+				`SELECT COUNT(*) AS n FROM email_messages`,
+			)
+		).one()
+		const attachments = (
+			await this.sql.exec<{ n: number }>(
+				`SELECT COUNT(*) AS n FROM email_attachments`,
+			)
+		).one()
+		const deliveryEvents = (
+			await this.sql.exec<{ n: number }>(
+				`SELECT COUNT(*) AS n FROM email_delivery_events`,
+			)
+		).one()
 		return {
 			threads: Number(threads.n ?? 0) || 0,
 			messages: Number(messages.n ?? 0) || 0,
@@ -883,18 +906,18 @@ export class MailboxStore {
 		}
 	}
 
-	inspectRestoreState(): MailboxRestoreStatus {
-		const counts = this.countMailbox()
-		const restorePending = this.isRestorePending()
-		const hiddenRows = this.sql
-			.exec<{ n: number }>(
+	async inspectRestoreState(): Promise<MailboxRestoreStatus> {
+		const counts = await this.countMailbox()
+		const restorePending = await this.isRestorePending()
+		const hiddenRows = (
+			await this.sql.exec<{ n: number }>(
 				`SELECT
 					(SELECT COUNT(*) FROM email_message_deletion_tombstones) +
 					(SELECT COUNT(*) FROM email_outbound_provider_index_repairs) +
 					(SELECT COUNT(*) FROM email_message_retention_retries)
 					AS n`,
 			)
-			.one()
+		).one()
 		const hiddenCount = Number(hiddenRows.n ?? 0) || 0
 		return {
 			counts,
@@ -910,27 +933,27 @@ export class MailboxStore {
 		}
 	}
 
-	exportMailbox(input: {
+	async exportMailbox(input: {
 		pageSize?: number
 		startAfter?: string | null
-	}): MailboxExportResult {
-		return exportMailboxFromStore(this.sql, input)
+	}): Promise<MailboxExportResult> {
+		return await exportMailboxFromStore(this.sql, input)
 	}
 
-	listBlobReferences(input: {
+	async listBlobReferences(input: {
 		pageSize?: number
 		startAfter?: string | null
-	}): MailboxBlobReferencePage {
-		return listMailboxBlobReferences(this.sql, {
-			ownerId: this.getOwnerId(),
+	}): Promise<MailboxBlobReferencePage> {
+		return await listMailboxBlobReferences(this.sql, {
+			ownerId: await this.getOwnerId(),
 			pageSize: input.pageSize,
 			startAfter: input.startAfter,
 		})
 	}
 
-	oldestMessageCreatedAt(now: string): string | null {
-		const row = this.sql
-			.exec<{ created_at: string }>(
+	async oldestMessageCreatedAt(now: string): Promise<string | null> {
+		const row = (
+			await this.sql.exec<{ created_at: string }>(
 				`SELECT message.created_at
 				FROM email_messages message
 				LEFT JOIN email_message_retention_retries retry
@@ -940,26 +963,28 @@ export class MailboxStore {
 				LIMIT 1`,
 				now,
 			)
-			.toArray()[0]
+		).toArray()[0]
 		return row?.created_at ?? null
 	}
 
-	oldestDeliveryEventCreatedAt(): string | null {
-		return oldestMailboxDeliveryEventCreatedAt(this.sql)
+	async oldestDeliveryEventCreatedAt(): Promise<string | null> {
+		return await oldestMailboxDeliveryEventCreatedAt(this.sql)
 	}
 
-	listExpiredMessagesForRetention(input: {
+	async listExpiredMessagesForRetention(input: {
 		cutoff: string
 		now: string
 		limit: number
-	}): Array<{
-		id: string
-		direction: EmailDirection
-		created_at: string
-		updated_at: string
-	}> {
-		return this.sql
-			.exec<{
+	}): Promise<
+		Array<{
+			id: string
+			direction: EmailDirection
+			created_at: string
+			updated_at: string
+		}>
+	> {
+		return (
+			await this.sql.exec<{
 				id: string
 				direction: EmailDirection
 				created_at: string
@@ -978,16 +1003,16 @@ export class MailboxStore {
 				input.now,
 				input.limit,
 			)
-			.toArray()
+		).toArray()
 	}
 
-	recordMessageRetentionFailure(input: {
+	async recordMessageRetentionFailure(input: {
 		messageId: string
 		retryAt: string
 		error: string
 		updatedAt: string
 	}) {
-		this.sql.exec(
+		await this.sql.exec(
 			`INSERT INTO email_message_retention_retries (
 				message_id, retry_at, attempt_count, last_error, updated_at
 			) VALUES (?, ?, 1, ?, ?)
@@ -1003,27 +1028,27 @@ export class MailboxStore {
 		)
 	}
 
-	earliestMessageRetentionRetryAt(): string | null {
-		const row = this.sql
-			.exec<{ retry_at: string }>(
+	async earliestMessageRetentionRetryAt(): Promise<string | null> {
+		const row = (
+			await this.sql.exec<{ retry_at: string }>(
 				`SELECT retry_at
 				FROM email_message_retention_retries
 				ORDER BY retry_at ASC, message_id ASC
 				LIMIT 1`,
 			)
-			.toArray()[0]
+		).toArray()[0]
 		return row?.retry_at ?? null
 	}
 
-	getMessageForRetention(messageId: string): {
+	async getMessageForRetention(messageId: string): Promise<{
 		id: string
 		direction: EmailDirection
 		created_at: string
 		updated_at: string
-	} | null {
+	} | null> {
 		return (
-			this.sql
-				.exec<{
+			(
+				await this.sql.exec<{
 					id: string
 					direction: EmailDirection
 					created_at: string
@@ -1035,16 +1060,18 @@ export class MailboxStore {
 					LIMIT 1`,
 					messageId,
 				)
-				.toArray()[0] ?? null
+			).toArray()[0] ?? null
 		)
 	}
 
-	listAttachmentsForRetention(
+	async listAttachmentsForRetention(
 		messageIds: Array<string>,
-	): Array<{ id: string; message_id: string; storage_key: string | null }> {
+	): Promise<
+		Array<{ id: string; message_id: string; storage_key: string | null }>
+	> {
 		if (messageIds.length === 0) return []
-		return this.sql
-			.exec<{
+		return (
+			await this.sql.exec<{
 				id: string
 				message_id: string
 				storage_key: string | null
@@ -1053,33 +1080,33 @@ export class MailboxStore {
 				WHERE message_id IN (${messageIds.map(() => '?').join(', ')})`,
 				...messageIds,
 			)
-			.toArray()
+		).toArray()
 	}
 
-	deleteMessageCascade(messageId: string) {
-		const message = this.sql
-			.exec<{ thread_id: string | null }>(
+	async deleteMessageCascade(messageId: string) {
+		const message = (
+			await this.sql.exec<{ thread_id: string | null }>(
 				`SELECT thread_id FROM email_messages WHERE id = ? LIMIT 1`,
 				messageId,
 			)
-			.toArray()[0]
+		).toArray()[0]
 		if (!message) return
-		this.sql.exec(
+		await this.sql.exec(
 			`UPDATE email_delivery_events SET message_id = NULL
 			WHERE message_id = ?`,
 			messageId,
 		)
-		this.sql.exec(
+		await this.sql.exec(
 			`DELETE FROM email_attachments WHERE message_id = ?`,
 			messageId,
 		)
-		this.sql.exec(
+		await this.sql.exec(
 			`DELETE FROM email_message_retention_retries WHERE message_id = ?`,
 			messageId,
 		)
-		this.sql.exec(`DELETE FROM email_messages WHERE id = ?`, messageId)
+		await this.sql.exec(`DELETE FROM email_messages WHERE id = ?`, messageId)
 		if (message.thread_id != null) {
-			this.sql.exec(
+			await this.sql.exec(
 				`DELETE FROM email_threads
 				WHERE id = ?
 					AND NOT EXISTS (
@@ -1091,34 +1118,40 @@ export class MailboxStore {
 		}
 	}
 
-	tombstoneAndDeleteMessage(input: { messageId: string; deletedAt: string }) {
-		this.storage.transactionSync(() => {
-			writeMailboxMessageDeletionTombstone(this.sql, input)
-			this.deleteMessageCascade(input.messageId)
+	async tombstoneAndDeleteMessage(input: {
+		messageId: string
+		deletedAt: string
+	}) {
+		await this.storage.transaction(async () => {
+			await writeMailboxMessageDeletionTombstone(this.sql, input)
+			await this.deleteMessageCascade(input.messageId)
 		})
 	}
 
-	pruneExpiredDeliveryEvents(input: { cutoff: string; limit: number }) {
-		pruneExpiredMailboxDeliveryEvents(this.sql, input)
+	async pruneExpiredDeliveryEvents(input: { cutoff: string; limit: number }) {
+		await pruneExpiredMailboxDeliveryEvents(this.sql, input)
 	}
 
-	hasExpiredMessages(cutoff: string): boolean {
+	async hasExpiredMessages(cutoff: string): Promise<boolean> {
 		return (
-			this.sql
-				.exec<{ ok: number }>(
+			(
+				await this.sql.exec<{ ok: number }>(
 					`SELECT 1 AS ok FROM email_messages
 					WHERE created_at < ?
 					LIMIT 1`,
 					cutoff,
 				)
-				.toArray()[0] != null
+			).toArray()[0] != null
 		)
 	}
 
-	hasEligibleExpiredMessages(input: { cutoff: string; now: string }): boolean {
+	async hasEligibleExpiredMessages(input: {
+		cutoff: string
+		now: string
+	}): Promise<boolean> {
 		return (
-			this.sql
-				.exec<{ ok: number }>(
+			(
+				await this.sql.exec<{ ok: number }>(
 					`SELECT 1 AS ok
 					FROM email_messages message
 					LEFT JOIN email_message_retention_retries retry
@@ -1129,16 +1162,16 @@ export class MailboxStore {
 					input.cutoff,
 					input.now,
 				)
-				.toArray()[0] != null
+			).toArray()[0] != null
 		)
 	}
 
-	hasExpiredDeliveryEvents(cutoff: string): boolean {
-		return hasExpiredMailboxDeliveryEvents(this.sql, cutoff)
+	async hasExpiredDeliveryEvents(cutoff: string): Promise<boolean> {
+		return await hasExpiredMailboxDeliveryEvents(this.sql, cutoff)
 	}
 
-	pruneOrphanThreads(limit: number) {
-		this.sql.exec(
+	async pruneOrphanThreads(limit: number) {
+		await this.sql.exec(
 			`DELETE FROM email_threads
 			WHERE id IN (
 				SELECT thread.id FROM email_threads thread

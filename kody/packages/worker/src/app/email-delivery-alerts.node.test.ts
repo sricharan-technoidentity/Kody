@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { emailDeliveryBurstTopic } from './email-delivery-burst-subscription-event.ts'
@@ -34,7 +35,7 @@ function createDb(count: number) {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 test('thin delivery alert signals notify once per cooldown window', async () => {

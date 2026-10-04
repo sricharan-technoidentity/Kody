@@ -1,3 +1,4 @@
+import { nodeRuntimeAliases } from './tools/node-runtime-aliases.ts'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config as loadDotEnv } from 'dotenv'
@@ -6,9 +7,7 @@ import { markdownAsText } from './tools/vite-markdown-as-text.ts'
 import { suppressThirdPartySourcemapWarnings } from './tools/vite-suppress-sourcemap-warnings.ts'
 
 export const rootDir = fileURLToPath(new URL('.', import.meta.url))
-// Match CI. Workers-unit first Durable Object RPC in a file is ~10s in the
-// Vitest pool (decision 0011); a 5s local default timed that out and forced
-// `--no-verify`. Also covers workerd-only work such as worker-bundler.
+// Local Temporal startup and real workerd package tests exceed Vitest's 5s default.
 const testTimeout = 20_000
 
 loadDotEnv({
@@ -25,6 +24,7 @@ export const sharedProjectConfig = {
 	plugins: [suppressThirdPartySourcemapWarnings(), markdownAsText()],
 	resolve: {
 		alias: [
+			...nodeRuntimeAliases,
 			{
 				find: /^pitlane:dev$/,
 				replacement: resolve(
@@ -63,10 +63,9 @@ export const sharedProjectConfig = {
 	},
 	test: {
 		testTimeout,
+		globalSetup: [resolve(rootDir, 'tools/vitest-global-setup-node-oauth.ts')],
 		hookTimeout: testTimeout,
-		// `validate` runs this suite concurrently with Playwright and two
-		// Wrangler servers on 4-core CI runners; leave a core free so their
-		// startup is not starved by test workers.
+		// Leave a core free for the validation checks and local Temporal servers.
 		maxWorkers: process.env.CI ? 3 : undefined,
 		clearMocks: true,
 		mockReset: true,

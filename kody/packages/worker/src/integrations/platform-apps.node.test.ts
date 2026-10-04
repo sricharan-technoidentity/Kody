@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
 import { expect, test } from 'vitest'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
@@ -21,7 +22,7 @@ async function createHarness() {
 	const db = createPgDatabase({
 		connection: database.pg,
 		role: 'kody_admin',
-	}) as unknown as D1Database
+	}) as unknown as SqlDatabase
 	const env = {
 		SECRET_KMS: testSecretKms,
 	} as Pick<Env, 'SECRET_KMS'>

@@ -1747,12 +1747,9 @@ test('heavy check phases run in throwaway isolates when the env has the bindings
 		put: vi.fn(async () => undefined),
 		delete: vi.fn(async () => undefined),
 	}
-	const namespace = {
-		idFromName: vi.fn((name: string) => ({ name })),
-		get: vi.fn(() => stub),
-	}
+	const namespace = vi.fn((_name: string) => stub)
 	const env = {
-		REPO_SESSION: namespace,
+		REPO_SESSIONS: namespace,
 		BUNDLE_ARTIFACTS_KV: kv,
 	} as unknown as Env
 
@@ -1842,7 +1839,7 @@ test('heavy check phases run in throwaway isolates when the env has the bindings
 	expect(typecheckRequests).toHaveLength(1)
 	expect(typecheckRequests[0]).toMatchObject({ userId: 'user-123' })
 	// Throwaway isolate ids are namespaced by the requesting user.
-	for (const [name] of namespace.idFromName.mock.calls) {
+	for (const [name] of namespace.mock.calls) {
 		expect(name as string).toContain('-user-123-')
 	}
 	const bundleRequests = phaseRequests.filter(
@@ -1858,7 +1855,7 @@ test('heavy check phases run in throwaway isolates when the env has the bindings
 		Math.ceil(totalTargets / isolatedBundleChunkSize),
 	)
 	const distinctIsolateNames = new Set(
-		namespace.idFromName.mock.calls.map(([name]) => name as string),
+		namespace.mock.calls.map(([name]) => name as string),
 	)
 	expect(distinctIsolateNames.size).toBe(phaseRequests.length)
 
@@ -1907,10 +1904,7 @@ test('an isolate reset during a check phase becomes a failed check, not a crash'
 		}),
 	}
 	const env = {
-		REPO_SESSION: {
-			idFromName: vi.fn((name: string) => ({ name })),
-			get: vi.fn(() => stub),
-		},
+		REPO_SESSIONS: vi.fn((_name: string) => stub),
 		BUNDLE_ARTIFACTS_KV: {
 			put: vi.fn(async () => undefined),
 			delete: vi.fn(async () => undefined),

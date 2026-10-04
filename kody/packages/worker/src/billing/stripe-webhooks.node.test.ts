@@ -1,23 +1,21 @@
-import { DatabaseSync } from 'node:sqlite'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
 import { createInMemoryRunLogUsageEnv } from '#worker/test-support/run-log-usage.ts'
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { ensureEntitlementTestSchema } from '#worker/entitlements/test-schema.ts'
+import { onTestFinished, expect, test, vi } from 'vitest'
 import { silenceExpectedConsoleErrors } from '#worker/test-support/console-spies.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { createBillingLinkReference } from './billing-config.ts'
 import { buildStripeWebhookSignatureHeader } from './stripe-webhook-signature.ts'
 import { handleStripeWebhookRequest } from './stripe-webhooks.ts'
 import { readCreditWallet } from './credit-wallet.ts'
-import { ensureCreditWalletTestSchema } from './test-schema.ts'
 
-let sqlite: DatabaseSync
-let env: Env
-beforeEach(() => {
-	sqlite = new DatabaseSync(':memory:')
-	env = {
-		APP_DB: createD1FromSqlite(sqlite),
+async function createBillingHarness() {
+	const sqlite = await createTestPg()
+	const env = {
+		APP_DB: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+		APP_DB_FOR_USER: (userId: string) =>
+			createPgDatabase({ connection: sqlite, role: 'kody_writer', userId }),
 		COOKIE_SECRET: 'billing-test-cookie-secret',
 		...createInMemoryUserMeterEnv().env,
 		...createInMemoryRunLogUsageEnv().env,
@@ -31,158 +29,170 @@ beforeEach(() => {
 			}),
 		},
 	} as unknown as Env
-})
-afterEach(() => {
-	sqlite.close()
-	vi.unstubAllGlobals()
-})
+
+	onTestFinished(() => {
+		vi.unstubAllGlobals()
+	})
+	function jsonResponse(body: unknown, status = 200) {
+		return new Response(JSON.stringify(body), {
+			status,
+			headers: { 'content-type': 'application/json' },
+		})
+	}
+	function createWebhookEnv(
+		overrides: {
+			STRIPE_SECRET_KEY?: string
+			STRIPE_WEBHOOK_SECRET?: string
+			STRIPE_PRO_PRICE_ID?: string
+			STRIPE_API_BASE_URL?: string
+		} = {},
+	): Env {
+		return {
+			...env,
+			STRIPE_SECRET_KEY: 'sk_test_secret',
+			STRIPE_WEBHOOK_SECRET: webhookSecret,
+			STRIPE_PRO_PRICE_ID: 'price_pro',
+			STRIPE_API_BASE_URL: 'https://stripe.mock',
+			...overrides,
+		}
+	}
+	async function seedUser(input: {
+		email: string
+		stripeCustomerId?: string | null
+		stripePlan?: string | null
+	}) {
+		const stableUserId = await createStableUserIdFromEmail(input.email)
+		await env.APP_DB.prepare(
+			`INSERT INTO users (
+			username, email, password_hash, email_verified_at, stable_user_id, plan,
+			stripe_customer_id, stripe_plan, stripe_plan_refreshed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+			.bind(
+				`wh-${crypto.randomUUID().slice(0, 8)}`,
+				input.email,
+				'test-password-hash',
+				now.toISOString(),
+				stableUserId,
+				'free',
+				input.stripeCustomerId ?? null,
+				input.stripePlan ?? null,
+				null,
+			)
+			.run()
+		const row = await env.APP_DB.prepare(`SELECT id FROM users WHERE email = ?`)
+			.bind(input.email)
+			.first<{ id: number }>()
+		if (!row) throw new Error(`Failed to seed user ${input.email}`)
+		return {
+			id: row.id,
+			email: input.email,
+			stableUserId,
+			linkReference: await createBillingLinkReference(env, stableUserId),
+		}
+	}
+	async function readUserBilling(userId: number) {
+		return env.APP_DB.prepare(
+			`SELECT stripe_customer_id, stripe_plan, stripe_plan_refreshed_at
+		 FROM users WHERE id = ?`,
+		)
+			.bind(userId)
+			.first<{
+				stripe_customer_id: string | null
+				stripe_plan: string | null
+				stripe_plan_refreshed_at: string | null
+			}>()
+	}
+	async function readWebhookEvent(eventId: string) {
+		return env.APP_DB.prepare(
+			`SELECT event_id, event_type FROM stripe_webhook_events WHERE event_id = ?`,
+		)
+			.bind(eventId)
+			.first<{ event_id: string; event_type: string }>()
+	}
+	function stubStripeFetch(input: {
+		checkout?: unknown
+		subscriptions?: unknown
+	}) {
+		const fetchStub = vi.fn(async (request: RequestInfo | URL) => {
+			const url = String(request)
+			if (url.includes('/v1/checkout/sessions/')) {
+				return jsonResponse(
+					input.checkout ?? {
+						id: 'cs_test',
+						customer: 'cus_linked',
+						client_reference_id: null,
+					},
+				)
+			}
+			if (url.includes('/v1/subscriptions')) {
+				return jsonResponse(
+					input.subscriptions ?? {
+						data: [
+							{
+								id: 'sub_1',
+								status: 'active',
+								cancel_at: null,
+								items: {
+									data: [{ price: { id: 'price_pro' } }],
+								},
+							},
+						],
+					},
+				)
+			}
+			return jsonResponse({ error: 'unexpected stripe path' }, 500)
+		})
+		vi.stubGlobal('fetch', fetchStub)
+		return fetchStub
+	}
+	async function signedWebhookRequest(input: {
+		event: Record<string, unknown>
+		secret?: string
+	}) {
+		const rawBody = JSON.stringify(input.event)
+		const signature = await buildStripeWebhookSignatureHeader({
+			secret: input.secret ?? webhookSecret,
+			rawBody,
+			timestamp: Math.floor(now.valueOf() / 1000),
+		})
+		return new Request('https://test.kody.dev/webhooks/stripe', {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				'stripe-signature': signature,
+			},
+			body: rawBody,
+		})
+	}
+	return {
+		env,
+		sqlite,
+		jsonResponse,
+		createWebhookEnv,
+		seedUser,
+		readUserBilling,
+		readWebhookEvent,
+		stubStripeFetch,
+		signedWebhookRequest,
+	}
+}
 
 const webhookSecret = 'whsec_test_workers_secret'
 const now = new Date('2026-07-25T12:00:00.000Z')
 
-function jsonResponse(body: unknown, status = 200) {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: { 'content-type': 'application/json' },
-	})
-}
-
-function createWebhookEnv(
-	overrides: {
-		STRIPE_SECRET_KEY?: string
-		STRIPE_WEBHOOK_SECRET?: string
-		STRIPE_PRO_PRICE_ID?: string
-		STRIPE_API_BASE_URL?: string
-	} = {},
-): Env {
-	return {
-		...env,
-		STRIPE_SECRET_KEY: 'sk_test_secret',
-		STRIPE_WEBHOOK_SECRET: webhookSecret,
-		STRIPE_PRO_PRICE_ID: 'price_pro',
-		STRIPE_API_BASE_URL: 'https://stripe.mock',
-		...overrides,
-	}
-}
-
-async function seedUser(input: {
-	email: string
-	stripeCustomerId?: string | null
-	stripePlan?: string | null
-}) {
-	await ensureEntitlementTestSchema(env.APP_DB)
-	const stableUserId = await createStableUserIdFromEmail(input.email)
-	await env.APP_DB.prepare(
-		`INSERT INTO users (
-			username, email, password_hash, email_verified_at, stable_user_id, plan,
-			stripe_customer_id, stripe_plan, stripe_plan_refreshed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-	)
-		.bind(
-			`wh-${crypto.randomUUID().slice(0, 8)}`,
-			input.email,
-			'test-password-hash',
-			now.toISOString(),
-			stableUserId,
-			'free',
-			input.stripeCustomerId ?? null,
-			input.stripePlan ?? null,
-			null,
-		)
-		.run()
-	const row = await env.APP_DB.prepare(`SELECT id FROM users WHERE email = ?`)
-		.bind(input.email)
-		.first<{ id: number }>()
-	if (!row) throw new Error(`Failed to seed user ${input.email}`)
-	return {
-		id: row.id,
-		email: input.email,
-		stableUserId,
-		linkReference: await createBillingLinkReference(env, stableUserId),
-	}
-}
-
-async function readUserBilling(userId: number) {
-	return env.APP_DB.prepare(
-		`SELECT stripe_customer_id, stripe_plan, stripe_plan_refreshed_at
-		 FROM users WHERE id = ?`,
-	)
-		.bind(userId)
-		.first<{
-			stripe_customer_id: string | null
-			stripe_plan: string | null
-			stripe_plan_refreshed_at: string | null
-		}>()
-}
-
-async function readWebhookEvent(eventId: string) {
-	return env.APP_DB.prepare(
-		`SELECT event_id, event_type FROM stripe_webhook_events WHERE event_id = ?`,
-	)
-		.bind(eventId)
-		.first<{ event_id: string; event_type: string }>()
-}
-
-function stubStripeFetch(input: {
-	checkout?: unknown
-	subscriptions?: unknown
-}) {
-	const fetchStub = vi.fn(async (request: RequestInfo | URL) => {
-		const url = String(request)
-		if (url.includes('/v1/checkout/sessions/')) {
-			return jsonResponse(
-				input.checkout ?? {
-					id: 'cs_test',
-					customer: 'cus_linked',
-					client_reference_id: null,
-				},
-			)
-		}
-		if (url.includes('/v1/subscriptions')) {
-			return jsonResponse(
-				input.subscriptions ?? {
-					data: [
-						{
-							id: 'sub_1',
-							status: 'active',
-							cancel_at: null,
-							items: {
-								data: [{ price: { id: 'price_pro' } }],
-							},
-						},
-					],
-				},
-			)
-		}
-		return jsonResponse({ error: 'unexpected stripe path' }, 500)
-	})
-	vi.stubGlobal('fetch', fetchStub)
-	return fetchStub
-}
-
-async function signedWebhookRequest(input: {
-	event: Record<string, unknown>
-	secret?: string
-}) {
-	const rawBody = JSON.stringify(input.event)
-	const signature = await buildStripeWebhookSignatureHeader({
-		secret: input.secret ?? webhookSecret,
-		rawBody,
-		timestamp: Math.floor(now.valueOf() / 1000),
-	})
-	return new Request('https://test.kody.dev/webhooks/stripe', {
-		method: 'POST',
-		headers: {
-			'content-type': 'application/json',
-			'stripe-signature': signature,
-		},
-		body: rawBody,
-	})
-}
-
 test('stripe webhook verifies signature, links checkout, refreshes subscription, and is idempotent', async () => {
+	const {
+		env,
+		createWebhookEnv,
+		seedUser,
+		readUserBilling,
+		readWebhookEvent,
+		stubStripeFetch,
+		signedWebhookRequest,
+	} = await createBillingHarness()
+
 	// Guard: returns 503 when webhook secret is not configured.
-	await ensureEntitlementTestSchema(env.APP_DB)
 	const unconfigured = await handleStripeWebhookRequest({
 		env: createWebhookEnv({ STRIPE_WEBHOOK_SECRET: '' }),
 		request: new Request('https://test.kody.dev/webhooks/stripe', {
@@ -326,6 +336,17 @@ test('stripe webhook verifies signature, links checkout, refreshes subscription,
 })
 
 test('stripe webhook process failure returns 500 without recording the event', async () => {
+	const {
+		env,
+		jsonResponse,
+		createWebhookEnv,
+		seedUser,
+		readUserBilling,
+		readWebhookEvent,
+		stubStripeFetch,
+		signedWebhookRequest,
+	} = await createBillingHarness()
+
 	silenceExpectedConsoleErrors([
 		'stripe_api_error',
 		'stripe_webhook_process_failed',
@@ -394,6 +415,9 @@ test('stripe webhook process failure returns 500 without recording the event', a
 })
 
 test('invoice.paid rewards both parties once and ignores $0 trial invoices', async () => {
+	const { env, createWebhookEnv, seedUser, signedWebhookRequest } =
+		await createBillingHarness()
+
 	const referrer = await seedUser({
 		email: 'referrer-invoice-paid@example.com',
 	})
@@ -524,7 +548,9 @@ test('invoice.paid rewards both parties once and ignores $0 trial invoices', asy
 })
 
 test('invoice.paid returns 500 when a qualifying invoice has no linked user', async () => {
-	await ensureEntitlementTestSchema(env.APP_DB)
+	const { env, createWebhookEnv, signedWebhookRequest } =
+		await createBillingHarness()
+
 	silenceExpectedConsoleErrors([
 		'stripe_webhook_process_failed',
 		'stripe_webhook_invoice_paid_user_not_linked',
@@ -562,6 +588,15 @@ test('invoice.paid returns 500 when a qualifying invoice has no linked user', as
 })
 
 test('invoice.paid returns 500 when the referrer paid period cannot be loaded', async () => {
+	const {
+		env,
+		jsonResponse,
+		createWebhookEnv,
+		seedUser,
+		readWebhookEvent,
+		signedWebhookRequest,
+	} = await createBillingHarness()
+
 	silenceExpectedConsoleErrors([
 		'stripe_webhook_process_failed',
 		'stripe_api_error',
@@ -626,6 +661,14 @@ test('invoice.paid returns 500 when the referrer paid period cannot be loaded', 
 })
 
 test('invoice.paid for a referrer retries held outgoing referrals', async () => {
+	const {
+		env,
+		createWebhookEnv,
+		seedUser,
+		stubStripeFetch,
+		signedWebhookRequest,
+	} = await createBillingHarness()
+
 	const referrer = await seedUser({
 		email: 'referrer-held-retry@example.com',
 		stripeCustomerId: 'cus_referrer_held_retry',
@@ -706,7 +749,14 @@ test('invoice.paid for a referrer retries held outgoing referrals', async () => 
 })
 
 test('checkout.session.completed for a credit top-up credits the wallet once and never links a subscription', async () => {
-	await ensureCreditWalletTestSchema(env.APP_DB)
+	const {
+		env,
+		jsonResponse,
+		createWebhookEnv,
+		seedUser,
+		signedWebhookRequest,
+	} = await createBillingHarness()
+
 	const email = `wh-credits-${crypto.randomUUID()}@example.com`
 	const user = await seedUser({
 		email,

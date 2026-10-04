@@ -1,7 +1,7 @@
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { testSecretKms } from '#worker/test-support/aws/fake-kms.ts'
-import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { loadPackageManifestBySourceId } from '#worker/package-registry/source.ts'
 import {
@@ -197,7 +197,7 @@ async function mintOwnerWebhook() {
 		},
 	} as never)
 	const userId = await createStableUserIdFromEmail('owner@example.com')
-	const { env, db } = createEnv(userId)
+	const { env, db } = await createEnv(userId)
 	await db
 		.prepare(
 			`INSERT INTO users (username, email, password_hash, stable_user_id)
@@ -216,33 +216,14 @@ async function mintOwnerWebhook() {
 	return { userId, env, db, minted }
 }
 
-function createEnv(userId: string) {
-	const sqlite = new DatabaseSync(':memory:')
-	sqlite.exec(`
-		CREATE TABLE webhook_endpoints (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			package_id TEXT NOT NULL,
-			webhook_name TEXT NOT NULL,
-			url_secret_hash TEXT NOT NULL,
-			url_secret_encrypted TEXT,
-			previous_url_secret_hash TEXT,
-			previous_url_secret_expires_at TEXT,
-			enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-			created_at TEXT NOT NULL,
-			rotated_at TEXT NOT NULL
-		);
-		CREATE UNIQUE INDEX idx_webhook_endpoints_user_package_name
-		ON webhook_endpoints(user_id, package_id, webhook_name);
-		CREATE TABLE users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-			username TEXT NOT NULL UNIQUE,
-			email TEXT NOT NULL UNIQUE,
-			password_hash TEXT NOT NULL,
-			stable_user_id TEXT NOT NULL
-		);
-	`)
-	const db = createD1FromSqlite(sqlite)
+async function createEnv(userId: string) {
+	const sqlite = await createTestPg()
+
+	const db = createPgDatabase({
+		connection: sqlite,
+		role: 'kody_writer',
+		userId: userId,
+	})
 	return {
 		env: {
 			APP_DB: db,

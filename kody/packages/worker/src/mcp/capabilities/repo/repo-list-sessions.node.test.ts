@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 
@@ -100,7 +101,7 @@ function createSource(sourceId = 'source-1') {
 
 function mockSourceAndPackage() {
 	mockModule.getEntitySourceByIdForUser.mockImplementation(
-		async (_db: D1Database, input: { id: string; userId: string }) =>
+		async (_db: SqlDatabase, input: { id: string; userId: string }) =>
 			input.userId === 'user-1' ? createSource(input.id) : null,
 	)
 	mockModule.getSavedPackageById.mockResolvedValue({
@@ -248,7 +249,7 @@ test('repoListSessions applies limit after dropping sessions with missing source
 		}),
 	])
 	mockModule.getEntitySourceByIdForUser.mockImplementation(
-		async (_db: D1Database, input: { id: string; userId: string }) =>
+		async (_db: SqlDatabase, input: { id: string; userId: string }) =>
 			input.id === 'source-missing' || input.userId !== 'user-1'
 				? null
 				: createSource(input.id),

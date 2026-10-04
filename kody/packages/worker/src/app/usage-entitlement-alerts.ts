@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { utcDayKey, utcMonthKey } from '@kody-internal/shared/date-keys.ts'
 import {
 	estimateDynamicWorkerUsd,
@@ -61,7 +62,7 @@ type FleetCrossingClaim =
 	| { kind: 'dynamic_worker_cost'; month: string }
 
 type UsageEntitlementAlertEnv = {
-	APP_DB: D1Database
+	APP_DB: SqlDatabase
 	APP_BASE_URL?: string
 	BUNDLE_ARTIFACTS_KV?: KVNamespace
 }

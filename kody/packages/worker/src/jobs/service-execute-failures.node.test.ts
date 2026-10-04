@@ -6,7 +6,7 @@ import { type JobRecord } from './types.ts'
 import { TransientJobExecutionError } from './execution-safety.ts'
 import { createStorageEstimateReadError } from '#worker/storage-estimate-error.ts'
 import { durableObjectInstanceInactiveCloseMessage } from '#worker/sentry-options.ts'
-import { d1NetworkConnectionLostMessage } from '#worker/d1-retry.ts'
+import { sqlConnectionLostMessage } from '#worker/sql-retry.ts'
 import {
 	resetJobServiceMocks,
 	mockRepoPersistence,
@@ -39,7 +39,7 @@ vi.mock('#worker/repo/repo-sessions.ts', async () =>
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionsMock(),
 )
-vi.mock('#worker/repo/repo-session-do.ts', async () =>
+vi.mock('#worker/repo/repo-session-service.ts', async () =>
 	(
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).repoSessionDoMock(),
@@ -145,7 +145,10 @@ test('executeJobOnce failure modes workflow', async () => {
 		}
 
 		const repoSessionRpcSpy = vi
-			.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+			.spyOn(
+				await import('#worker/repo/repo-session-service.ts'),
+				'repoSessionRpc',
+			)
 			.mockReturnValue(sessionClient as never)
 		const formatJobErrorSpy = vi.spyOn(
 			await import('./schedule.ts'),
@@ -306,7 +309,7 @@ test('executeJobOnce failure modes workflow', async () => {
 			}
 			const repoSessionRpcSpy = vi
 				.spyOn(
-					await import('#worker/repo/repo-session-do.ts'),
+					await import('#worker/repo/repo-session-service.ts'),
 					'repoSessionRpc',
 				)
 				.mockReturnValue(sessionClient as never)
@@ -337,7 +340,7 @@ test('executeJobOnce retries claimed platform blips and surfaces them on run-now
 		BUNDLE_ARTIFACTS_KV: createBundleArtifactsKv(),
 		LOADER: {} as WorkerLoader,
 		REPO_SESSION: {} as DurableObjectNamespace,
-		STORAGE_RUNNER: createStorageRunnerBinding(),
+		STORAGE_CELLS: createStorageRunnerBinding(),
 	})
 	mockRepoPersistence()
 	const callerContext = createBaseCallerContext()
@@ -406,7 +409,7 @@ test('executeJobOnce retries claimed platform blips and surfaces them on run-now
 		const platformBlips = [
 			estimateError.message,
 			durableObjectInstanceInactiveCloseMessage,
-			`D1_ERROR: ${d1NetworkConnectionLostMessage}.`,
+			`${sqlConnectionLostMessage}.`,
 		]
 		for (const error of platformBlips) {
 			executeSpy.mockResolvedValue({
@@ -567,7 +570,10 @@ test('runJobNow retains once jobs for retention cleanup instead of deleting them
 		discardSession: vi.fn(),
 	}
 	const repoSessionRpcSpy = vi
-		.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+		.spyOn(
+			await import('#worker/repo/repo-session-service.ts'),
+			'repoSessionRpc',
+		)
 		.mockReturnValue(sessionClient as never)
 	const executeSpy = vi
 		.spyOn(
@@ -759,7 +765,10 @@ test('runJobNow can use a one-off repo check policy override without changing th
 	}
 
 	const repoSessionRpcSpy = vi
-		.spyOn(await import('#worker/repo/repo-session-do.ts'), 'repoSessionRpc')
+		.spyOn(
+			await import('#worker/repo/repo-session-service.ts'),
+			'repoSessionRpc',
+		)
 		.mockReturnValue(sessionClient as never)
 	const executeSpy = vi
 		.spyOn(

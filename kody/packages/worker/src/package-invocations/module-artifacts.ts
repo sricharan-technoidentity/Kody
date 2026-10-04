@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	getSavedPackageById,
 	getSavedPackageByKodyId,
@@ -39,10 +40,10 @@ import {
 	resolveSavedPackageWithFreshnessCache,
 	type CachedInvokeModuleArtifact,
 } from './invoke-contract-cache.ts'
-import { isRetryableD1LockError } from '#worker/d1-retry.ts'
+import { isRetryableSqlError } from '#worker/sql-retry.ts'
 
 export async function resolveSavedPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageIdOrKodyId: string
 }): Promise<SavedPackageRecord | null> {
@@ -67,9 +68,10 @@ export async function resolveSavedPackage(input: {
 }
 
 export async function resolveSavedPackageBySpecifier(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	specifier: string
+	forUser?: (userId: string) => SqlDatabase
 	allowPlatformScopes?: boolean
 }): Promise<SavedPackageRecord | null> {
 	const parsed = parseKodyPackageSpecifier(input.specifier)
@@ -84,6 +86,7 @@ export async function resolveSavedPackageBySpecifier(input: {
 					userId: input.userId,
 					specifier: parsed,
 					allowPlatformScopes: input.allowPlatformScopes,
+					forUser: input.forUser,
 				})
 			)?.row ?? null,
 	})
@@ -319,7 +322,7 @@ export function isMissingPackageModuleError(error: unknown) {
 }
 
 export function isTransientModuleArtifactError(error: unknown) {
-	if (isRetryableD1LockError(error)) return true
+	if (isRetryableSqlError(error)) return true
 	if (!(error instanceof Error)) return false
 	return /(?:\bD1\b|\bKV\b|bindings? (?:are|is) not available|timeout|temporar|network|fetch|could not be loaded after rebuild)/i.test(
 		error.message,

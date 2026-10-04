@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
 import {
@@ -259,7 +260,7 @@ export async function recordVerifiedNoMcpCampaignSend(input: {
 }
 
 export async function listUsersForUsageCampaignSweep(
-	db: D1Database,
+	db: SqlDatabase,
 	limit: number,
 ) {
 	const result = await db
@@ -429,6 +430,7 @@ async function sendClaimedCampaignEmail(input: {
 	try {
 		sendResult = await sendCloudflareEmail(
 			{
+				ses: input.env.SES_MAIL,
 				accountId: input.env.CLOUDFLARE_ACCOUNT_ID,
 				apiBaseUrl: input.env.CLOUDFLARE_API_BASE_URL,
 				apiToken: input.env.CLOUDFLARE_API_TOKEN,
@@ -481,7 +483,7 @@ async function sendClaimedCampaignEmail(input: {
 }
 
 async function persistDecision(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	decision: UsageCampaignDecision
 	persisted: ReturnType<typeof campaignRowToPersisted>

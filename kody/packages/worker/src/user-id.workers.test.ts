@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { env } from 'cloudflare:workers'
 import { expect, test } from 'vitest'
 import {
@@ -12,7 +13,7 @@ type UsersStableIdRow = {
 	stable_user_id: string
 }
 
-async function recreateUsersTable(db: D1Database) {
+async function recreateUsersTable(db: SqlDatabase) {
 	await db.prepare(`DROP TABLE IF EXISTS users`).run()
 	await db
 		.prepare(
@@ -34,7 +35,7 @@ async function recreateUsersTable(db: D1Database) {
 }
 
 async function seedUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	email: string
 	stableUserId: string
 }) {
@@ -52,7 +53,7 @@ async function seedUser(input: {
 }
 
 async function findUserByStableUserId(
-	db: D1Database,
+	db: SqlDatabase,
 	stableUserId: string,
 ): Promise<UsersStableIdRow | null> {
 	const trimmed = normalizeStableUserId(stableUserId)

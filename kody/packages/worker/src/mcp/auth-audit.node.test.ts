@@ -11,7 +11,7 @@ const sentryMock = vi.hoisted(() => ({
 	captureMessage: vi.fn(),
 }))
 
-vi.mock('@sentry/cloudflare', () => ({
+vi.mock('#worker/front-door/telemetry.ts', () => ({
 	isInitialized: () => true,
 	getClient: () => ({
 		getOptions: () => ({ dsn: 'https://audit@example.com/1' }),

@@ -1,8 +1,9 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { CommunityActionError } from '#worker/community/errors.ts'
 import { durableObjectIsolateMemoryResetMessage } from '#worker/sentry-options.ts'
 import { createCommunityInstallApiPostHandler } from './community-install.ts'
-import type * as CloudflareWorkers from 'cloudflare:workers'
+import type * as CloudflareWorkers from '#worker/front-door/host-context.ts'
 
 const mockModule = vi.hoisted(() => ({
 	readAuthenticatedAppUser: vi.fn(),
@@ -12,7 +13,7 @@ const mockModule = vi.hoisted(() => ({
 	waitUntil: vi.fn(),
 }))
 
-vi.mock('cloudflare:workers', async (importOriginal) => {
+vi.mock('#worker/front-door/host-context.ts', async (importOriginal) => {
 	const actual = await importOriginal<typeof CloudflareWorkers>()
 	return {
 		...actual,
@@ -40,7 +41,7 @@ vi.mock('#worker/package-registry/user-scope.ts', () => ({
 		mockModule.getMcpUserPackageScope(...args),
 }))
 
-const env = { APP_DB: {} as D1Database } as Env
+const env = { APP_DB: {} as SqlDatabase } as Env
 
 function buildInstallRequest(body: unknown) {
 	return {

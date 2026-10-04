@@ -1,3 +1,5 @@
+import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { McpCallerError } from '#mcp/caller-error.ts'
 import { resolveSecret } from '#mcp/secrets/service.ts'
 import { getSavedPackageById } from '#worker/package-registry/repo.ts'
@@ -106,7 +108,7 @@ export function normalizeSecretProviderConfig(
 }
 
 async function requireOwnedPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 }) {
@@ -121,7 +123,7 @@ async function requireOwnedPackage(input: {
 }
 
 async function requireBoundProvider(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	providerId: string
 }) {
@@ -402,6 +404,8 @@ export async function resolveProviderSecret(input: {
 				packageId: authorityPackageId,
 			})
 		: input.userId
+	input = { ...input, env: getAccountEnv(input.env, ownerUserId) }
+
 	await assertSecretProvidersEnabled({
 		db: input.env.APP_DB,
 		stableUserId: ownerUserId,
@@ -596,7 +600,7 @@ async function resolveCanonicalProviderRef(input: {
 }
 
 async function assertProviderGrant(input: {
-	db: D1Database
+	db: SqlDatabase
 	baseUrl: string
 	ownerUserId: string
 	callerUserId: string

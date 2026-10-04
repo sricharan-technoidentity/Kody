@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 /**
  * Platform account suspension and outbound-email pause reads.
  *
@@ -49,7 +50,7 @@ export type AccountRestrictions = {
  * unknown accounts through their own identity gates).
  */
 export async function getAccountRestrictionsByStableUserId(input: {
-	db: D1Database
+	db: SqlDatabase
 	stableUserId: string
 }): Promise<AccountRestrictions | null> {
 	const stableUserId = normalizeStableUserId(input.stableUserId)
@@ -78,7 +79,7 @@ export async function getAccountRestrictionsByStableUserId(input: {
  * stale grant email owned by another account can never be consulted.
  */
 export async function isAccountSuspended(input: {
-	db: D1Database
+	db: SqlDatabase
 	email?: string | null
 	stableUserId?: string | null
 }): Promise<boolean> {

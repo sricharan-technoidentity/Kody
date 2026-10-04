@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	consoleError,
@@ -1213,7 +1214,7 @@ function createEntitlementsDatabase(input: {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 test('refreshSavedPackageProjection enforces the saved packages entitlement on insert', async () => {

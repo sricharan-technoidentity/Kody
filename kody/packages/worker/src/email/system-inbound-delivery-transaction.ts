@@ -1,15 +1,17 @@
+import { type SqlStatement } from '@kody-internal/shared/sql-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { commitSystemEmailAuthorityBatch } from './system-email-authority.ts'
 
 export type SystemInboundEventMutation = {
 	eventId: string
-	dedicated: D1PreparedStatement
+	dedicated: SqlStatement
 }
 
 export async function commitSystemInboundEventMutations(input: {
-	db: D1Database
+	db: SqlDatabase
 	mutations: ReadonlyArray<SystemInboundEventMutation>
-	before?: ReadonlyArray<D1PreparedStatement>
-	after?: ReadonlyArray<D1PreparedStatement>
+	before?: ReadonlyArray<SqlStatement>
+	after?: ReadonlyArray<SqlStatement>
 }) {
 	const beforeCount = input.before?.length ?? 0
 	const results = await commitSystemEmailAuthorityBatch({
@@ -29,11 +31,11 @@ export async function commitSystemInboundEventMutations(input: {
 }
 
 export async function commitSystemInboundEventMutation(input: {
-	db: D1Database
+	db: SqlDatabase
 	eventId: string
-	dedicated: D1PreparedStatement
-	before?: ReadonlyArray<D1PreparedStatement>
-	after?: ReadonlyArray<D1PreparedStatement>
+	dedicated: SqlStatement
+	before?: ReadonlyArray<SqlStatement>
+	after?: ReadonlyArray<SqlStatement>
 }) {
 	const { results, mutationResults } = await commitSystemInboundEventMutations({
 		db: input.db,

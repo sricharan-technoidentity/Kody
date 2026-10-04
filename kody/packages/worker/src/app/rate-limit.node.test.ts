@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createTestDb } from '#worker/test-support/aws/test-db.ts'
 import {
@@ -67,7 +68,7 @@ test('auth binding preserves the ten requests per sixty seconds contract', async
 	})
 	const env = {
 		AUTH_RATE_LIMITER: { limit },
-		APP_DB: null as unknown as D1Database,
+		APP_DB: null as unknown as SqlDatabase,
 	}
 
 	for (let index = 0; index < authRateLimitConfig.maxRequests; index++) {

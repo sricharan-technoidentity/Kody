@@ -17,7 +17,7 @@ vi.mock('isomorphic-git/http/web', () => ({
 	default: {},
 }))
 
-vi.mock('@sentry/cloudflare', () => ({
+vi.mock('#worker/front-door/telemetry.ts', () => ({
 	captureException: vi.fn(),
 }))
 

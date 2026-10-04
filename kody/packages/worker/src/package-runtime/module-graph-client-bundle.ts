@@ -242,6 +242,7 @@ function assertBrowserBundleHasNoUnresolvedImports(input: {
 }
 
 export async function buildKodyAppClientBundle(input: {
+	env?: Pick<Env, 'RUNNER_BUNDLER'>
 	sourceFiles: Record<string, string>
 	entryPoint: string
 }): Promise<RuntimeBundle> {
@@ -283,11 +284,13 @@ export async function buildKodyAppClientBundle(input: {
 		? getPackageAppClientExternals(rootPackage.manifest)
 		: []
 	// Keep the experimental bundler out of the Worker's top-level deploy graph.
-	const { createWorker } = await importWorkerBundler()
+	const { createWorker } =
+		input.env?.RUNNER_BUNDLER ?? (await importWorkerBundler())
 	const bundle = await createWorker({
 		files,
 		entryPoint,
 		bundle: true,
+		...(input.env?.RUNNER_BUNDLER ? { externals } : {}),
 		target: 'es2022',
 		...createPackageAppJsxBundleOptions(input.sourceFiles),
 		...(externals.length > 0

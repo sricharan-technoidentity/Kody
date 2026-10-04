@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	buildEntityRepoId,
 	hasArtifactsAccess,
@@ -59,7 +60,7 @@ function buildEntitySourceRow(input: {
 }
 
 export async function ensureEntitySource(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Env
 	id?: string
 	userId: string
@@ -147,7 +148,7 @@ export async function ensureEntitySource(input: {
 	}
 }
 
-function hasAppDbBinding(db: D1Database | null | undefined) {
+function hasAppDbBinding(db: SqlDatabase | null | undefined) {
 	return typeof db?.prepare === 'function'
 }
 

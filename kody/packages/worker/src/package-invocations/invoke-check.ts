@@ -1,3 +1,4 @@
+import { getAccountWriterFactory } from '#worker/identity/token-owner-db.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import {
 	type PackageInvokeCheckResult,
@@ -112,6 +113,7 @@ export async function checkPackageInvokeForRuntimeWithPreloads(input: {
 		userId: input.userId,
 		specifier: request.specifier,
 		allowPlatformScopes: callerIsPlatformAccount,
+		forUser: getAccountWriterFactory(input.env),
 	})
 	if (!savedPackage) {
 		if (!callerIsPlatformAccount) {

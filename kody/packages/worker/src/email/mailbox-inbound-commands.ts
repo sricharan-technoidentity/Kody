@@ -1,3 +1,4 @@
+import { type MailboxContext } from './mailbox-sql.ts'
 import {
 	claimMailboxInboundDeliveryCleanup,
 	markMailboxInboundDeliveryOrphanCleaned,
@@ -30,12 +31,12 @@ import { type MailboxStore } from './mailbox-store.ts'
 import { type MailboxRpc } from './mailbox-types.ts'
 
 export class MailboxInboundCommands {
-	private readonly ctx: DurableObjectState
+	private readonly ctx: MailboxContext
 	private readonly store: MailboxStore
 	private readonly maintenance: MailboxMaintenanceCommands
 
 	constructor(
-		ctx: DurableObjectState,
+		ctx: MailboxContext,
 		store: MailboxStore,
 		maintenance: MailboxMaintenanceCommands,
 	) {
@@ -44,25 +45,33 @@ export class MailboxInboundCommands {
 		this.maintenance = maintenance
 	}
 
-	getInboundDelivery(input: Parameters<MailboxRpc['getInboundDelivery']>[0]) {
-		this.store.assertOwner(input.ownerId)
-		return getMailboxInboundDelivery(this.ctx.storage.sql, input.deliveryId)
+	async getInboundDelivery(
+		input: Parameters<MailboxRpc['getInboundDelivery']>[0],
+	) {
+		await this.store.assertOwner(input.ownerId)
+		return await getMailboxInboundDelivery(
+			this.ctx.storage.sql,
+			input.deliveryId,
+		)
 	}
 
-	getInboundDeliveryWindow(
+	async getInboundDeliveryWindow(
 		input: Parameters<MailboxRpc['getInboundDeliveryWindow']>[0],
 	) {
-		this.store.assertOwner(input.ownerId)
-		return getMailboxInboundDeliveryWindow(this.ctx.storage.sql, input)
+		await this.store.assertOwner(input.ownerId)
+		return await getMailboxInboundDeliveryWindow(this.ctx.storage.sql, input)
 	}
 
 	async claimInboundDeliveryWindow(
 		input: Parameters<MailboxRpc['claimInboundDeliveryWindow']>[0],
 	) {
 		let result!: Awaited<ReturnType<MailboxRpc['claimInboundDeliveryWindow']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundDeliveryWindow(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await claimMailboxInboundDeliveryWindow(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		await this.maintenance.markDirtyAndEnsure()
 		return result
@@ -74,9 +83,9 @@ export class MailboxInboundCommands {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['insertChargedPendingInboundDelivery']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = insertMailboxChargedPendingInboundDelivery(
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await insertMailboxChargedPendingInboundDelivery(
 				this.ctx.storage.sql,
 				input,
 			)
@@ -89,9 +98,12 @@ export class MailboxInboundCommands {
 		input: Parameters<MailboxRpc['claimInboundDeliveryStorage']>[0],
 	) {
 		let result!: Awaited<ReturnType<MailboxRpc['claimInboundDeliveryStorage']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundDeliveryStorage(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await claimMailboxInboundDeliveryStorage(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		if (result.status === 'claimed') {
 			await this.maintenance.markDirtyAndEnsure()
@@ -105,9 +117,12 @@ export class MailboxInboundCommands {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['releaseInboundDeliveryStorage']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = releaseMailboxInboundDeliveryStorage(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await releaseMailboxInboundDeliveryStorage(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		if (result.status === 'released') {
 			await this.maintenance.markDirtyAndEnsure()
@@ -119,9 +134,12 @@ export class MailboxInboundCommands {
 		input: Parameters<MailboxRpc['markInboundDeliveryRejected']>[0],
 	) {
 		let result!: Awaited<ReturnType<MailboxRpc['markInboundDeliveryRejected']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = markMailboxInboundDeliveryRejected(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await markMailboxInboundDeliveryRejected(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		if (result.status === 'rejected') {
 			await this.maintenance.markDirtyAndEnsure()
@@ -133,9 +151,12 @@ export class MailboxInboundCommands {
 		input: Parameters<MailboxRpc['markInboundDeliveryReceived']>[0],
 	) {
 		let result!: Awaited<ReturnType<MailboxRpc['markInboundDeliveryReceived']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = markMailboxInboundDeliveryReceived(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await markMailboxInboundDeliveryReceived(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		if (result.status === 'received') {
 			await this.maintenance.markDirtyAndEnsure()
@@ -149,9 +170,9 @@ export class MailboxInboundCommands {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['pruneExpiredInboundDedupePointers']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = pruneMailboxExpiredInboundDedupePointers(
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await pruneMailboxExpiredInboundDedupePointers(
 				this.ctx.storage.sql,
 				input,
 			)
@@ -168,9 +189,9 @@ export class MailboxInboundCommands {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['deferInboundDeliveryReconciliation']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = deferMailboxInboundDeliveryReconciliation(
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await deferMailboxInboundDeliveryReconciliation(
 				this.ctx.storage.sql,
 				input,
 			)
@@ -181,39 +202,45 @@ export class MailboxInboundCommands {
 		return result
 	}
 
-	claimInboundDeliveryCleanup(
+	async claimInboundDeliveryCleanup(
 		input: Parameters<MailboxRpc['claimInboundDeliveryCleanup']>[0],
 	) {
 		let result!: Awaited<ReturnType<MailboxRpc['claimInboundDeliveryCleanup']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundDeliveryCleanup(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await claimMailboxInboundDeliveryCleanup(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		return result
 	}
 
-	releaseInboundDeliveryCleanup(
+	async releaseInboundDeliveryCleanup(
 		input: Parameters<MailboxRpc['releaseInboundDeliveryCleanup']>[0],
 	) {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['releaseInboundDeliveryCleanup']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = releaseMailboxInboundDeliveryCleanup(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await releaseMailboxInboundDeliveryCleanup(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		return result
 	}
 
-	markInboundDeliveryOrphanCleaned(
+	async markInboundDeliveryOrphanCleaned(
 		input: Parameters<MailboxRpc['markInboundDeliveryOrphanCleaned']>[0],
 	) {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['markInboundDeliveryOrphanCleaned']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = markMailboxInboundDeliveryOrphanCleaned(
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await markMailboxInboundDeliveryOrphanCleaned(
 				this.ctx.storage.sql,
 				input,
 			)
@@ -221,37 +248,40 @@ export class MailboxInboundCommands {
 		return result
 	}
 
-	claimInboundUsageEffect(
+	async claimInboundUsageEffect(
 		input: Parameters<MailboxRpc['claimInboundUsageEffect']>[0],
 	) {
 		let result!: Awaited<ReturnType<MailboxRpc['claimInboundUsageEffect']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundUsageEffect(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await claimMailboxInboundUsageEffect(this.ctx.storage.sql, input)
 		})
 		return result
 	}
 
-	completeInboundUsageEffect(
+	async completeInboundUsageEffect(
 		input: Parameters<MailboxRpc['completeInboundUsageEffect']>[0],
 	) {
 		let result!: Awaited<ReturnType<MailboxRpc['completeInboundUsageEffect']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = completeMailboxInboundUsageEffect(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await completeMailboxInboundUsageEffect(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		return result
 	}
 
-	claimInboundSubscriptionEffect(
+	async claimInboundSubscriptionEffect(
 		input: Parameters<MailboxRpc['claimInboundSubscriptionEffect']>[0],
 	) {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['claimInboundSubscriptionEffect']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundSubscriptionEffect(
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await claimMailboxInboundSubscriptionEffect(
 				this.ctx.storage.sql,
 				input,
 			)
@@ -259,15 +289,15 @@ export class MailboxInboundCommands {
 		return result
 	}
 
-	completeInboundSubscriptionEffect(
+	async completeInboundSubscriptionEffect(
 		input: Parameters<MailboxRpc['completeInboundSubscriptionEffect']>[0],
 	) {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['completeInboundSubscriptionEffect']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = completeMailboxInboundSubscriptionEffect(
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await completeMailboxInboundSubscriptionEffect(
 				this.ctx.storage.sql,
 				input,
 			)
@@ -275,44 +305,50 @@ export class MailboxInboundCommands {
 		return result
 	}
 
-	failInboundSubscriptionEffect(
+	async failInboundSubscriptionEffect(
 		input: Parameters<MailboxRpc['failInboundSubscriptionEffect']>[0],
 	) {
 		let result!: Awaited<
 			ReturnType<MailboxRpc['failInboundSubscriptionEffect']>
 		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = failMailboxInboundSubscriptionEffect(this.ctx.storage.sql, input)
+		await this.ctx.storage.transaction(async () => {
+			await this.store.assertOwner(input.ownerId)
+			result = await failMailboxInboundSubscriptionEffect(
+				this.ctx.storage.sql,
+				input,
+			)
 		})
 		return result
 	}
 
-	listDueStaleInboundDeliveries(
+	async listDueStaleInboundDeliveries(
 		input: Parameters<MailboxRpc['listDueStaleInboundDeliveries']>[0],
 	) {
-		this.store.assertOwner(input.ownerId)
-		return listMailboxDueStaleInboundDeliveries(this.ctx.storage.sql, input)
+		await this.store.assertOwner(input.ownerId)
+		return await listMailboxDueStaleInboundDeliveries(
+			this.ctx.storage.sql,
+			input,
+		)
 	}
 
-	listDueInboundEffectWork(
+	async listDueInboundEffectWork(
 		input: Parameters<MailboxRpc['listDueInboundEffectWork']>[0],
 	) {
-		this.store.assertOwner(input.ownerId)
-		return listMailboxDueInboundEffectWork(this.ctx.storage.sql, input)
+		await this.store.assertOwner(input.ownerId)
+		return await listMailboxDueInboundEffectWork(this.ctx.storage.sql, input)
 	}
 
-	getInboundDueWorkHint(
+	async getInboundDueWorkHint(
 		input: Parameters<MailboxRpc['getInboundDueWorkHint']>[0],
 	) {
-		this.store.assertOwner(input.ownerId)
+		await this.store.assertOwner(input.ownerId)
 		let now: Date | undefined
 		if (input.now != null) {
 			const parsed = Date.parse(input.now)
 			if (Number.isFinite(parsed)) now = new Date(parsed)
 		}
 		return {
-			dueAt: getMailboxInboundDueAt(this.ctx.storage.sql, now),
+			dueAt: await getMailboxInboundDueAt(this.ctx.storage.sql, now),
 		}
 	}
 }

@@ -3,8 +3,11 @@ import {
 	getAccountEnv,
 	getAccountWriterFactory,
 } from '#worker/identity/token-owner-db.ts'
+import { createMailActivities } from '../mail-activities.ts'
 import { createPackageWorkflowActivities } from '../package-workflow-activities.ts'
 import { createAppCatalogActivities } from './catalog.ts'
+import { createRepoSessionActivities } from './repo-session.ts'
+import { getRepoSessionById } from '#worker/repo/repo-sessions.ts'
 import { getAppBaseUrl } from '#worker/app-base-url.ts'
 import { processCommunityActivityDispatchMessage } from '#worker/community/activity-dispatch-queue.ts'
 import { processCommunityListingPublishedDispatchMessage } from '#worker/community/listing-published-dispatch-queue.ts'
@@ -94,7 +97,27 @@ async function deliverPackageEvent(
 export function createAppActivities(baseEnv: Env) {
 	const env = baseEnv
 	return {
+		...createRepoSessionActivities({
+			service(userId, sessionId) {
+				const services = getAccountEnv(baseEnv, userId).REPO_SESSION_SERVICES
+				if (!services)
+					throw ApplicationFailure.nonRetryable(
+						'REPO_SESSION_SERVICES is not configured.',
+					)
+				return services(userId, sessionId)
+			},
+			row(userId, sessionId) {
+				return getRepoSessionById(getAccountEnv(baseEnv, userId), {
+					userId,
+					sessionId,
+				})
+			},
+		}),
 		...createPackageWorkflowActivities(env),
+		...createMailActivities({
+			env,
+			forUser: (userId) => getAccountEnv(baseEnv, userId),
+		}),
 		...createAppCatalogActivities({
 			async forUser(userId) {
 				if (!getAccountWriterFactory(env))

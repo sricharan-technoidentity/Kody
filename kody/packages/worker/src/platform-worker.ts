@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import {
 	buildPlatformWorkerHealth,
 	platformWorkerHealthPath,
@@ -7,11 +7,6 @@ import { KodyFetchGateway } from '#mcp/fetch-gateway.ts'
 import { DynamicWorkerUsageTail } from '#worker/usage/dynamic-worker-cpu.ts'
 import { PackageAppRuntimeBridge } from '#worker/package-runtime/package-app.ts'
 import { refuseNonCanonicalProductionHost } from '#app/canonical-host.ts'
-import { McpClientHub } from './mcp-client/hub.ts'
-import { MCP } from './mcp/index.ts'
-import { Mailbox } from './email/mailbox-do.ts'
-import { RepoSession } from './repo/repo-session-do.ts'
-import { RepoSessionIndex } from './repo/repo-session-index-do.ts'
 import { getWorkerSentryOptions } from './sentry-options.ts'
 
 /**
@@ -30,16 +25,7 @@ import { getWorkerSentryOptions } from './sentry-options.ts'
  * Object and looks up those exports on **this** script, the same way
  * `kody-runtime` exports its own gateway instead of calling back into origin.
  */
-export {
-	MCP,
-	McpClientHub,
-	Mailbox,
-	RepoSession,
-	RepoSessionIndex,
-	KodyFetchGateway,
-	DynamicWorkerUsageTail,
-	PackageAppRuntimeBridge,
-}
+export { KodyFetchGateway, DynamicWorkerUsageTail, PackageAppRuntimeBridge }
 
 const platformWorkerHandler = {
 	async fetch(request: Request, env: Env) {

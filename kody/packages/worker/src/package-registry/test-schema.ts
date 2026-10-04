@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { ensureEmailClaimsTestSchema } from '#worker/identity/email-claims-test-schema.ts'
 import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
 
@@ -7,7 +8,7 @@ import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
  * Adds migration 0072 (`users.account_type`, `package_scope_grants`) on top of
  * the shared `users` schema.
  */
-export async function ensurePackageScopeGrantsTestSchema(db: D1Database) {
+export async function ensurePackageScopeGrantsTestSchema(db: SqlDatabase) {
 	await ensureUsersTestSchema({
 		db,
 		columns: ['email_verified_at', 'account_type'],

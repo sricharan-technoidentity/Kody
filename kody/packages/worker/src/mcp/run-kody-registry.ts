@@ -6,8 +6,7 @@ import {
 	type ExecuteResult,
 	type ResolvedProvider,
 	type ToolProvider,
-} from '@cloudflare/codemode'
-import { exports as workerExports } from 'cloudflare:workers'
+} from '../node_modules/.kody-generated/codemode-host.mjs'
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
 import {
 	createExecuteExecutor,
@@ -543,7 +542,9 @@ export async function runModuleWithRegistry(
 	code: string,
 	params?: Record<string, unknown>,
 	options?: {
-		executorExports?: typeof workerExports
+		executorExports?: NonNullable<
+			Parameters<typeof createExecuteExecutor>[0]['exports']
+		>
 		additionalTools?: AdditionalKodyTools
 		packageContext?: PackageContextOptions
 		emailTools?: EmailToolOptions
@@ -842,7 +843,9 @@ export async function runBundledModuleWithRegistry(
 	},
 	params?: Record<string, unknown>,
 	options?: {
-		executorExports?: typeof workerExports
+		executorExports?: NonNullable<
+			Parameters<typeof createExecuteExecutor>[0]['exports']
+		>
 		additionalTools?: AdditionalKodyTools
 		packageContext?: PackageContextOptions
 		emailTools?: EmailToolOptions
@@ -1103,7 +1106,7 @@ export async function runBundledModuleWithRegistry(
 			options?.closedWorldRetrieverRuntime === true
 		const executor = createExecuteExecutor({
 			env,
-			exports: options?.executorExports ?? workerExports,
+			exports: options?.executorExports,
 			timeoutMs: options?.executorTimeoutMs,
 			signal: options?.signal,
 			gatewayProps: {

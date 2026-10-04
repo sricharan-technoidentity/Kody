@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import type * as PlatformFeedbackOutcomeEmail from '#worker/platform-feedback/outcome-email.ts'
 import type * as PlatformFeedbackService from '#worker/platform-feedback/service.ts'
 import { expect, test, vi } from 'vitest'
@@ -102,7 +103,7 @@ function createCapabilityContext(input?: {
 }) {
 	return {
 		env: {
-			APP_DB: {} as D1Database,
+			APP_DB: {} as SqlDatabase,
 			TEMPORAL: temporal.TEMPORAL,
 		} as Env,
 		callerContext: createMcpCallerContext({

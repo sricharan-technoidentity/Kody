@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { refreshCommunityIconForPackagePublish } from '#worker/community/community-icon.ts'
 import { refreshIdentityIconForSource } from '#worker/repo/identity-icon.ts'
 import {

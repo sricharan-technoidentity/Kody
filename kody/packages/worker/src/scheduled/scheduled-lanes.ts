@@ -1,5 +1,5 @@
 import { reconcileStaleRunRecords } from '#worker/run-records/reconcile-stale.ts'
-import * as Sentry from '@sentry/cloudflare'
+import * as Sentry from '#worker/front-door/telemetry.ts'
 import { checkAuthDenialBurstAndNotify } from '#app/auth-denial-alerts.ts'
 import { checkEmailDeliveryBurstAndNotify } from '#app/email-delivery-alerts.ts'
 import { checkEmailVerificationStallsAndNotify } from '#app/email-verification-stall-alerts.ts'
@@ -11,7 +11,7 @@ import { sendUserEntitlementWarningEmails } from '#app/user-entitlement-warning-
 import { sendUserErrorRateEmails } from '#app/user-error-rate-emails.ts'
 import { sendUserUsageCampaignEmails } from '#app/user-usage-campaign-emails.ts'
 import { emitFleetEntitlementCrossingEvents } from '#app/usage-entitlement-alerts.ts'
-import { isRetryableD1LockError } from '#worker/d1-retry.ts'
+import { isRetryableSqlError } from '#worker/sql-retry.ts'
 import { sweepStaleInboundDeliveries } from '#worker/email/reconcile-inbound-deliveries.ts'
 import { pruneSystemEmailRetention } from '#worker/email/system-email.ts'
 import { pruneJobRetention } from '#worker/jobs/job-retention-cleanup.ts'
@@ -251,7 +251,7 @@ export async function runScheduledLaneWithFailureIsolation(input: {
 		})
 		return 'completed'
 	} catch (error) {
-		if (isRetryableD1LockError(error)) {
+		if (isRetryableSqlError(error)) {
 			console.warn(
 				`scheduled_lane_d1_lock_contention lane=${input.message.lane}`,
 				error,

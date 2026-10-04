@@ -1,7 +1,3 @@
-import * as Sentry from '@sentry/cloudflare'
-import { DurableObject } from 'cloudflare:workers'
-import { getRecoveryBookmark, restoreToBookmark } from '#worker/dr/do-pitr.ts'
-import { buildSentryOptions } from '#worker/sentry-options.ts'
 import {
 	assertWithinStorageBytesEntitlement,
 	estimateEntitlementStorageEntryByteDelta,
@@ -19,13 +15,10 @@ import {
 } from '#worker/storage-buckets/service.ts'
 import { createStorageEstimateReadError } from '#worker/storage-estimate-error.ts'
 import { buildPackageStorageId } from '#worker/storage-ids.ts'
-import { storageRunnerDurableObjectName } from '#worker/user-scoped-durable-object-name.ts'
 import { recordDurableObjectRowsRead } from '#worker/usage/durable-object-rows.ts'
-import { createMeteredDurableObjectStub } from '#worker/usage/durable-object-usage.ts'
 import { repoSessionRpc } from '#worker/repo/repo-session-rpc.ts'
 import { kodyCallDispatcherName } from '#worker/kody-evaluate-bindings.ts'
 
-const defaultStorageExportPageSize = 250
 const maxStorageExportPageSize = 1_000
 /** Cap for StorageRunner sqlQuery row materialization (matches export max). */
 export const maxStorageSqlQueryRows = maxStorageExportPageSize
@@ -90,19 +83,6 @@ export function createStorageBytesEntitlementRunCache(): StorageBytesEntitlement
 	}
 }
 
-type StorageEntry = {
-	key: string
-	value: unknown
-}
-
-type StorageExportResult = {
-	entries: Array<StorageEntry>
-	estimatedBytes: number
-	truncated: boolean
-	nextStartAfter: string | null
-	pageSize: number
-}
-
 type StorageSqlValue = string | number | null
 
 type StorageSqlResult = {
@@ -117,23 +97,6 @@ type StorageSqlResult = {
 	 * with LIMIT/OFFSET (or equivalent) rather than relying on a full scan.
 	 */
 	truncated: boolean
-}
-
-type StorageListResult = StorageExportResult
-
-type StorageSetResult = {
-	ok: true
-	key: string
-}
-
-type StorageDeleteResult = {
-	ok: true
-	key: string
-	deleted: boolean
-}
-
-type StorageClearResult = {
-	ok: true
 }
 
 type StorageEstimateResult = {
@@ -231,23 +194,6 @@ export function assertCloneableStorageValue(value: unknown) {
 	} catch (error) {
 		throw new Error(storageValueNotCloneableMessage, { cause: error })
 	}
-}
-
-function readCloneableStorageValue(value: unknown) {
-	if (value == null) return null
-	try {
-		return structuredClone(value)
-	} catch (error) {
-		throw new Error(storageValueNotCloneableMessage, { cause: error })
-	}
-}
-
-function normalizePageSize(pageSize: number | undefined) {
-	const requested =
-		typeof pageSize === 'number' && Number.isFinite(pageSize)
-			? Math.trunc(pageSize)
-			: defaultStorageExportPageSize
-	return Math.min(Math.max(requested, 1), maxStorageExportPageSize)
 }
 
 function normalizeSqlParams(params: Array<unknown> | undefined) {
@@ -450,7 +396,7 @@ const storageSqlReturningMutationVerbInWithPattern =
  * True when `query` can mutate while yielding rows (SQLite RETURNING on
  * INSERT / UPDATE / DELETE / REPLACE, including after a WITH clause).
  *
- * Used by {@link cursorToSqlResult} drainOverflow: only these statements must
+ * Used by native storage cursor draining: only these statements must
  * keep stepping past the row cap so the write finishes. Pure reads — including
  * `WITH … SELECT` sent with `writable: true` from packageStorage — stop early.
  */
@@ -518,221 +464,14 @@ async function withStorageEstimateReadTimeout<T>(
 	}
 }
 
-function cursorToSqlResult(
-	cursor: SqlStorageCursor<Record<string, StorageSqlValue>>,
-	options?: {
-		/**
-		 * When true, keep stepping after the row cap so statements that yield
-		 * rows while mutating (INSERT/UPDATE/DELETE … RETURNING) finish.
-		 * Read-only SELECT/EXPLAIN/PRAGMA can stop early — they do not write.
-		 */
-		drainOverflow?: boolean
-	},
-): StorageSqlResult {
-	const rows: Array<Record<string, StorageSqlValue>> = []
-	let truncated = false
-	for (const row of cursor) {
-		if (rows.length >= maxStorageSqlQueryRows) {
-			truncated = true
-			if (!options?.drainOverflow) {
-				break
-			}
-			continue
-		}
-		rows.push(row)
-	}
-	return {
-		columns: [...cursor.columnNames],
-		rows,
-		rowCount: rows.length,
-		rowsRead: cursor.rowsRead,
-		rowsWritten: cursor.rowsWritten,
-		truncated,
-	}
-}
-
-class StorageRunnerBase extends DurableObject<Env> {
-	async getRecoveryBookmark(input: {
-		timestampMs: number
-	}): Promise<{ bookmark: string }> {
-		return await getRecoveryBookmark(this.ctx, input, {
-			environment: this.env,
-		})
-	}
-
-	async restoreToBookmark(input: {
-		bookmark: string
-	}): Promise<{ undoBookmark: string }> {
-		return await restoreToBookmark(this.ctx, input, {
-			objectKind: 'storage-runner',
-			environment: this.env,
-		})
-	}
-
-	async getValue(input: { key: string }) {
-		const key = normalizeStorageKey(input.key)
-		return {
-			key,
-			value: readCloneableStorageValue(await this.ctx.storage.get(key)),
-		}
-	}
-
-	async setValue(input: {
-		key: string
-		value: unknown
-	}): Promise<StorageSetResult> {
-		const key = normalizeStorageKey(input.key)
-		assertCloneableStorageValue(input.value)
-		await this.ctx.storage.put(key, input.value)
-		return { ok: true, key }
-	}
-
-	async deleteValue(input: { key: string }): Promise<StorageDeleteResult> {
-		const key = normalizeStorageKey(input.key)
-		const deleted = await this.ctx.storage.delete(key)
-		return {
-			ok: true,
-			key,
-			deleted,
-		}
-	}
-
-	async clearStorage(): Promise<StorageClearResult> {
-		await this.ctx.storage.deleteAll()
-		return { ok: true }
-	}
-
-	async getEstimatedBytes(): Promise<StorageEstimateResult> {
-		return { estimatedBytes: this.ctx.storage.sql.databaseSize }
-	}
-
-	async listValues(input: {
-		prefix?: string | null
-		pageSize?: number
-		startAfter?: string | null
-	}): Promise<StorageListResult> {
-		const pageSize = normalizePageSize(input.pageSize)
-		const prefix = input.prefix?.trim() || undefined
-		const startAfter = input.startAfter?.trim() || undefined
-		const listedEntries = await this.ctx.storage.list({
-			...(prefix ? { prefix } : {}),
-			...(startAfter ? { startAfter } : {}),
-			limit: pageSize + 1,
-		})
-		const entries: Array<StorageEntry> = []
-		let nextStartAfter: string | null = null
-		let truncated = false
-		for (const [key, value] of listedEntries) {
-			if (entries.length === pageSize) {
-				truncated = true
-				break
-			}
-			entries.push({ key, value: readCloneableStorageValue(value) })
-			nextStartAfter = key
-		}
-		return {
-			entries,
-			estimatedBytes: this.ctx.storage.sql.databaseSize,
-			truncated,
-			nextStartAfter: truncated ? nextStartAfter : null,
-			pageSize,
-		}
-	}
-
-	async exportStorage(input: {
-		pageSize?: number
-		startAfter?: string | null
-	}) {
-		return await this.listValues({
-			pageSize: input.pageSize,
-			startAfter: input.startAfter,
-		})
-	}
-
-	/**
-	 * Paged restore counterpart of {@link exportStorage}.
-	 * See {@link applyImportStoragePage} for the replace protocol.
-	 */
-	async importStorage(input: {
-		mode: 'replace'
-		replacePage: 'first' | 'continue'
-		entries: Array<{ key: string; valueJson: string }>
-	}): Promise<{
-		ok: true
-		written: number
-		cleared: boolean
-	}> {
-		return await applyImportStoragePage(this.ctx.storage, input)
-	}
-
-	async sqlQuery(input: {
-		query: string
-		params?: Array<unknown>
-		writable?: boolean
-	}): Promise<StorageSqlResult> {
-		const query = assertStorageSqlAllowed(input.query, input.writable)
-		const params = normalizeSqlParams(input.params)
-		const cursor = this.ctx.storage.sql.exec<Record<string, StorageSqlValue>>(
-			query,
-			...params,
-		)
-		const drainOverflow =
-			Boolean(input.writable) && isStorageSqlReturningMutation(query)
-		return cursorToSqlResult(cursor, { drainOverflow })
-	}
-}
-
-export const StorageRunner = Sentry.instrumentDurableObjectWithSentry(
-	(env: Env) => buildSentryOptions(env),
-	StorageRunnerBase,
-)
-
 export function storageRunnerRpc(input: {
 	env: Env
 	userId: string
 	storageId: string
 }) {
-	const runner = createMeteredDurableObjectStub({
-		env: input.env,
-		userId: input.userId,
-		doClass: 'StorageRunner',
-		stub: input.env.STORAGE_RUNNER.get(
-			input.env.STORAGE_RUNNER.idFromName(
-				storageRunnerDurableObjectName(input.userId, input.storageId),
-			),
-		) as unknown as {
-			getValue: (payload: { key: string }) => Promise<{
-				key: string
-				value: unknown
-			}>
-			setValue: (payload: {
-				key: string
-				value: unknown
-			}) => Promise<StorageSetResult>
-			deleteValue: (payload: { key: string }) => Promise<StorageDeleteResult>
-			clearStorage: () => Promise<StorageClearResult>
-			getEstimatedBytes: () => Promise<StorageEstimateResult>
-			listValues: (payload: {
-				prefix?: string | null
-				pageSize?: number
-				startAfter?: string | null
-			}) => Promise<StorageListResult>
-			exportStorage: (payload: {
-				pageSize?: number
-				startAfter?: string | null
-			}) => Promise<StorageExportResult>
-			importStorage: (payload: {
-				mode: 'replace'
-				replacePage: 'first' | 'continue'
-				entries: Array<{ key: string; valueJson: string }>
-			}) => Promise<{ ok: true; written: number; cleared: boolean }>
-			sqlQuery: (payload: {
-				query: string
-				params?: Array<unknown>
-				writable?: boolean
-			}) => Promise<StorageSqlResult>
-		},
-	})
+	if (!input.env.STORAGE_CELLS)
+		throw new Error('Storage cells are not configured.')
+	const runner = input.env.STORAGE_CELLS.forBucket(input)
 
 	// Registration must never run on a path that executes after the owning
 	// user's D1 rows are removed. Account deletion clears StorageRunner DOs
@@ -784,20 +523,27 @@ export function storageRunnerRpc(input: {
 
 	return {
 		getValue: async (payload: { key: string }) => {
-			const result = await runner.getValue(payload)
+			const result = await runner.getValue({
+				key: normalizeStorageKey(payload.key),
+			})
 			recordRowsRead(1)
 			return result
 		},
 		setValue: async (payload: { key: string; value: unknown }) => {
 			assertCloneableStorageValue(payload.value)
 			registerOwnedBucket()
-			const result = await runner.setValue(payload)
+			const result = await runner.setValue({
+				...payload,
+				key: normalizeStorageKey(payload.key),
+			})
 			refreshOwnedBucketEstimate()
 			return result
 		},
 		deleteValue: async (payload: { key: string }) => {
 			registerOwnedBucket()
-			const result = await runner.deleteValue(payload)
+			const result = await runner.deleteValue({
+				key: normalizeStorageKey(payload.key),
+			})
 			refreshOwnedBucketEstimate()
 			return result
 		},
@@ -842,7 +588,11 @@ export function storageRunnerRpc(input: {
 			if (payload.writable) {
 				registerOwnedBucket()
 			}
-			const result = await runner.sqlQuery(payload)
+			const result = (await runner.sqlQuery({
+				...payload,
+				query: assertStorageSqlAllowed(payload.query, payload.writable),
+				params: normalizeSqlParams(payload.params),
+			})) as StorageSqlResult
 			if (mutating) {
 				refreshOwnedBucketEstimate()
 			}

@@ -1,3 +1,5 @@
+import { type SqlStatement } from '@kody-internal/shared/sql-database.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	chunkArray,
 	maxD1BoundParameters,
@@ -24,7 +26,7 @@ type SecretMetadataRow = {
 }
 
 export async function getSecretBucket(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: SecretScope
 	bindingKey: string
@@ -45,7 +47,7 @@ export async function getSecretBucket(input: {
 }
 
 export async function upsertSecretBucket(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<SecretBucketRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -75,7 +77,7 @@ export async function upsertSecretBucket(input: {
 }
 
 export async function getSecretEntry(input: {
-	db: D1Database
+	db: SqlDatabase
 	bucketId: string
 	name: string
 }): Promise<SecretEntryRow | null> {
@@ -92,12 +94,12 @@ export async function getSecretEntry(input: {
 }
 
 function prepareUpsertSecretEntryStatement(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<SecretEntryRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
 	}
-}): D1PreparedStatement {
+}): SqlStatement {
 	const now = new Date().toISOString()
 	return input.db
 		.prepare(
@@ -127,7 +129,7 @@ function prepareUpsertSecretEntryStatement(input: {
 }
 
 export async function upsertSecretEntry(input: {
-	db: D1Database
+	db: SqlDatabase
 	row: Omit<SecretEntryRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
@@ -142,7 +144,7 @@ export async function upsertSecretEntry(input: {
  * rotate OAuth refresh tokens must put the refresh-token write first).
  */
 export async function upsertSecretEntriesAtomically(input: {
-	db: D1Database
+	db: SqlDatabase
 	rows: Array<
 		Omit<SecretEntryRow, 'created_at' | 'updated_at'> & {
 			created_at?: string
@@ -159,14 +161,14 @@ export async function upsertSecretEntriesAtomically(input: {
 }
 
 function prepareUpdateApprovedUserSecretEntryForPackageStatement(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	name: string
 	description: string
 	encryptedValue: string
 	updatedAt: string
-}): D1PreparedStatement {
+}): SqlStatement {
 	return input.db
 		.prepare(
 			`UPDATE secret_entries
@@ -192,7 +194,7 @@ function prepareUpdateApprovedUserSecretEntryForPackageStatement(input: {
 }
 
 export async function updateApprovedUserSecretEntryForPackage(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	name: string
@@ -212,7 +214,7 @@ export async function updateApprovedUserSecretEntryForPackage(input: {
  * order of `updates` is preserved in the CASE bindings for determinism.
  */
 export async function updateApprovedUserSecretEntriesForPackageAtomically(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageId: string
 	updates: Array<{
@@ -301,7 +303,7 @@ export async function updateApprovedUserSecretEntriesForPackageAtomically(input:
 }
 
 export async function deleteSecretEntry(input: {
-	db: D1Database
+	db: SqlDatabase
 	bucketId: string
 	name: string
 }): Promise<boolean> {
@@ -313,7 +315,7 @@ export async function deleteSecretEntry(input: {
 }
 
 export async function listSecretBucketsByScope(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	scope: SecretScope
 	now?: string
@@ -333,7 +335,7 @@ export async function listSecretBucketsByScope(input: {
 }
 
 export async function listSecretMetadataForBucket(input: {
-	db: D1Database
+	db: SqlDatabase
 	bucket: SecretBucketRow
 }): Promise<Array<SecretMetadataRow>> {
 	const { results } = await input.db
@@ -354,7 +356,7 @@ export async function listSecretMetadataForBucket(input: {
 }
 
 export async function listUserScopeSecretMetadata(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	now?: string
 }): Promise<Array<SecretMetadataRow>> {
@@ -386,7 +388,7 @@ export type SecretLocationRow = {
  * runtime cannot see.
  */
 export async function listSecretLocationsByNameForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 	now?: string
@@ -416,7 +418,7 @@ export async function listSecretLocationsByNameForUser(input: {
 }
 
 export async function listPackageScopeSecretMetadata(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	packageIds: Array<string>
 	now?: string

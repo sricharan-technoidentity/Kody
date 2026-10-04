@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { createDynamoUserMeters } from '#worker/aws/dynamo-meters.ts'
 import {
 	type DailyEntitlementResource,
@@ -85,8 +86,8 @@ export function createPermissiveAccountWriteLeaseDbHooks() {
  * Patch `db.prepare` and restore it via `using` even when the body throws.
  */
 export function withPatchedDbPrepare(
-	db: D1Database,
-	patch: (originalPrepare: D1Database['prepare']) => D1Database['prepare'],
+	db: SqlDatabase,
+	patch: (originalPrepare: SqlDatabase['prepare']) => SqlDatabase['prepare'],
 ) {
 	const originalPrepare = db.prepare.bind(db)
 	db.prepare = patch(originalPrepare)

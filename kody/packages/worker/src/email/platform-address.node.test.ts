@@ -1,8 +1,7 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { expect, test } from 'vitest'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
-import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
 import {
 	buildPlatformEmailAddress,
 	getAcceptedSystemEmailDomains,
@@ -112,9 +111,9 @@ test('buildPlatformEmailAddress normalizes the username', () => {
 })
 
 test('resolveUserPlatformSender sends from an unreserved built-in username and blocks permanently reserved locals', async () => {
-	const sqlite = new DatabaseSync(':memory:')
-	const db = createD1FromSqlite(sqlite)
-	await ensureUsersTestSchema({ db, columns: ['email_verified_at'] })
+	const sqlite = await createTestPg()
+	const db = createPgDatabase({ connection: sqlite, role: 'kody_admin' })
+
 	const env = { APP_BASE_URL: 'https://kody.example.com' }
 
 	const blogEmail = 'blog-holder@example.com'

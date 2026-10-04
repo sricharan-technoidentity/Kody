@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import type * as sourceSafetyPolicyModule from '#worker/repo/source-safety-policy.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
@@ -107,7 +108,7 @@ function createDatabase(users: Array<Record<string, unknown>>) {
 				},
 			}
 		},
-	} as unknown as D1Database
+	} as unknown as SqlDatabase
 }
 
 function setupPersistenceMocks() {

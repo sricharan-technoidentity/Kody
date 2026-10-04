@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { toHex } from '@kody-internal/shared/hex.ts'
 import { routes } from '#universal/routes.ts'
 import { processCommunityIcon } from '#worker/community/community-icon.ts'
@@ -143,7 +144,7 @@ async function sha256Hex(bytes: Uint8Array) {
  * successful column update.
  */
 export async function setPlatformOauthAppLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	slug: string
 	sourceBytes: Uint8Array | null
@@ -302,7 +303,7 @@ export function servedFittedLogoFromBytes(input: {
  * the ingest pipeline started writing 256px WebP derivatives.
  */
 export async function loadFittedPlatformOauthAppLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	app: PlatformOauthApp
 }): Promise<ServedFittedLogo | null> {
@@ -353,7 +354,7 @@ export async function loadFittedPlatformOauthAppLogo(input: {
 }
 
 async function serveCurrentPlatformOauthAppLogo(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	app: PlatformOauthApp
 }): Promise<ServedFittedLogo | null> {

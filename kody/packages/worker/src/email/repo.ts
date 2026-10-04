@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	maxRestorableTextColumnBytes,
 	truncateToUtf8Bytes,
@@ -247,7 +248,7 @@ export function mapAttachmentRow(
 }
 
 export async function createEmailInbox(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 	description?: string | null
@@ -285,7 +286,7 @@ export async function createEmailInbox(input: {
 }
 
 export async function deleteEmailInboxAddressById(input: {
-	db: D1Database
+	db: SqlDatabase
 	addressId: string
 }) {
 	await input.db
@@ -295,7 +296,7 @@ export async function deleteEmailInboxAddressById(input: {
 }
 
 export async function createEmailInboxAddress(input: {
-	db: D1Database
+	db: SqlDatabase
 	inboxId: string
 	userId: string
 	address: string
@@ -336,7 +337,7 @@ export async function createEmailInboxAddress(input: {
 }
 
 export async function listEmailInboxesForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }) {
 	const result = await input.db
@@ -352,7 +353,7 @@ export async function listEmailInboxesForUser(input: {
 }
 
 export async function listEmailInboxAddressesForUser(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 }) {
 	const result = await input.db
@@ -373,7 +374,7 @@ export async function listEmailInboxAddressesForUser(input: {
  * held but disabled" instead of tripping the unique constraint.
  */
 export async function getEmailInboxAddressByAddress(input: {
-	db: D1Database
+	db: SqlDatabase
 	address: string
 }) {
 	const row = await input.db
@@ -389,7 +390,7 @@ export async function getEmailInboxAddressByAddress(input: {
 }
 
 export async function getEmailInboxById(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId?: string
 	id: string
 }) {
@@ -398,7 +399,7 @@ export async function getEmailInboxById(input: {
 			`SELECT *
 			FROM email_inboxes
 			WHERE id = ?
-				AND (? IS NULL OR user_id = ?)
+				AND (?::text IS NULL OR user_id = ?)
 			LIMIT 1`,
 		)
 		.bind(input.id, input.userId ?? null, input.userId ?? null)
@@ -407,7 +408,7 @@ export async function getEmailInboxById(input: {
 }
 
 export async function getEmailInboxByName(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	name: string
 }) {
@@ -440,7 +441,7 @@ function mapSenderIdentityRow(
 }
 
 async function getSenderIdentityByEmail(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	email: string
 }) {
@@ -464,7 +465,7 @@ async function getSenderIdentityByEmail(input: {
  * Race-tolerant with signup / first-inbound concurrency via ON CONFLICT.
  */
 export async function ensurePlatformSenderIdentity(input: {
-	db: D1Database
+	db: SqlDatabase
 	userId: string
 	email: string
 	domain: string

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import {
 	fetchFaviconBytes,
@@ -24,7 +25,7 @@ export function shouldFetchMcpServerFavicon(
 }
 
 export async function fillMcpServerFavicon(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'COMMUNITY_ASSETS' | 'IMAGES'>
 	userId: string
 	serverId: string
@@ -70,7 +71,7 @@ export async function fillMcpServerFavicon(input: {
 }
 
 export async function scheduleMcpServerFaviconFill(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'APP_DB' | 'COMMUNITY_ASSETS' | 'IMAGES'> | Pick<Env, 'APP_DB'>
 	userId: string
 	serverId: string
@@ -105,7 +106,7 @@ export async function scheduleMcpServerFaviconFill(input: {
 }
 
 export async function backfillMissingMcpServerFavicons(input: {
-	db: D1Database
+	db: SqlDatabase
 	env: Pick<Env, 'APP_DB' | 'COMMUNITY_ASSETS' | 'IMAGES'> | Pick<Env, 'APP_DB'>
 	userId: string
 	servers: Array<McpServerSettingMetadata>

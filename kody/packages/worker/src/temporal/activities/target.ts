@@ -1,4 +1,9 @@
-import { randomUUID } from 'node:crypto'
+import { createExecutorModuleSource } from '#mcp/executor.ts'
+import { createDynamicWorkerCompatibilityOptions } from '#worker/dynamic-worker-compatibility.ts'
+import { buildPackageStorageId } from '#worker/storage-ids.ts'
+import { randomUUID, createHash } from 'node:crypto'
+import { runnerSessionId } from '#worker/aws/agentcore-runner.ts'
+import { mintRunToken } from '#worker/runner/run-token.ts'
 import { ApplicationFailure } from '@temporalio/common'
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client'
 import { type AwsEnv } from '#worker/aws/env.ts'
@@ -11,12 +16,6 @@ import { type KodyActivities, type RunOutcome } from './types.ts'
 /** The `execute` result cap (bytes of UTF-8). */
 export const executeResultCapBytes = 100 * 1024
 
-/** Kept in the session for the Runner; ≥33 characters (AgentCore limit). */
-// ponytail: P6 replaces this with hash(stable_user_id + rotation epoch) in aws/agentcore-runner.ts.
-export function runnerSessionId(userId: string) {
-	return `${userId}:runner`.padEnd(33, '0')
-}
-
 function capUtf8(value: string, maxBytes: number) {
 	const bytes = new TextEncoder().encode(value)
 	if (bytes.length <= maxBytes) return value
@@ -28,7 +27,10 @@ function capUtf8(value: string, maxBytes: number) {
  * (meters, Runner, run records, code interpreter, S3, search index).
  * Acceptance tests run every workflow against these.
  */
-export function createTargetActivities(env: AwsEnv) {
+export function createTargetActivities(
+	env: AwsEnv,
+	options: { now?: () => number } = {},
+) {
 	async function consumeMeter(input: { userId: string; counter: string }) {
 		try {
 			env.kv.update(
@@ -55,14 +57,55 @@ export function createTargetActivities(env: AwsEnv) {
 		payload: Record<string, unknown>
 		maxOutputBytes?: number
 	}): Promise<RunOutcome> {
-		let response: { output?: unknown; error?: unknown }
+		let response: { output?: unknown; result?: unknown; error?: unknown }
 		try {
+			const graph =
+				input.surface === 'execute'
+					? {
+							...createDynamicWorkerCompatibilityOptions(),
+							mainModule: 'executor.js',
+							providers: [],
+							method: 'evaluate',
+							invocation: {},
+							modules: {
+								'executor.js': createExecutorModuleSource({
+									code: String(input.payload.code),
+									providers: [],
+									shadowGlobalThis: true,
+									timeoutMs: 60_000,
+								}),
+							},
+						}
+					: input.payload
+			const bytes = new TextEncoder().encode(JSON.stringify(graph))
+			const bundleKey = `${input.userId}/runner-inputs/${createHash('sha256').update(bytes).digest('hex')}.json`
+			env.objects.put(bundleKey, bytes)
+			const packageId =
+				typeof input.payload.packageId === 'string'
+					? input.payload.packageId
+					: null
+			const runToken = await mintRunToken(env.RUN_TOKEN_SIGNING_KEY, {
+				userId: input.userId,
+				runId: input.runId,
+				expiresAt: Date.now() + 90_000,
+				retriever: input.surface === 'retriever',
+				provenance: [
+					{
+						moduleId: 'main',
+						packageId,
+						storageId: packageId
+							? buildPackageStorageId(packageId)
+							: `exec:${input.runId}`,
+					},
+				],
+			})
 			response = (await env.runner.invoke({
 				runtimeSessionId: runnerSessionId(input.userId),
 				payload: {
 					runId: input.runId,
 					surface: input.surface,
-					...input.payload,
+					bundleKey,
+					runToken,
 				},
 			})) as typeof response
 		} catch (error) {
@@ -78,7 +121,7 @@ export function createTargetActivities(env: AwsEnv) {
 		const output =
 			typeof response.output === 'string'
 				? response.output
-				: JSON.stringify(response.output ?? null)
+				: JSON.stringify(response.output ?? response.result ?? null)
 		return {
 			runId: input.runId,
 			ok: true,
@@ -175,7 +218,7 @@ export function createTargetActivities(env: AwsEnv) {
 		},
 
 		async admitWebhookDelivery(input) {
-			const now = Date.now()
+			const now = (options.now ?? Date.now)()
 			const minute = Math.floor(now / 60_000)
 			try {
 				env.kv.update(

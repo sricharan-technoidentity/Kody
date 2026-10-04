@@ -15,7 +15,7 @@
  * total, and objects sharing an isolate are still billed per object.
  */
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
-import { runD1WithRetry } from '#worker/d1-retry.ts'
+import { runSqlWithRetry } from '#worker/sql-retry.ts'
 import { repoSessionIdFromStorageBucketId } from '#worker/storage-buckets/service.ts'
 import {
 	mailboxDurableObjectName,
@@ -108,17 +108,17 @@ export async function buildDurableObjectOwnerMap(
 ): Promise<Map<string, DurableObjectOwner>> {
 	const owners = new Map<string, DurableObjectOwner>()
 	const [users, buckets, apps] = await Promise.all([
-		runD1WithRetry(() =>
+		runSqlWithRetry(() =>
 			env.APP_DB.prepare(
 				`SELECT stable_user_id FROM users WHERE deleting_at IS NULL`,
 			).all<{ stable_user_id: string }>(),
 		),
-		runD1WithRetry(() =>
+		runSqlWithRetry(() =>
 			env.APP_DB.prepare(
 				`SELECT user_id, storage_id, kind FROM user_storage_buckets`,
 			).all<{ user_id: string; storage_id: string; kind: string }>(),
 		),
-		runD1WithRetry(() =>
+		runSqlWithRetry(() =>
 			env.APP_DB.prepare(
 				`SELECT user_id, id FROM saved_packages WHERE has_app = 1`,
 			).all<{ user_id: string; id: string }>(),
@@ -424,7 +424,7 @@ export async function runDurableObjectDurationAttribution(input: {
 		]
 		// One batch per day: D1 applies it atomically, so a day is never left
 		// half-deleted.
-		await runD1WithRetry(() => input.env.APP_DB.batch(statements))
+		await runSqlWithRetry(() => input.env.APP_DB.batch(statements))
 		results.push({
 			day,
 			totalActiveMs: attribution.totalActiveMs,

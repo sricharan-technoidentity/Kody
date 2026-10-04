@@ -1,8 +1,5 @@
 import { expect, test, vi } from 'vitest'
-import {
-	d1LockRetryBaseDelayMs,
-	d1LockRetryMaxAttempts,
-} from '#worker/d1-retry.ts'
+import { sqlRetryBaseDelayMs, sqlRetryMaxAttempts } from '#worker/sql-retry.ts'
 import { type McpMemoryRow } from './types.ts'
 
 const mockModule = vi.hoisted(() => ({
@@ -119,14 +116,14 @@ test('memory reindex retries transient D1 export page errors then surfaces exhau
 	mockModule.embedTextsForVectorize.mockResolvedValue([[0.1]])
 	mockModule.listMemoriesPage
 		.mockRejectedValueOnce(
-			new Error('D1_ERROR: Currently processing a long-running export.'),
+			new Error('could not serialize access due to concurrent update.'),
 		)
 		.mockResolvedValueOnce([buildMemoryRow('memory-1')])
 
 	vi.useFakeTimers()
 	try {
 		const recoverPromise = reindexMemoryVectors({ APP_DB: {} } as Env)
-		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
+		await vi.advanceTimersByTimeAsync(sqlRetryBaseDelayMs)
 		await expect(recoverPromise).resolves.toEqual({
 			upserted: 1,
 			complete: true,
@@ -142,7 +139,7 @@ test('memory reindex retries transient D1 export page errors then surfaces exhau
 	mockModule.getCapabilityVectorIndex.mockReturnValue({ upsert: vi.fn() })
 	mockModule.isCapabilitySearchOffline.mockReturnValue(false)
 	mockModule.listMemoriesPage.mockRejectedValue(
-		new Error('D1_ERROR: Currently processing a long-running export.'),
+		new Error('could not serialize access due to concurrent update.'),
 	)
 
 	vi.useFakeTimers()
@@ -151,11 +148,11 @@ test('memory reindex retries transient D1 export page errors then surfaces exhau
 		// Attach before advancing timers so the rejection is not unhandled.
 		// oxlint-disable-next-line vitest/valid-expect
 		const expectation = expect(exhaustedPromise).rejects.toThrow(
-			'Currently processing a long-running export',
+			'could not serialize access due to concurrent update',
 		)
-		for (let attempt = 1; attempt < d1LockRetryMaxAttempts; attempt++) {
+		for (let attempt = 1; attempt < sqlRetryMaxAttempts; attempt++) {
 			await vi.advanceTimersByTimeAsync(
-				d1LockRetryBaseDelayMs * 2 ** (attempt - 1),
+				sqlRetryBaseDelayMs * 2 ** (attempt - 1),
 			)
 		}
 		await expectation
@@ -163,7 +160,5 @@ test('memory reindex retries transient D1 export page errors then surfaces exhau
 		vi.useRealTimers()
 	}
 
-	expect(mockModule.listMemoriesPage).toHaveBeenCalledTimes(
-		d1LockRetryMaxAttempts,
-	)
+	expect(mockModule.listMemoriesPage).toHaveBeenCalledTimes(sqlRetryMaxAttempts)
 })

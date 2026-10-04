@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createAccountAvatarApiPostHandler } from './account-avatar.ts'
 
@@ -55,7 +56,7 @@ const profilePayload = {
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		COMMUNITY_ASSETS: {} as R2Bucket,
 	} as Env
 }

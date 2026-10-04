@@ -2,7 +2,7 @@ import { expect, test, vi } from 'vitest'
 
 const createExecuteExecutorMock = vi.hoisted(() => vi.fn())
 
-vi.mock('cloudflare:workers', () => ({
+vi.mock('#worker/front-door/host-context.ts', () => ({
 	exports: {
 		KodyFetchGateway: () => ({}),
 	},

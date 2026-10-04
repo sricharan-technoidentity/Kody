@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import {
 	deleteArchivedJobArtifact,
 	listAllArchivedJobArtifactStorageOwnerRows,
@@ -157,7 +158,7 @@ export type JobsStore = {
 }
 
 /** D1-backed {@link JobsStore} used by the jobs worker (and dev/test fallback). */
-export function createD1JobsStore(db: D1Database): JobsStore {
+export function createD1JobsStore(db: SqlDatabase): JobsStore {
 	return {
 		insertJob: async (input) => {
 			await insertJobRow({ db, ...input })

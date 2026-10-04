@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import {
 	buildStatusIncidentIdempotencyKey,
@@ -51,7 +52,7 @@ test('status incident dispatch fans metadata-only events through admin package f
 	)
 
 	const env = {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 		APP_BASE_URL: 'https://heykody.dev',
 	}

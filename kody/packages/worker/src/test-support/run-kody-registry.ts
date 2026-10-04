@@ -1,4 +1,5 @@
-import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-catalog.ts'
 import {
 	createInMemoryUserMeterEnv,
 	createPermissiveAccountWriteLeaseDbHooks,
@@ -492,7 +493,7 @@ export function createJobMutationDatabase(input: {
 				},
 			}
 		},
-	} as D1Database
+	} as SqlDatabase
 }
 
 export function createJobMutationKv() {
@@ -514,12 +515,12 @@ export function createRunKodyRegistryTestEnv(
 	meter?: ReturnType<typeof createInMemoryUserMeterEnv>,
 ) {
 	const userMeter = meter ?? createInMemoryUserMeterEnv()
-	const appDb = bindings.APP_DB as D1Database | undefined
+	const appDb = bindings.APP_DB as SqlDatabase | undefined
 	const repoSessionIndex = createInMemoryRepoSessionIndexEnv(appDb)
 	return {
 		...bindings,
 		USER_METERS: userMeter.env.USER_METERS,
-		REPO_SESSION_INDEX: repoSessionIndex.REPO_SESSION_INDEX,
+		REPO_SESSION_CATALOG: repoSessionIndex.REPO_SESSION_CATALOG,
 	} as Env
 }
 

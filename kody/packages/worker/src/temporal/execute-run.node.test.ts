@@ -1,12 +1,18 @@
 import { expect, test } from 'vitest'
 import { createTargetTestEnv } from '../test-support/aws/target-test-env.ts'
+import { runnerSessionId } from '#worker/aws/agentcore-runner.ts'
+import { verifyRunToken } from '#worker/runner/run-token.ts'
 import { executeRun } from './execute-run.ts'
 
 test('execute is idempotent, consumes a finite meter and records one bounded Runner result', async () => {
 	const userId = 'a'.repeat(64)
 	const { env, close } = await createTargetTestEnv({ userId })
 	try {
-		env.kv.put({ pk: `${userId}:meters`, sk: 'execute', remaining: 1 })
+		env.kv.put({
+			pk: `${userId}:meters`,
+			sk: 'execute_calls_per_day',
+			remaining: 1,
+		})
 		env.runner.respondWith({ output: 'ok', sandboxComputeMs: 5 })
 		const input = { env, userId, requestId: 'req-1', code: 'return 1' }
 		const first = await executeRun(input)
@@ -18,15 +24,25 @@ test('execute is idempotent, consumes a finite meter and records one bounded Run
 			100 * 1024,
 		)
 		expect(env.runner.invocations).toHaveLength(1)
-		expect(env.runner.invocations[0]?.runtimeSessionId).toContain(userId)
+		expect(env.runner.invocations[0]?.runtimeSessionId).toBe(
+			runnerSessionId(userId),
+		)
 		expect(env.runner.invocations[0]?.payload).toMatchObject({
 			runToken: expect.any(String),
+			bundleKey: expect.stringContaining(`${userId}/runner-inputs/`),
 		})
-		expect(env.kv.get(`${userId}:meters`, 'execute')?.remaining).toBe(0)
+		const token = (env.runner.invocations[0]?.payload as { runToken: string })
+			.runToken
+		expect(
+			await verifyRunToken(env.RUN_TOKEN_SIGNING_KEY, token),
+		).toMatchObject({ userId, runId: first.runId, retriever: false })
+		expect(
+			env.kv.get(`${userId}:meters`, 'execute_calls_per_day')?.remaining,
+		).toBe(0)
 		await expect(executeRun({ ...input, requestId: 'req-2' })).rejects.toThrow(
 			'entitlement',
 		)
-		env.kv.update(`${userId}:meters`, 'execute', (item) => ({
+		env.kv.update(`${userId}:meters`, 'execute_calls_per_day', (item) => ({
 			...item!,
 			remaining: 1,
 		}))
@@ -41,4 +57,65 @@ test('execute is idempotent, consumes a finite meter and records one bounded Run
 	} finally {
 		await close()
 	}
-})
+}, 60_000)
+
+test(
+	'ExecuteRun activity resolves its S3 graph inside real workerd',
+	{ timeout: 60_000 },
+	async () => {
+		const { startWorkerdRunner } = await import('#worker/runner/supervisor.ts')
+		const { createServer } = await import('node:http')
+		const { env, close } = await createTargetTestEnv({ userId: 'alice' })
+		const endpoints = createServer((_request, response) => {
+			response.writeHead(403)
+			response.end('No capabilities registered')
+		})
+		await new Promise<void>((resolve) =>
+			endpoints.listen(0, '127.0.0.1', resolve),
+		)
+		try {
+			const address = endpoints.address() as { port: number }
+			await using runner = await startWorkerdRunner({
+				brokerUrl: `http://127.0.0.1:${address.port}`,
+				egressUrl: `http://127.0.0.1:${address.port}`,
+				async readObject(key) {
+					const object = env.objects.get(key)
+					if (!object) throw new Error('Missing S3 bundle')
+					return JSON.parse(new TextDecoder().decode(object))
+				},
+			})
+			env.runner.invoke = (input) =>
+				runner.invoke(
+					input.payload as {
+						bundleKey: string
+						runToken: string
+						runId: string
+					},
+				)
+			env.kv.put({
+				pk: 'alice:meters',
+				sk: 'execute_calls_per_day',
+				remaining: 1,
+			})
+			const result = await executeRun({
+				env,
+				userId: 'alice',
+				requestId: 'native',
+				code: 'return 1 + 1',
+			})
+			expect(result.result).toBe('2')
+			expect(env.kv.query('alice:runs')).toHaveLength(1)
+			await expect(
+				executeRun({
+					env,
+					userId: 'bob',
+					requestId: 'owner',
+					code: 'return 3',
+				}),
+			).rejects.toThrow('owner')
+		} finally {
+			await close()
+			await new Promise<void>((resolve) => endpoints.close(() => resolve()))
+		}
+	},
+)

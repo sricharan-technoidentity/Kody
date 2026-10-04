@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 vi.unmock('#worker/audit-log.ts')
 
 import { createHash } from 'node:crypto'
@@ -133,7 +134,7 @@ async function createAppDb() {
 
 function createPurgeEnv(app: AppDb, auditDb: PgDatabase, db = app.db) {
 	const env = {
-		...createSuccessfulDeletionEnv(db as unknown as D1Database),
+		...createSuccessfulDeletionEnv(db as unknown as SqlDatabase),
 		AUDIT_DB: auditDb,
 	} as unknown as Env
 	return {
@@ -143,7 +144,7 @@ function createPurgeEnv(app: AppDb, auditDb: PgDatabase, db = app.db) {
 				...env,
 				APP_DB: app.purgerFor(stableUserId),
 				JOBS: createJobsBindingStub(
-					app.writerFor(stableUserId) as unknown as D1Database,
+					app.writerFor(stableUserId) as unknown as SqlDatabase,
 				),
 			}) as unknown as Env,
 	}

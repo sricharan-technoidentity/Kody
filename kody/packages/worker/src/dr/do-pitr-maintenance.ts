@@ -66,10 +66,14 @@ function pitrRpcForTarget(
 ): DurableObjectPitrRpc {
 	switch (target.kind) {
 		case 'mailbox':
+			if (!env.MAILBOX)
+				throw new Error('Legacy mailbox PITR is unavailable on Node.')
 			return env.MAILBOX.get(
 				env.MAILBOX.idFromName(mailboxDurableObjectName(target.userId)),
 			) as unknown as DurableObjectPitrRpc
 		case 'storage-runner': {
+			if (!env.STORAGE_RUNNER)
+				throw new Error('Legacy storage PITR is unavailable on Node.')
 			if (!target.storageId) {
 				throw new Error('storageId is required for storage-runner.')
 			}

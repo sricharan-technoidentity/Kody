@@ -16,3 +16,14 @@ export { PackageInvocation } from './package-invocation.ts'
 export { PublishPackage } from './publish-package.ts'
 export { QueueMessage } from './queue-message.ts'
 export { WebhookDelivery } from './webhook-delivery.ts'
+
+export { RepoSession } from './repo-session.ts'
+
+export { DeliveryEvents } from './delivery-events.ts'
+export { MailboxMaintenance } from './mailbox-maintenance.ts'
+
+export {
+	FrontDoorMutation,
+	FeatureFlagExposure,
+	FrontDoorMcpOperation,
+} from './front-door-mutation.ts'

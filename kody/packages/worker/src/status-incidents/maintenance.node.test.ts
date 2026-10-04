@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { buildStatusIncidentOpenedEvent } from './subscription-event.ts'
 
@@ -42,7 +43,7 @@ test('status incident maintenance route authenticates, validates, and fans out i
 	}
 	const env = {
 		STATUS_INCIDENT_EVENT_SECRET: 'shared-secret',
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		BUNDLE_ARTIFACTS_KV: {} as KVNamespace,
 		APP_BASE_URL: 'https://heykody.dev',
 	} as Env

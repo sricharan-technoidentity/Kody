@@ -1,7 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
+import { createTestPg } from '#worker/test-support/aws/test-pg.ts'
+import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { expect, test } from 'vitest'
-import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
-import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
 import {
 	createPackageCodemodRun,
 	getPackageCodemodRunById,
@@ -13,14 +12,17 @@ import {
 	updatePackageCodemodRunStatus,
 } from './ledger.ts'
 
-function createLedgerDb() {
-	const sqlite = new DatabaseSync(':memory:')
-	applyAllMigrations(sqlite, new URL('../../migrations/', import.meta.url))
-	return { sqlite, db: createD1FromSqlite(sqlite) }
+async function createLedgerDb() {
+	const sqlite = await createTestPg()
+
+	return {
+		sqlite,
+		db: createPgDatabase({ connection: sqlite, role: 'kody_admin' }),
+	}
 }
 
 test('package codemod ledger pages runs and items with filters', async () => {
-	const { db } = createLedgerDb()
+	const { db } = await createLedgerDb()
 
 	await createPackageCodemodRun(db, {
 		id: 'run-a',
@@ -168,7 +170,7 @@ test('package codemod ledger pages runs and items with filters', async () => {
 })
 
 test('package codemod ledger marks only stale running runs abandoned', async () => {
-	const { db } = createLedgerDb()
+	const { db } = await createLedgerDb()
 
 	await createPackageCodemodRun(db, {
 		id: 'run-stale-running',

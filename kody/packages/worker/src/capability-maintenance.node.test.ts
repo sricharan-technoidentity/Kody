@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { expect, test, vi } from 'vitest'
 
 const mockModule = vi.hoisted(() => ({
@@ -321,13 +320,6 @@ test('capability reindex can limit work to builtin capabilities for production d
 		ok: false,
 		error: 'cursor.phase must be one of the requested phases.',
 	})
-
-	const workflow = readFileSync(
-		new URL('../../../.github/workflows/deploy.yml', import.meta.url),
-		'utf8',
-	)
-	expect(workflow).toContain('payload=\'{"phases":["capabilities"]}\'')
-	expect(workflow).toContain('{phases:["capabilities"],cursor:$cursor}')
 })
 
 test('capability reindex force ignores fingerprints and rejects a non-boolean force', async () => {

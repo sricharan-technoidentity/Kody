@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 import { createProfileAvatarHandler } from './profile-avatar.ts'
 
@@ -46,7 +47,7 @@ const publicRow = {
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		COMMUNITY_ASSETS: {} as R2Bucket,
 	} as Env
 }

@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 export const maxUserMcpOauthClients = 10
 export const maxRedirectUris = 8
 export const maxClientLabelLength = 80
@@ -119,7 +120,7 @@ export function getOAuthClientHelpers(env: Env) {
 }
 
 export async function listUserMcpOauthClients(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<Array<UserMcpOauthClientListItem>> {
 	const result = await db
@@ -135,7 +136,7 @@ export async function listUserMcpOauthClients(
 }
 
 export async function listActiveUserMcpOauthClientIds(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<Array<string>> {
 	const result = await db
@@ -148,7 +149,7 @@ export async function listActiveUserMcpOauthClientIds(
 }
 
 export async function listOwnedUserMcpOauthClientIds(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 ): Promise<Array<string>> {
 	const result = await db
@@ -159,7 +160,7 @@ export async function listOwnedUserMcpOauthClientIds(
 }
 
 export async function userOwnsMcpOauthClient(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 	clientId: string,
 ): Promise<boolean> {
@@ -175,7 +176,7 @@ export async function userOwnsMcpOauthClient(
 }
 
 export async function markUserMcpOauthClientRevokedByClientId(
-	db: D1Database,
+	db: SqlDatabase,
 	userId: number,
 	clientId: string,
 ): Promise<void> {
@@ -190,7 +191,7 @@ export async function markUserMcpOauthClientRevokedByClientId(
 }
 
 async function discardCreatedProviderClient(input: {
-	db: D1Database
+	db: SqlDatabase
 	helpers: McpOauthClientHelpers
 	userId: number
 	clientId: string
@@ -221,7 +222,7 @@ async function discardCreatedProviderClient(input: {
 }
 
 export async function mintUserMcpOauthClient(input: {
-	db: D1Database
+	db: SqlDatabase
 	helpers: McpOauthClientHelpers
 	userId: number
 	label: string
@@ -340,7 +341,7 @@ export async function mintUserMcpOauthClient(input: {
 }
 
 export async function revokeUserMcpOauthClient(input: {
-	db: D1Database
+	db: SqlDatabase
 	helpers: McpOauthClientHelpers
 	userId: number
 	id: string
@@ -373,7 +374,7 @@ export async function revokeUserMcpOauthClient(input: {
 }
 
 export async function deleteOwnedMcpOauthClients(input: {
-	db: D1Database
+	db: SqlDatabase
 	helpers: Pick<McpOauthClientHelpers, 'deleteClient'>
 	userId: number
 	warnings: Array<string>

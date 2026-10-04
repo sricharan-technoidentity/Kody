@@ -1,8 +1,8 @@
 import { expect, test, vi } from 'vitest'
 import {
-	d1LockRetryBaseDelayMs,
-	d1LongRunningExportMessage,
-} from '#worker/d1-retry.ts'
+	sqlRetryBaseDelayMs,
+	sqlSerializationFailureMessage,
+} from '#worker/sql-retry.ts'
 
 const mockModule = vi.hoisted(() => ({
 	getEntitySourceById: vi.fn(),
@@ -317,9 +317,7 @@ test('loadPackageManifestBySourceId reads manifest-only sources with D1 retry, a
 		},
 	}
 	mockModule.getEntitySourceById
-		.mockRejectedValueOnce(
-			new Error(`D1_ERROR: ${d1LongRunningExportMessage}.`),
-		)
+		.mockRejectedValueOnce(new Error(`${sqlSerializationFailureMessage}.`))
 		.mockResolvedValueOnce(source)
 	mockModule.loadPublishedEntityManifest.mockResolvedValue({
 		source,
@@ -338,7 +336,7 @@ test('loadPackageManifestBySourceId reads manifest-only sources with D1 retry, a
 			userId: 'user-1',
 			sourceId: 'source-retry-export',
 		})
-		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
+		await vi.advanceTimersByTimeAsync(sqlRetryBaseDelayMs)
 		await expect(resultPromise).resolves.toMatchObject({
 			manifest: {
 				name: '@kentcdodds/example-package',

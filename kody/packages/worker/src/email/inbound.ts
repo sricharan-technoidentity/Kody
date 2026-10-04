@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
 import { findPublicUserIdentityByUsername } from '#worker/identity/user-lookup.ts'
 import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
@@ -105,7 +106,7 @@ function estimateInboundEmailStorageBytes(input: {
 }
 
 async function parseAndStoreInboundEmail(input: {
-	db: D1Database
+	db: SqlDatabase
 	blobs: R2Bucket
 	delivery: InboundDelivery
 	parsed: Awaited<ReturnType<typeof parseForwardableEmailRawMime>>
@@ -160,7 +161,7 @@ export async function handleInboundEmail(
 		| 'LEGACY_SYSTEM_EMAIL_DOMAINS'
 		| 'USAGE_EVENTS'
 		| 'USER_METERS'
-		| 'MAILBOX'
+		| 'MAILBOX_STORE'
 		| 'EMAIL_EVENTS'
 	> &
 		EmailReportingEnv &

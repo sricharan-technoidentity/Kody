@@ -1,3 +1,4 @@
+import { type SqlDatabase } from '@kody-internal/shared/sql-database.ts'
 import { expect, test, vi } from 'vitest'
 
 const adHocJob = {
@@ -177,7 +178,7 @@ const { createAccountJobsApiHandler } = await import('./account-jobs.ts')
 
 function createEnv() {
 	return {
-		APP_DB: {} as D1Database,
+		APP_DB: {} as SqlDatabase,
 		COOKIE_SECRET: 'secret',
 	} as Env
 }
