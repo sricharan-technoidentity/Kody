@@ -1,6 +1,6 @@
 /**
  * Remix subpaths the platform supplies to package code as the vendored
- * `remix` package (see `tools/build-worker-bundler-modules.ts`, which
+ * `remix` package (see `tools/build-platform-modules.ts`, which
  * pre-bundles them into `package-app-remix.mjs`, and
  * `#worker/package-runtime/package-app-remix.ts`, which injects them into
  * every package bundle as `node_modules/remix/*`).

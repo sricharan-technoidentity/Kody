@@ -6,7 +6,7 @@ import {
 	createPublishedPackagePromiseCache,
 } from '#worker/package-registry/published-package-cache.ts'
 import { type WorkerLoaderModules } from '#worker/worker-loader-types.ts'
-import { importWorkerBundler } from '#worker/worker-bundler-modules.ts'
+import { importPackageBuildTools } from '#worker/package-build-modules.ts'
 import { type RuntimeBundle } from './runtime-bundle-types.ts'
 import {
 	createRelativeImportSpecifier,
@@ -111,7 +111,7 @@ async function createWorkerBundle(input: {
 }) {
 	// Keep the experimental bundler out of the Worker's top-level deploy graph.
 	const { createWorker } =
-		input.env.RUNNER_BUNDLER ?? (await importWorkerBundler())
+		input.env.RUNNER_BUNDLER ?? (await importPackageBuildTools())
 	// Optional convenience: every package bundle can import `remix/<subpath>`
 	// from the platform's vendored copy. JSX comes from the package
 	// tsconfig when present; otherwise esbuild defaults.
@@ -150,6 +150,7 @@ async function createModuleBundleCacheKey(input: {
 	)
 	return JSON.stringify([
 		'module-bundle',
+		'kody-deno-v1',
 		input.userId,
 		input.entryPoint,
 		filesDigest,
@@ -403,7 +404,7 @@ export async function buildKodyAppBundle(input: {
 	}
 
 	return await packageAppBundleCache.getOrCreate({
-		cacheKey,
+		cacheKey: JSON.stringify(['kody-deno-v1', cacheKey]),
 		create: buildBundle,
 	})
 }

@@ -2,9 +2,9 @@
 
 Start with the [root README](../../README.md) and [local demo](../poc/demo.md).
 Use Node 26+, install with hooks disabled, then run `npm run dev` or
-`npm run demo`. The same Node/Temporal/native workerd bootstrap supports tests
-and the demo. No `.env`, cloud resources, production exports or real credentials
-are needed.
+`npm run demo`. The same Node/Temporal/Deno bootstrap supports tests and the
+demo. No `.env`, cloud resources, production exports or real credentials are
+needed.
 
 See [local development](./setup/local-development.md),
 [checks](./setup/checks.md), [POC architecture](../poc/architecture.md), and

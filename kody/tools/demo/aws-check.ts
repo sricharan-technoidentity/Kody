@@ -1,18 +1,18 @@
 import { format } from 'oxfmt'
 import formatterConfig from '#oxfmt.config.ts'
 import assert from 'node:assert/strict'
-import { readFile, writeFile } from 'node:fs/promises'
+import { writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { createS3Objects } from '#worker/aws/s3-objects.ts'
 import { runLogObjectKey } from '#worker/aws/dynamo-runs.ts'
 import { createKmsEnvelope } from '#worker/aws/kms-envelope.ts'
-import { createAgentCoreRunner } from '#worker/aws/agentcore-runner.ts'
 import { createAgentCoreTokenVault } from '#worker/aws/agentcore-identity.ts'
 import { createBedrockEmbeddings } from '#worker/aws/bedrock-embeddings.ts'
 import { createSesMail } from '#worker/aws/ses-mail.ts'
 import { provePostgres } from './aws-postgres.ts'
 import { proveDynamo } from './aws-dynamo.ts'
 import { proveInterpreter } from './aws-interpreter.ts'
+import { proveRuntime } from './aws-runtime.ts'
 import {
 	readAwsConfig,
 	PendingProof,
@@ -78,26 +78,7 @@ export async function runAwsProofs(
 				otherOwnerRejected: true,
 			}
 		},
-		async runtime(c) {
-			pending(c.runtime, 'AgentCore Runtime')
-			if (!c.runtime.compatibleWorkerdHost)
-				throw new PendingProof(
-					'Existing runtime must use the compatible workerd host; deployment remains external.',
-				)
-			const payload = JSON.parse(
-				await readFile(c.runtime.invocationFile, 'utf8'),
-			)
-			const result = await createAgentCoreRunner({
-				region: c.region,
-				runtimeArn: c.runtime.arn,
-			}).invoke({ runtimeSessionId: c.runtime.sessionId, payload })
-			assert.deepEqual(result, c.runtime.expectedResult)
-			return {
-				resource: c.runtime.arn,
-				referencedGraphExecuted: true,
-				expectedResultMatched: true,
-			}
-		},
+		runtime: proveRuntime,
 		interpreter: proveInterpreter,
 		async identity(c) {
 			pending(c.identity, 'authorized Identity connection')

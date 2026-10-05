@@ -12,6 +12,7 @@ import { suppressThirdPartySourcemapWarnings } from '#tools/vite-suppress-source
 export async function startLocalPoc(input: {
 	port: number
 	uiPort?: number
+	runnerBackend?: Parameters<typeof createFrontDoorEnv>[0]['runnerBackend']
 	decorateActivities?: Parameters<
 		typeof createFrontDoorEnv
 	>[0]['decorateActivities']
@@ -74,6 +75,7 @@ export async function startLocalPoc(input: {
 		const env = await createFrontDoorTestEnv({
 			handler,
 			origin,
+			runnerBackend: input.runnerBackend,
 			sourceFixture: fixture,
 			decorateActivities: input.decorateActivities,
 			temporalServer: temporalServerOptions({

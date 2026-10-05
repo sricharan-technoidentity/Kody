@@ -29,7 +29,7 @@ const inertHandler = {
  * served from the sessionful `MCP` Durable Object on kody-platform therefore
  * build the same `OAuthHelpersImpl` through the library's `getOAuthApi` with
  * the shared options. The library loads lazily from the pre-bundled module
- * (`tools/build-worker-bundler-modules.ts`): a plain dynamic
+ * (`tools/build-platform-modules.ts`): a plain dynamic
  * `import('@cloudflare/workers-oauth-provider')` is inlined into Wrangler's
  * main module, which would put it on the platform/runtime startup path.
  * The generated specifier stays behind `import()`, so Vite origin emits a

@@ -12,14 +12,11 @@ test('missing consent/runtime prerequisites are pending and other unconfigured s
 		region: 'us-east-1',
 		runtime: {
 			arn: 'unused',
-			compatibleWorkerdHost: false,
-			invocationFile: 'unused',
-			sessionId: 'unused',
-			expectedResult: null,
+			protocol: 'old-runner',
 		},
 	})
 	expect(report.every((proof) => proof.status === 'pending')).toBe(true)
 	expect(
 		report.find((proof) => proof.service === 'runtime')?.evidence,
-	).toContain('compatible workerd host')
+	).toContain('kody-deno-v1')
 })

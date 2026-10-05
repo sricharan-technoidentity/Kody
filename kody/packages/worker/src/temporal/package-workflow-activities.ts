@@ -11,6 +11,7 @@ import {
 import { applyDynamicWorkflowSentryScope } from '#worker/package-runtime/package-workflows-sentry.ts'
 import { getAccountEnv } from '#worker/identity/token-owner-db.ts'
 import { recordUsage } from '#worker/usage/record-usage.ts'
+import { RunnerInvocationError } from '#worker/runner/contract.ts'
 
 export type PackageWorkflowActivityInput = {
 	id: string
@@ -56,6 +57,11 @@ export function createPackageWorkflowActivities(
 					? await executor.invokePackageWorkflowExport(payload, input.id)
 					: await executor.invokeInlineWorkflowCode(payload, input.id)
 			} catch (error) {
+				if (error instanceof RunnerInvocationError && error.dispatched)
+					throw ApplicationFailure.nonRetryable(
+						`Runner failed after dispatch; execution may have completed: ${error.message}`,
+						'RunnerDispatchUncertain',
+					)
 				if (isAccountSuspendedError(error)) {
 					throw ApplicationFailure.nonRetryable(
 						getErrorMessage(error),

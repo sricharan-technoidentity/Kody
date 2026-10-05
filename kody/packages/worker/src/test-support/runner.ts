@@ -3,7 +3,7 @@ import { createTestRunRecords } from './run-records.ts'
 import { createDynamoInvocationLedger } from '#worker/aws/dynamo-invocation-ledger.ts'
 import { createRunState } from '#worker/temporal/run-state.ts'
 import { createMailboxService } from '#worker/email/mailbox-service.ts'
-import { createServer } from 'node:http'
+import { startFrontDoorServer } from '#worker/front-door/server.ts'
 import { createPgDatabase } from '#worker/aws/pg-database.ts'
 import { createDynamoKv } from '#worker/aws/dynamo-kv.ts'
 import { createFakeDynamo } from './aws/fake-dynamo.ts'
@@ -13,17 +13,18 @@ import { createInMemoryUserMeterEnv } from './user-meter.ts'
 import { createBrokerHandler } from '#worker/broker/handler.ts'
 import { createEgressHandler } from '#worker/egress/egress-proxy.ts'
 import { createRunnerLoader } from '#worker/runner/loader.ts'
-import {
-	startWorkerdRunner,
-	type RunnerGraph,
-} from '#worker/runner/supervisor.ts'
+import { type RunnerGraph } from '#worker/runner/contract.ts'
 import { mintRunToken } from '#worker/runner/run-token.ts'
-import { runnerSessionId } from '#worker/aws/agentcore-runner.ts'
+import {
+	runnerSessionId,
+	type RunnerInvocation,
+} from '#worker/runner/contract.ts'
 
-/** Native package compatibility harness: real workerd, broker, PostgreSQL and SQLite. */
+/** Package compatibility harness: Deno, broker, PostgreSQL and SQLite. */
 export async function createRunnerTestEnv(
 	options: {
 		restrictAdmin?: boolean
+		backend?: 'deno'
 		temporalServer?: NonNullable<
 			Parameters<typeof createTargetTestEnv>[0]
 		>['temporalServer']
@@ -49,59 +50,64 @@ export async function createRunnerTestEnv(
 				return { ...target.env, userId, APP_DB: database.forUser(userId).db }
 			},
 		})
-		const server = createServer(async (request, response) => {
-			try {
-				const bytes: Array<Buffer> = []
-				for await (const byte of request) bytes.push(Buffer.from(byte))
-				const headers = new Headers()
-				for (const [key, value] of Object.entries(request.headers))
-					if (value)
-						headers.set(key, Array.isArray(value) ? value.join(',') : value)
-				const isBroker = request.headers.host === 'broker.internal'
-				const body = ['GET', 'HEAD'].includes(request.method ?? '')
-					? undefined
-					: Buffer.concat(bytes)
-				const url = isBroker
-					? 'https://broker.internal/'
-					: `http://${request.headers.host}${request.url}`
-				const result = await (isBroker ? broker : egress).fetch(
-					new Request(url, { method: request.method, headers, body }),
-				)
-				response.writeHead(result.status, Object.fromEntries(result.headers))
-				response.end(Buffer.from(await result.arrayBuffer()))
-			} catch (error) {
-				response.writeHead(500)
-				response.end(String(error))
-			}
-		})
-		stack.defer(
-			() => new Promise<void>((resolve) => server.close(() => resolve())),
-		)
-		await new Promise<void>((resolve, reject) => {
-			server.once('error', reject)
-			server.listen(0, '127.0.0.1', resolve)
-		})
-		const address = server.address() as { port: number }
 		const graphs = new Map<string, RunnerGraph>()
-		const runner = await startWorkerdRunner({
-			brokerUrl: `http://127.0.0.1:${address.port}`,
-			egressUrl: `http://127.0.0.1:${address.port}`,
-			async readObject(key) {
-				const graph = graphs.get(key)
-				if (!graph) throw new Error('Missing S3 graph.')
-				return graph
-			},
-		})
-		stack.use(runner)
+		async function readObject(key: string) {
+			const graph = graphs.get(key)
+			if (!graph) throw new Error('Missing S3 graph.')
+			return graph
+		}
+		const runner = await (async () => {
+			const { startRunnerHost } =
+				await import('../../../../tools/demo/runner-host.ts')
+			const { createWorker } =
+				await import('../../../../tools/demo/package-build-tools.ts')
+			const brokerServer = stack.use(
+				await startFrontDoorServer({ fetch: broker.fetch }),
+			)
+			const egressServer = stack.use(
+				await startFrontDoorServer({ fetch: egress.fetch }),
+			)
+			const host = await startRunnerHost({
+				port: 0,
+				host: '127.0.0.1',
+				allowLocalHttp: true,
+				brokerUrl: brokerServer.origin,
+				egressUrl: egressServer.origin,
+				readObject,
+			})
+			stack.defer(host.close)
+			return {
+				createWorker,
+				async invoke(invocation: RunnerInvocation, signal?: AbortSignal) {
+					const response = await fetch(`${host.origin}/invocations`, {
+						method: 'POST',
+						signal,
+						headers: {
+							'x-amzn-bedrock-agentcore-runtime-session-id': runnerSessionId(
+								invocation.bundleKey.split('/')[0]!,
+								invocation.runId,
+							),
+						},
+						body: JSON.stringify(invocation),
+					})
+					if (!response.ok)
+						throw new Error(
+							`Runner failed: ${response.status} ${await response.text()}`,
+						)
+					return response.json() as Promise<unknown>
+				},
+			}
+		})()
 		stack.defer(() => target.stopTemporal())
 		const loader = createRunnerLoader({
+			idempotency: target.env.TEMPORAL.idempotency,
 			async putObject(key, graph) {
 				graphs.set(key, graph)
 			},
-			async prepare(context) {
+			async prepare(context, logicalRunId, timeoutMs) {
 				if (!context.userId)
 					throw new Error('Compatibility Runner requires a caller owner.')
-				const runId = crypto.randomUUID()
+				const runId = logicalRunId ?? crypto.randomUUID()
 				const storageId =
 					context.storageContext?.storageId ??
 					(context.storageContext?.packageId
@@ -126,11 +132,11 @@ export async function createRunnerTestEnv(
 					})
 				return {
 					runId,
-					runtimeSessionId: await runnerSessionId(context.userId),
+					runtimeSessionId: runnerSessionId(context.userId, runId),
 					runToken: await mintRunToken(signingKey, {
 						userId: context.userId,
 						runId,
-						expiresAt: Date.now() + 90000,
+						expiresAt: Date.now() + Math.max(90000, timeoutMs ?? 90000),
 						retriever: context.allowOutboundFetch === false,
 						provenance: [
 							{
@@ -154,14 +160,20 @@ export async function createRunnerTestEnv(
 			},
 			register(run) {
 				const unbroker = broker.register(run)
-				const unegress = egress.register(run)
+				let unegress: () => void
+				try {
+					unegress = egress.register(run)
+				} catch (error) {
+					unbroker()
+					throw error
+				}
 				return () => {
 					unbroker()
 					unegress()
 				}
 			},
 			async invoke(invocation) {
-				return runner.invoke(invocation.payload)
+				return runner.invoke(invocation.payload, invocation.signal)
 			},
 		})
 		const artifacts = createDynamoKv({

@@ -15,11 +15,11 @@ npm run build
 CI=1 npm run validate
 ```
 
-Demo checks cover ten migration acceptance files, native workerd compatibility,
-standalone Temporal workflow/activity execution and launcher/scenario checks.
-The retained browser journeys are smoke, signup/verify/connect, and account
-navigation, plus combined demo coverage. Other legacy browser/Workers suites are
-excluded and do not count as POC evidence.
+Demo checks cover ten migration acceptance files, Deno compatibility, standalone
+Temporal workflow/activity execution and launcher/scenario checks. The retained
+browser journeys are smoke, signup/verify/connect, and account navigation, plus
+combined demo coverage. Other legacy browser/Workers suites are excluded and do
+not count as POC evidence.
 
 Live AWS checks are separately selected with `npm run demo:aws:check` and
 explicit sandbox configuration. They are never part of the local validation

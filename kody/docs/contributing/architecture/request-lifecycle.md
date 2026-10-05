@@ -25,8 +25,8 @@ MCP keeps the two-tool surface `search` / `execute`, with OAuth bearer
 authentication and the existing capability catalog. Existing OAuth-provider and
 workerd API shapes remain compatibility dependencies. Search uses
 PostgreSQL/pgvector; local embeddings are deterministic fakes. Execute and
-published package apps load unchanged module graphs into native workerd. Signed
-run provenance controls broker capabilities and storage; outbound fetch uses the
+published package apps load unchanged module graphs into Deno. Signed run
+provenance controls broker capabilities and storage; outbound fetch uses the
 restricted egress proxy and host-side secret/token resolution. Sandbox code
 receives neither database nor AWS credentials.
 

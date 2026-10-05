@@ -64,7 +64,7 @@ vi.mock('#worker/storage-runner.ts', async (importOriginal) =>
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).storageRunnerMock((await importOriginal()) as Record<string, unknown>),
 )
-vi.mock('#worker/worker-bundler-modules.ts', async () =>
+vi.mock('#worker/package-build-modules.ts', async () =>
 	(
 		await import('#worker/test-support/jobs-service-mocks.ts')
 	).workerBundlerModulesMock(),

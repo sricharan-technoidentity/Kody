@@ -7,13 +7,22 @@ deferred. The next work is the
 
 ## Accepted compatibility decisions
 
+Amendment (2026-10-05): the
+[package execution replacement plan](./package-execution-aws-temporal-plan.md)
+supersedes the workerd decision with Deno sandboxes and an esbuild/TypeScript
+toolchain. The local default uses Deno after retained compatibility and native
+comparison checks; workerd/worker-bundler execution dependencies are retired. No
+production switch or package republishing is authorized by this amendment. See
+[replacement evidence](../docs/poc/package-execution.md) for local checks and
+the separately pending live AWS proofs.
+
 Keep the two-package workspace, owner isolation, existing package behavior,
 published URLs and grants, and the MCP `search` / `execute` surface. Run
-published module graphs in native workerd behind the authenticated capability
-broker and restricted egress proxy. Fakes alone do not establish package
-compatibility. App requests and retrievers may invoke the Runner directly.
-Durable mutations, webhooks, package jobs, repo sessions and mail use Temporal
-activities/workflows. One local namespace hosts the four task queues;
+published module graphs in fresh Deno sandboxes behind the authenticated
+capability broker and restricted egress proxy. Fakes alone do not establish
+package compatibility. App requests and retrievers may invoke the Runner
+directly. Durable mutations, webhooks, package jobs, repo sessions and mail use
+Temporal activities/workflows. One local namespace hosts the four task queues;
 cross-namespace Nexus and cloud transport/security configuration remain future
 work.
 

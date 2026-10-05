@@ -3,9 +3,9 @@ import { createServer } from 'node:http'
 import { createRuntimeModuleSource } from '#worker/package-runtime/runtime-source-modules.ts'
 import { createExecutorModuleSource } from '#mcp/executor.ts'
 import { createDynamicWorkerCompatibilityOptions } from '#worker/dynamic-worker-compatibility.ts'
-import { startWorkerdRunner } from './supervisor.ts'
+import { createDenoFixtureRunner } from '../test-support/deno-fixture-runner.ts'
 
-test('real workerd Worker Loader runs unchanged module sources, brokers capabilities and proxies native fetch', async () => {
+test('real Deno runs unchanged module sources, brokers capabilities and proxies fetch', async () => {
 	const calls: Array<{ token: string; body: unknown }> = []
 	const egress: Array<string> = []
 	const endpoint = createServer(async (request, response) => {
@@ -41,7 +41,7 @@ test('real workerd Worker Loader runs unchanged module sources, brokers capabili
 				'import { kody } from "kody:runtime"; export default async function () { return kody.storageSql({sql:"SELECT 7"}); }',
 		},
 	}
-	await using runner = await startWorkerdRunner({
+	await using runner = await createDenoFixtureRunner({
 		brokerUrl: `http://127.0.0.1:${address.port}/broker`,
 		egressUrl: `http://127.0.0.1:${address.port}/egress`,
 		readObject: async () => graph,
@@ -116,8 +116,11 @@ test(
 		)
 		try {
 			const address = endpoint.address() as { port: number }
-			const objects = new Map<string, import('./supervisor.ts').RunnerGraph>()
-			await using runner = await startWorkerdRunner({
+			const objects = new Map<
+				string,
+				import('../test-support/deno-fixture-runner.ts').RunnerGraph
+			>()
+			await using runner = await createDenoFixtureRunner({
 				brokerUrl: `http://127.0.0.1:${address.port}`,
 				egressUrl: `http://127.0.0.1:${address.port}`,
 				async readObject(key) {

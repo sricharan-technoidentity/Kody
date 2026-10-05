@@ -16,57 +16,18 @@ import { packageAppRemixSubpaths } from '#worker/package-runtime/package-app-rem
 import { isExecutedDirectly } from './node-runtime.ts'
 
 /**
- * Pre-bundles `@cloudflare/worker-bundler` (and its `/typescript` entry),
- * `@cloudflare/workers-oauth-provider`, and the platform-supplied `remix`
- * package for package apps into standalone ES modules under
- * `packages/worker/.generated/`.
- *
- * Why: wrangler inlines every dynamic `import()` into the single main worker
- * module, so the ~3.6 MB runtime bundler/TypeScript compiler was parsed and
- * evaluated on every isolate cold start even though only repo checks use it.
- * With `find_additional_modules` enabled in `wrangler.jsonc`, these generated
- * `.mjs` files upload as separate external modules that only load when the
- * repo-check paths actually import them. The rules name each file, so a stray
- * sibling under `node_modules/.kody-generated/` is not uploaded (Friction
- * #2504). The OAuth provider rides the same lane: origin's `fetch` wrapper
- * imports it statically, but
- * `#worker/oauth-helpers.ts` needs it only when `OAUTH_PROVIDER` is absent
- * (scheduled purge lane, the `MCP` Durable Object on kody-platform), and the
- * platform/runtime startup entries must not carry it.
- *
- * Wrangler discovers additional ES modules by walking the entry directory
- * (`packages/worker/src`) and file-watches every discovered module. Overlay-FS
- * create events on those files retrigger `wrangler dev` (Friction #1789).
- * Artifacts live in `packages/worker/.generated/` and are hardlinked under
- * `src/node_modules/.kody-generated/` so the walk finds them, the directory
- * watcher skips `node_modules`, and `tools/wrangler-filter-kody-generated-watch.ts`
- * clears that collector's esbuild `watchFiles` / `watchDirs`. workerd still
- * requires CompiledWasm for `esbuild.wasm` (`WebAssembly.compile` is
- * disallowed).
- *
- * `package-app-remix.mjs` is different in kind: it is not code the Worker
- * runs but a file set the Worker hands to the runtime bundler. Package apps
- * import `remix/<subpath>` and the platform, not npm, supplies Remix — the
- * same `remix` version the origin UI ships, so Kody's Remix conventions
- * carry over to hosted mini-apps without a 48-package npm install per
- * publish. Every Workers-safe subpath is bundled once with esbuild code
- * splitting so `remix/ui` and `remix/ui/server` share a single component
- * runtime instance, and the result is serialized as
- * `{ "package.json": …, "dist/router.js": …, "dist/chunks/…": … }` that
- * `#worker/package-runtime/package-app-remix.ts` mounts at
- * `node_modules/remix/` in the bundler's virtual file system.
- *
- * The output is deterministic for a given installed package version, so a
- * stamp file makes re-runs a no-op (important: this runs in front of every
- * wrangler dev/build/deploy and once per vitest run).
+ * Retained OAuth/code utilities and vendored Remix assets, not sandbox execution.
+ * Remix subpaths use shared chunks so browser and server components have one
+ * runtime instance. Version/lockfile stamps avoid rebuilding unchanged assets.
+ * Keep the generated import locations stable for existing application modules.
  */
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
-export const workerBundlerGeneratedDir = path.join(
+export const platformGeneratedDir = path.join(
 	repoRoot,
 	'packages/worker/.generated',
 )
-export const workerBundlerWranglerDir = path.join(
+export const platformVisibleDir = path.join(
 	repoRoot,
 	'packages/worker/src/node_modules/.kody-generated',
 )
@@ -84,20 +45,14 @@ export const leftoverSrcGeneratedBundlerNames = [
 export const packageAppRemixModuleName = 'package-app-remix.mjs'
 const generatedArtifactNames = [
 	'codemode-host.mjs',
-	'worker-bundler.mjs',
-	'worker-bundler-typescript.mjs',
 	'oauth-provider.mjs',
 	packageAppRemixModuleName,
-	'esbuild.wasm',
 ] as const
 const leftoverWranglerVisibleNames = [
 	...generatedArtifactNames,
 	'esbuild-wasm.mjs',
 ] as const
-const stampPath = path.join(
-	workerBundlerGeneratedDir,
-	'worker-bundler.stamp.json',
-)
+const stampPath = path.join(platformGeneratedDir, 'platform-modules.stamp.json')
 
 const nodeBuiltins = new Set([
 	'assert',
@@ -125,18 +80,11 @@ const nodeBuiltins = new Set([
 ])
 
 /**
- * Keeps `./esbuild.wasm` imports external verbatim (wrangler uploads the wasm
- * as a sibling CompiledWasm module), leaves `cloudflare:*` runtime modules to
- * workerd, and normalizes Node builtins to their `node:`-prefixed form so
- * `nodejs_compat` resolves them at runtime.
+ * Preserve compatibility imports and normalize builtins for Node/Deno.
  */
 const externalsPlugin: Plugin = {
-	name: 'worker-bundler-externals',
+	name: 'platform-externals',
 	setup(pluginBuild) {
-		pluginBuild.onResolve({ filter: /\.wasm$/ }, (args) => ({
-			path: args.path,
-			external: true,
-		}))
 		pluginBuild.onResolve({ filter: /^cloudflare:/ }, (args) => ({
 			path: args.path,
 			external: true,
@@ -160,13 +108,6 @@ async function readStamp(): Promise<string | null> {
 	}
 }
 
-function resolveWorkerBundlerDistDir() {
-	// Resolved by direct path: the package is ESM-only so CJS
-	// `require.resolve` cannot see its exports, and `import.meta.resolve` is
-	// unsupported inside vitest's module runner (this runs as global setup).
-	return path.join(repoRoot, 'node_modules', '@cloudflare', 'worker-bundler')
-}
-
 function resolveOAuthProviderPackageDir() {
 	return path.join(
 		repoRoot,
@@ -181,14 +122,9 @@ function resolveRemixPackageDir() {
 }
 
 async function buildStampContent(
-	bundlerPackageDir: string,
 	oauthProviderPackageDir: string,
 	remixPackageDir: string,
 ) {
-	const bundlerPackageJson = await readFile(
-		path.join(bundlerPackageDir, 'package.json'),
-		'utf8',
-	)
 	const oauthProviderPackageJson = await readFile(
 		path.join(oauthProviderPackageDir, 'package.json'),
 		'utf8',
@@ -214,7 +150,6 @@ async function buildStampContent(
 		) as { version: string }
 	).version
 	const hash = createHash('sha256')
-		.update(bundlerPackageJson)
 		.update(oauthProviderPackageJson)
 		.update(remixPackageJson)
 		.update(packageAppRemixSubpaths.join('\n'))
@@ -298,13 +233,13 @@ async function buildPackageAppRemixModule(remixPackageDir: string) {
 		files[`dist/${relative}`] = output.text
 	}
 	const serialized = [
-		'// Generated by tools/build-worker-bundler-modules.ts; do not edit.',
+		'// Generated by tools/build-platform-modules.ts; do not edit.',
 		`export const remixVersion = ${JSON.stringify(remixPackage.version)};`,
 		`export const files = ${JSON.stringify(files)};`,
 		'',
 	].join('\n')
 	await writeFile(
-		path.join(workerBundlerGeneratedDir, packageAppRemixModuleName),
+		path.join(platformGeneratedDir, packageAppRemixModuleName),
 		serialized,
 	)
 }
@@ -321,30 +256,32 @@ async function pathExists(filePath: string) {
 async function wranglerVisibleModulesExist() {
 	const results = await Promise.all(
 		generatedArtifactNames.map((name) =>
-			pathExists(path.join(workerBundlerWranglerDir, name)),
+			pathExists(path.join(platformVisibleDir, name)),
 		),
 	)
 	return results.every(Boolean)
 }
 
 export async function removeLeftoverSrcGeneratedBundlerArtifacts() {
-	await Promise.all(
-		leftoverSrcGeneratedBundlerNames.map((name) =>
-			rm(path.join(leftoverSrcGeneratedDir, name), { force: true }),
-		),
-	)
+	for (const directory of [
+		leftoverSrcGeneratedDir,
+		platformGeneratedDir,
+		platformVisibleDir,
+	])
+		for (const name of leftoverSrcGeneratedBundlerNames)
+			await rm(path.join(directory, name), { force: true })
 }
 
 async function materializeWranglerVisibleModules() {
-	await mkdir(workerBundlerWranglerDir, { recursive: true })
+	await mkdir(platformVisibleDir, { recursive: true })
 	await Promise.all(
 		leftoverWranglerVisibleNames.map((name) =>
-			rm(path.join(workerBundlerWranglerDir, name), { force: true }),
+			rm(path.join(platformVisibleDir, name), { force: true }),
 		),
 	)
 	for (const name of generatedArtifactNames) {
-		const from = path.join(workerBundlerGeneratedDir, name)
-		const to = path.join(workerBundlerWranglerDir, name)
+		const from = path.join(platformGeneratedDir, name)
+		const to = path.join(platformVisibleDir, name)
 		try {
 			await link(from, to)
 		} catch {
@@ -354,17 +291,15 @@ async function materializeWranglerVisibleModules() {
 }
 
 /** Idempotent: skips the esbuild work when the stamp is already current. */
-export async function ensureWorkerBundlerModules() {
-	const bundlerPackageDir = resolveWorkerBundlerDistDir()
+export async function ensurePlatformModules() {
 	const oauthProviderPackageDir = resolveOAuthProviderPackageDir()
 	const remixPackageDir = resolveRemixPackageDir()
 	const stampContent = await buildStampContent(
-		bundlerPackageDir,
 		oauthProviderPackageDir,
 		remixPackageDir,
 	)
 	await removeLeftoverSrcGeneratedBundlerArtifacts()
-	await rm(path.join(workerBundlerGeneratedDir, 'esbuild-wasm.mjs'), {
+	await rm(path.join(platformGeneratedDir, 'esbuild-wasm.mjs'), {
 		force: true,
 	})
 	if (
@@ -374,14 +309,9 @@ export async function ensureWorkerBundlerModules() {
 		return
 	}
 
-	await mkdir(workerBundlerGeneratedDir, { recursive: true })
+	await mkdir(platformGeneratedDir, { recursive: true })
 	await build({
 		entryPoints: {
-			'worker-bundler': path.join(bundlerPackageDir, 'dist/index.js'),
-			'worker-bundler-typescript': path.join(
-				bundlerPackageDir,
-				'dist/typescript.js',
-			),
 			'oauth-provider': path.join(
 				oauthProviderPackageDir,
 				'dist/oauth-provider.js',
@@ -392,7 +322,7 @@ export async function ensureWorkerBundlerModules() {
 		platform: 'browser',
 		target: 'es2022',
 		minify: true,
-		outdir: workerBundlerGeneratedDir,
+		outdir: platformGeneratedDir,
 		outExtension: { '.js': '.mjs' },
 		plugins: [externalsPlugin],
 		logLevel: 'silent',
@@ -409,7 +339,7 @@ export async function ensureWorkerBundlerModules() {
 		platform: 'node',
 		target: 'es2022',
 		minify: true,
-		outfile: path.join(workerBundlerGeneratedDir, 'codemode-host.mjs'),
+		outfile: path.join(platformGeneratedDir, 'codemode-host.mjs'),
 		plugins: [
 			{
 				name: 'codemode-host',
@@ -426,13 +356,9 @@ export async function ensureWorkerBundlerModules() {
 			},
 		],
 	})
-	await copyFile(
-		path.join(bundlerPackageDir, 'dist/esbuild.wasm'),
-		path.join(workerBundlerGeneratedDir, 'esbuild.wasm'),
-	)
 	await buildPackageAppRemixModule(remixPackageDir)
 	await writeFile(stampPath, stampContent)
-	await rm(path.join(workerBundlerGeneratedDir, 'esbuild-wasm.mjs'), {
+	await rm(path.join(platformGeneratedDir, 'esbuild-wasm.mjs'), {
 		force: true,
 	})
 	await materializeWranglerVisibleModules()
@@ -440,7 +366,7 @@ export async function ensureWorkerBundlerModules() {
 }
 
 async function fsyncGeneratedDir() {
-	const handle = await open(workerBundlerGeneratedDir, 'r')
+	const handle = await open(platformGeneratedDir, 'r')
 	try {
 		await handle.sync()
 	} finally {
@@ -449,5 +375,5 @@ async function fsyncGeneratedDir() {
 }
 
 if (isExecutedDirectly(import.meta.url)) {
-	await ensureWorkerBundlerModules()
+	await ensurePlatformModules()
 }

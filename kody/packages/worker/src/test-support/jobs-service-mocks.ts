@@ -172,7 +172,7 @@ export function resetJobServiceMocks() {
 
 export function workerBundlerModulesMock() {
 	return {
-		importWorkerBundler: async () => ({
+		importPackageBuildTools: async () => ({
 			createFileSystemSnapshot: vi.fn(
 				async (files: AsyncIterable<[string, string]>) => {
 					const snapshotFiles = new Map<string, string>()
@@ -206,7 +206,7 @@ export function workerBundlerModulesMock() {
 				},
 			),
 		}),
-		importWorkerBundlerTypescript: async () => ({
+		importPackageTypescript: async () => ({
 			createTypescriptLanguageService: vi.fn(async () => ({
 				fileSystem: {
 					read: vi.fn(() => null),

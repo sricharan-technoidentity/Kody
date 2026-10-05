@@ -1,4 +1,5 @@
 import { isAppEdgeRequest } from './app-edge.ts'
+import { isCliClientIdMetadataRequest } from '#worker/cli-client-metadata.ts'
 import {
 	usesWriterAfterMutation,
 	setWriterAfterMutation,
@@ -41,7 +42,7 @@ export function isHttpMutation(request: Request) {
 	return (
 		!['GET', 'HEAD', 'OPTIONS'].includes(request.method) ||
 		mutatingGetPaths.has(path) ||
-		path.startsWith('/oauth/') ||
+		(path.startsWith('/oauth/') && !isCliClientIdMetadataRequest(path)) ||
 		/^\/auth\/[^/]+\/callback$/.test(path)
 	)
 }

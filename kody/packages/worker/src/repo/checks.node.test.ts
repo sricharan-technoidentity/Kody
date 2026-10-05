@@ -8,12 +8,12 @@ const mockModule = vi.hoisted(() => ({
 	buildKodyModuleBundle: vi.fn(),
 }))
 
-vi.mock('#worker/worker-bundler-modules.ts', () => ({
-	importWorkerBundler: async () => ({
+vi.mock('#worker/package-build-modules.ts', () => ({
+	importPackageBuildTools: async () => ({
 		createFileSystemSnapshot: (...args: Array<unknown>) =>
 			mockModule.createFileSystemSnapshot(...args),
 	}),
-	importWorkerBundlerTypescript: async () => ({
+	importPackageTypescript: async () => ({
 		createTypescriptLanguageService: (...args: Array<unknown>) =>
 			mockModule.createTypescriptLanguageService(...args),
 	}),

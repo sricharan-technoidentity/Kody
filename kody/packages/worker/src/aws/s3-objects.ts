@@ -27,7 +27,10 @@ export type S3Output = Partial<
 		DeleteObjectsCommandOutput
 >
 
-export type S3Send = (command: S3Command) => Promise<S3Output>
+export type S3Send = (
+	command: S3Command,
+	options?: { abortSignal?: AbortSignal },
+) => Promise<S3Output>
 
 type HttpMetadata = {
 	contentType?: string
@@ -75,7 +78,8 @@ export function createS3Objects(input: {
 }) {
 	const client = input.send ? undefined : new S3Client({ region: input.region })
 	const send: S3Send =
-		input.send ?? ((command) => client!.send(command as GetObjectCommand))
+		input.send ??
+		((command, options) => client!.send(command as GetObjectCommand, options))
 	const Bucket = input.bucket
 	return {
 		async head(key: string) {
@@ -89,17 +93,35 @@ export function createS3Objects(input: {
 				throw error
 			}
 		},
-		async get(key: string) {
+		async get(
+			key: string,
+			options?: { signal?: AbortSignal; maxBytes?: number },
+		) {
 			let output: S3Output
 			try {
-				output = await send(new GetObjectCommand({ Bucket, Key: key }))
+				const command = new GetObjectCommand({ Bucket, Key: key })
+				output = options?.signal
+					? await send(command, { abortSignal: options.signal })
+					: await send(command)
 			} catch (error) {
 				if (isNotFound(error)) return null
 				throw error
 			}
 			// ponytail: buffers the whole object in memory; stream `output.Body` instead if objects outgrow a few MB.
+			if (
+				options?.maxBytes !== undefined &&
+				(output.ContentLength === undefined ||
+					output.ContentLength > options.maxBytes)
+			)
+				throw new Error('S3 object exceeds the bounded read limit.')
 			const bytes =
 				(await output.Body?.transformToByteArray()) ?? new Uint8Array()
+			options?.signal?.throwIfAborted()
+			if (
+				options?.maxBytes !== undefined &&
+				bytes.byteLength > options.maxBytes
+			)
+				throw new Error('S3 object exceeds the bounded read limit.')
 			return {
 				...objectHead(key, output, bytes.byteLength),
 				get body() {

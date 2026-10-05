@@ -26,10 +26,13 @@ import getPort from 'get-port'
 import { startFrontDoorServer } from '#worker/front-door/server.ts'
 import { createArtifactsMswHandlers } from './artifacts-msw-handlers.ts'
 
-/** The POC's real Node/Temporal/workerd transport, with injected AWS service fakes. */
+/** The POC's real Node/Temporal/package transport, with injected AWS service fakes. */
 export async function createFrontDoorTestEnv(input: {
 	handler: FetchHandler
 	origin: string
+	runnerBackend?: NonNullable<
+		Parameters<typeof createRunnerTestEnv>[0]
+	>['backend']
 	publicDirectory?: string
 	temporalServer?: NonNullable<
 		Parameters<typeof createRunnerTestEnv>[0]
@@ -43,6 +46,7 @@ export async function createFrontDoorTestEnv(input: {
 	try {
 		const runner = await createRunnerTestEnv({
 			restrictAdmin: true,
+			backend: input.runnerBackend,
 			temporalServer: input.temporalServer,
 		})
 		stack.defer(() => runner.close())

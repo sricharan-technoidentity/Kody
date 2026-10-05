@@ -44,7 +44,7 @@
     "test:node": "node tools/run-nx.ts run worker:test-node",
     "test:push": "CI=1 npm run test:node",
     "inspect": "npx -y @mcpjam/inspector inspector",
-    "prevalidate": "node tools/build-worker-bundler-modules.ts && node tools/build-guide-catalog-modules.ts",
+    "prevalidate": "node tools/build-platform-modules.ts && node tools/build-guide-catalog-modules.ts",
     "validate": "concurrently -n format,lint,typecheck,node,primitives,migrations,docs-temporal,docs-decisions,mermaid,slop-ratchet,knip,audit,lockfile,cloudflare \"npm run format:check\" \"npm run lint\" \"npm run typecheck\" \"npm run test:node\" \"npm run primitives:check\" \"npm run migrations:check\" \"npm run docs:check-temporal\" \"npm run docs:check-decisions\" \"npm run mermaid:check\" \"npm run slop-ratchet:check\" \"npm run knip\" \"npm run audit:prod\" \"npm run lockfile:check\" \"npm run cloudflare:check\"",
     "validate:fix": "npm run format && npm run lint:fix",
     "test:e2e:ensure": "node tools/ensure-playwright-browser.ts",
@@ -103,8 +103,7 @@
     "set-cookie-parser": "^3.1.2",
     "typescript": "^6.0.3",
     "vite": "^8.2.2",
-    "vitest": "^4.1.11",
-    "workerd": "^1.20260815.1"
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -130,7 +129,6 @@
     "msw": true,
     "nx": true,
     "sharp": true,
-    "unrs-resolver": true,
-    "workerd": true
+    "unrs-resolver": true
   }
 }

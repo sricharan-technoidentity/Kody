@@ -1,10 +1,10 @@
 /**
  * Lazy access to the platform-supplied `remix` file set for package bundles
  * (see `#worker/package-runtime/package-app-remix.ts`), pre-bundled by
- * `tools/build-worker-bundler-modules.ts` into `packages/worker/.generated/`
+ * `tools/build-platform-modules.ts` into `packages/worker/.generated/`
  * and hardlinked under `./node_modules/.kody-generated/`.
  *
- * Same deferred lane as `#worker/worker-bundler-modules.ts`, and for the same
+ * Same deferred lane as `#worker/package-build-modules.ts`, and for the same
  * reason: the ~0.5 MB of serialized Remix modules must only load when a
  * package bundle is actually built, never on isolate cold start. The relative
  * `./node_modules/.kody-generated/` specifier is what the

@@ -30,6 +30,7 @@ function installQuietRuntime() {
 	runtimeInstalled = true
 	try {
 		Runtime.install({
+			shutdownSignals: [],
 			logger: {
 				log() {},
 				trace() {},

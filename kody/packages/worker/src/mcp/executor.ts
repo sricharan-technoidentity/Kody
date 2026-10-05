@@ -241,6 +241,7 @@ type DynamicWorkerEntrypoint = {
 	evaluate(
 		dispatchers: Record<string, ToolDispatcher>,
 		invocation?: DynamicWorkerEvaluateInvocation,
+		signal?: AbortSignal,
 	): Promise<{
 		result: unknown
 		error?: string
@@ -648,6 +649,7 @@ function createStableDynamicWorkerExecutor(input: DynamicWorkerExecutorInput) {
 				allowOutboundFetch: input.gatewayProps.allowOutboundFetch !== false,
 			})
 			const workerOptions = {
+				timeoutMs: input.timeout,
 				...createDynamicWorkerCompatibilityOptions(),
 				mainModule: dynamicWorkerMainModule,
 				modules: {
@@ -718,7 +720,7 @@ function createStableDynamicWorkerExecutor(input: DynamicWorkerExecutorInput) {
 										input.gatewayProps.grantedSecretAuthorityPackageIds,
 									)
 								const evaluate = () =>
-									entrypoint.evaluate(dispatchers, evaluateInvocation)
+									entrypoint.evaluate(dispatchers, evaluateInvocation, signal)
 								return grantedSecretAuthorityPackageIds
 									? await runWithSecretAuthorityScope(
 											grantedSecretAuthorityPackageIds,

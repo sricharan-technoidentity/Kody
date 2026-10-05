@@ -4,6 +4,34 @@ Fresh local verification on 2026-10-04 uses Node 26.10.0, Temporal CLI 1.9.1
 (server 1.32.0), native workerd 1.20260815.1 and Chromium 151. Historical P8
 counts are retained in the audit archive and are not counted as fresh evidence.
 
+The 2026-10-05 [package execution replacement evidence](./package-execution.md)
+supersedes the standalone Runner artifact details below: it uses Node and pinned
+Deno, with an integrated Temporal-to-AgentCore proof command. The local ARM64
+image smoke check and Deno-default MCP suite passed. The local launcher and
+toolchain use Deno/esbuild/TypeScript; workerd and worker-bundler execution
+dependencies are retired. Live proofs remain pending. Fresh final checks are
+recorded on the replacement evidence page; the historical table below is not the
+Deno replacement verification count. The replacement's unchanged full gate
+passed all 14 checks; **1,141 Node files / 3,632 tests** passed uncached. The
+final combined run reused that Node result after evidence formatting was fixed.
+The focused suite passed **25 files / 49 tests**, MCP passed **5 files / 7
+tests**, and client/SSR build and demo typecheck passed. The earlier CLI
+metadata timeout was fixed at the routing boundary; its retained regression
+proves reads do not need Temporal. Steps 4 and 5 are complete for the local
+replacement.
+
+Docker verification was repeated on 2026-10-05 after the daemon became
+available: the ARM64 runner image built using cached layers, and its existing
+network-disabled smoke test passed freshly as the non-root `node` user with Deno
+2.9.7. Image inspection confirmed `linux/arm64` and port `8080/tcp`; the smoke
+container was removed. See the replacement evidence for the image ID. Live AWS
+proofs remain pending; no image was pushed or deployed.
+
+## Historical readiness: 2026-10-04
+
+The tables and observations below describe the original workerd POC. Current
+Deno evidence and AWS status are linked above.
+
 | Plan step                                            | Status                                                          |
 | ---------------------------------------------------- | --------------------------------------------------------------- |
 | Documentation consolidation and safe cleanup         | Implemented; current link/script checks pass                    |

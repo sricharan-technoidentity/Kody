@@ -1,11 +1,23 @@
 import { createExecutorModuleSource } from '#mcp/executor.ts'
 import { createDynamicWorkerCompatibilityOptions } from '#worker/dynamic-worker-compatibility.ts'
 import { buildPackageStorageId } from '#worker/storage-ids.ts'
-import { randomUUID, createHash } from 'node:crypto'
+import { createHash } from 'node:crypto'
+import { type FetchGatewayProps } from '#worker/egress/proxy.ts'
+import {
+	type RunnerLoader,
+	type RunnerDispatcher,
+} from '#worker/runner/loader.ts'
+import { type RunnerGraph } from '#worker/runner/contract.ts'
+import {
+	runnerInputKey,
+	RunnerInvocationError,
+	claimRunnerDispatch,
+} from '#worker/runner/contract.ts'
 import { runnerSessionId } from '#worker/aws/agentcore-runner.ts'
 import { mintRunToken } from '#worker/runner/run-token.ts'
 import { ApplicationFailure } from '@temporalio/common'
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client'
+import { Context } from '@temporalio/activity'
 import { type AwsEnv } from '#worker/aws/env.ts'
 import { runErrorRecordedTopic } from '#worker/run-records/package-subscriptions.ts'
 import { taskQueues, workflowIds } from '../ids.ts'
@@ -15,6 +27,18 @@ import { type KodyActivities, type RunOutcome } from './types.ts'
 
 /** The `execute` result cap (bytes of UTF-8). */
 export const executeResultCapBytes = 100 * 1024
+
+type SandboxRun = {
+	userId: string
+	runId: string
+	surface: string
+	payload: Record<string, unknown>
+	maxOutputBytes?: number
+}
+
+function logicalRunId(...identity: Array<string>) {
+	return createHash('sha256').update(JSON.stringify(identity)).digest('hex')
+}
 
 function capUtf8(value: string, maxBytes: number) {
 	const bytes = new TextEncoder().encode(value)
@@ -29,7 +53,18 @@ function capUtf8(value: string, maxBytes: number) {
  */
 export function createTargetActivities(
 	env: AwsEnv,
-	options: { now?: () => number } = {},
+	options: {
+		now?: () => number
+		/** Trusted application preparation, never a package-supplied graph or owner. */
+		runner?: {
+			loader: RunnerLoader
+			resolve(input: SandboxRun): Promise<{
+				context: FetchGatewayProps
+				graph: RunnerGraph
+				dispatchers?: Record<string, RunnerDispatcher>
+			}>
+		}
+	} = {},
 ) {
 	async function consumeMeter(input: { userId: string; counter: string }) {
 		try {
@@ -50,69 +85,94 @@ export function createTargetActivities(
 		}
 	}
 
-	async function runSandbox(input: {
-		userId: string
-		runId: string
-		surface: string
-		payload: Record<string, unknown>
-		maxOutputBytes?: number
-	}): Promise<RunOutcome> {
+	async function runSandbox(input: SandboxRun): Promise<RunOutcome> {
 		let response: { output?: unknown; result?: unknown; error?: unknown }
+		let dispatched = false
 		try {
-			const graph =
-				input.surface === 'execute'
-					? {
-							...createDynamicWorkerCompatibilityOptions(),
-							mainModule: 'executor.js',
-							providers: [],
-							method: 'evaluate',
-							invocation: {},
-							modules: {
-								'executor.js': createExecutorModuleSource({
-									code: String(input.payload.code),
-									providers: [],
-									shadowGlobalThis: true,
-									timeoutMs: 60_000,
-								}),
-							},
-						}
-					: input.payload
-			const bytes = new TextEncoder().encode(JSON.stringify(graph))
-			const bundleKey = `${input.userId}/runner-inputs/${createHash('sha256').update(bytes).digest('hex')}.json`
-			env.objects.put(bundleKey, bytes)
-			const packageId =
-				typeof input.payload.packageId === 'string'
-					? input.payload.packageId
-					: null
-			const runToken = await mintRunToken(env.RUN_TOKEN_SIGNING_KEY, {
-				userId: input.userId,
-				runId: input.runId,
-				expiresAt: Date.now() + 90_000,
-				retriever: input.surface === 'retriever',
-				provenance: [
-					{
-						moduleId: 'main',
-						packageId,
-						storageId: packageId
-							? buildPackageStorageId(packageId)
-							: `exec:${input.runId}`,
-					},
-				],
-			})
-			response = (await env.runner.invoke({
-				runtimeSessionId: runnerSessionId(input.userId),
-				payload: {
+			if (options.runner) {
+				const { context, graph, dispatchers } =
+					await options.runner.resolve(input)
+				if (context.userId !== input.userId)
+					throw ApplicationFailure.nonRetryable(
+						'Runner preparation owner mismatch.',
+					)
+				response = (await options.runner.loader
+					.forContext(context)
+					.invokeGraph(
+						{ ...graph, surface: input.surface },
+						dispatchers,
+						input.runId,
+					)) as typeof response
+				dispatched = true
+			} else {
+				// The AWS-port acceptance adapter is simulated; opt-in real execution uses the shared loader above.
+				const graph =
+					input.surface === 'execute'
+						? {
+								...createDynamicWorkerCompatibilityOptions(),
+								mainModule: 'executor.js',
+								providers: [],
+								surface: input.surface,
+								method: 'evaluate',
+								invocation: {},
+								modules: {
+									'executor.js': createExecutorModuleSource({
+										code: String(input.payload.code),
+										providers: [],
+										shadowGlobalThis: true,
+										timeoutMs: 60_000,
+									}),
+								},
+							}
+						: { ...input.payload, surface: input.surface }
+				const bytes = new TextEncoder().encode(JSON.stringify(graph))
+				const bundleKey = runnerInputKey(input.userId, input.runId)
+				env.objects.put(bundleKey, bytes)
+				const packageId =
+					typeof input.payload.packageId === 'string'
+						? input.payload.packageId
+						: null
+				const runToken = await mintRunToken(env.RUN_TOKEN_SIGNING_KEY, {
+					userId: input.userId,
 					runId: input.runId,
-					surface: input.surface,
-					bundleKey,
-					runToken,
-				},
-			})) as typeof response
+					expiresAt: Date.now() + 90_000,
+					retriever: input.surface === 'retriever',
+					provenance: [
+						{
+							moduleId: 'main',
+							packageId,
+							storageId: packageId
+								? buildPackageStorageId(packageId)
+								: `exec:${input.runId}`,
+						},
+					],
+				})
+				dispatched = true
+				if (!env.TEMPORAL.idempotency)
+					throw ApplicationFailure.nonRetryable(
+						'Missing Runner dispatch ledger.',
+					)
+				await claimRunnerDispatch(
+					env.TEMPORAL.idempotency,
+					input.userId,
+					input.runId,
+				)
+				response = (await env.runner.invoke({
+					runtimeSessionId: runnerSessionId(input.userId, input.runId),
+					payload: {
+						runId: input.runId,
+						bundleKey,
+						runToken,
+					},
+				})) as typeof response
+			}
 		} catch (error) {
+			if (error instanceof RunnerInvocationError) dispatched = error.dispatched
+			if (!dispatched) throw error
 			return {
 				runId: input.runId,
 				ok: false,
-				error: error instanceof Error ? error.message : String(error),
+				error: `Runner failed after dispatch; execution may have completed: ${error instanceof Error ? error.message : String(error)}`,
 			}
 		}
 		if (typeof response.error === 'string') {
@@ -176,6 +236,22 @@ export function createTargetActivities(
 		}
 	}
 
+	async function finishRun(
+		userId: string,
+		surface: string,
+		outcome: RunOutcome,
+	) {
+		try {
+			await recordRun({ userId, surface, outcome })
+		} catch (error) {
+			throw ApplicationFailure.nonRetryable(
+				`Runner completed but outcome recording failed: ${error instanceof Error ? error.message : String(error)}`,
+				'RunnerOutcomeRecordingFailed',
+			)
+		}
+		return outcome
+	}
+
 	return {
 		consumeMeter,
 
@@ -187,14 +263,13 @@ export function createTargetActivities(
 				payload: { requestId: input.requestId, code: input.code },
 				maxOutputBytes: executeResultCapBytes,
 			})
-			await recordRun({ userId: input.userId, surface: 'execute', outcome })
-			return outcome
+			return finishRun(input.userId, 'execute', outcome)
 		},
 
 		async invokePackage(input) {
 			const outcome = await runSandbox({
 				userId: input.userId,
-				runId: randomUUID(),
+				runId: logicalRunId(input.userId, input.surface, input.invocationKey),
 				surface: input.surface,
 				payload: {
 					packageId: input.packageId,
@@ -202,8 +277,7 @@ export function createTargetActivities(
 					params: input.params,
 				},
 			})
-			await recordRun({ userId: input.userId, surface: input.surface, outcome })
-			return outcome
+			return finishRun(input.userId, input.surface, outcome)
 		},
 
 		async listEventSubscribers(event) {
@@ -245,15 +319,24 @@ export function createTargetActivities(
 		},
 
 		async runJob(input) {
+			const info = Context.current().info
+			if (!info.workflowExecution)
+				throw ApplicationFailure.nonRetryable(
+					'Job requires a workflow execution identity.',
+				)
 			await consumeMeter({ userId: input.userId, counter: 'job_runs_per_day' })
 			const outcome = await runSandbox({
 				userId: input.userId,
-				runId: randomUUID(),
+				runId: logicalRunId(
+					input.userId,
+					'job',
+					info.workflowExecution.runId,
+					info.activityId,
+				),
 				surface: 'job',
 				payload: { jobId: input.jobId, scheduledAt: input.scheduledAt },
 			})
-			await recordRun({ userId: input.userId, surface: 'job', outcome })
-			return outcome
+			return finishRun(input.userId, 'job', outcome)
 		},
 
 		async runPublishCheck(input) {

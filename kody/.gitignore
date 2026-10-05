@@ -48,5 +48,5 @@ packages/worker/src/generated/
 
 # Local plans and demo reports
 /planss/
-/demo-walkthrough-2026-10-04/
-/docs/audits/kody-system-report-2026-10-04.md
+/demo-walkthrough-*/
+/docs/audits/

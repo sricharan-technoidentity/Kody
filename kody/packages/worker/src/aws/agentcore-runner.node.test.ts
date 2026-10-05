@@ -2,7 +2,7 @@ import { expect, test } from 'vitest'
 import { InvokeAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore'
 import { createAgentCoreRunner, runnerSessionId } from './agentcore-runner.ts'
 
-test('Runner SDK invocation uses owner-rotated sessions and object references', async () => {
+test('Runner SDK invocation enforces owner/run sessions and object references', async () => {
 	const commands: Array<InvokeAgentRuntimeCommand> = []
 	const runner = createAgentCoreRunner({
 		region: 'us-east-1',
@@ -13,12 +13,13 @@ test('Runner SDK invocation uses owner-rotated sessions and object references', 
 		},
 	})
 	const payload = {
-		bundleKey: 'alice/bundles/pkg/commit.js',
+		bundleKey: 'alice/runner-inputs/one.json',
 		runToken: 'signed-token',
+		runId: 'one',
 	}
 	expect(
 		await runner.invoke({
-			runtimeSessionId: runnerSessionId('alice', 1),
+			runtimeSessionId: runnerSessionId('alice', 'one'),
 			payload,
 		}),
 	).toEqual({ output: 1 })
@@ -26,17 +27,29 @@ test('Runner SDK invocation uses owner-rotated sessions and object references', 
 	expect(commands[0]?.input).toMatchObject({
 		agentRuntimeArn: 'mock-runtime',
 		contentType: 'application/json',
-		runtimeSessionId: runnerSessionId('alice', 1),
+		runtimeSessionId: runnerSessionId('alice', 'one'),
 	})
 	expect(
 		JSON.parse(new TextDecoder().decode(commands[0]?.input.payload)),
 	).toEqual(payload)
-	expect(runnerSessionId('alice', 1)).toHaveLength(64)
-	expect(runnerSessionId('alice', 1)).not.toBe(runnerSessionId('bob', 1))
-	expect(runnerSessionId('alice', 1)).not.toBe(runnerSessionId('alice', 2))
+	expect(runnerSessionId('alice', 'one')).toHaveLength(64)
+	expect(runnerSessionId('alice', 'one')).not.toBe(
+		runnerSessionId('bob', 'one'),
+	)
+	expect(runnerSessionId('alice', 'one')).not.toBe(
+		runnerSessionId('alice', 'two'),
+	)
+	for (const runtimeSessionId of [
+		runnerSessionId('bob', 'one'),
+		runnerSessionId('alice', 'two'),
+	])
+		await expect(runner.invoke({ runtimeSessionId, payload })).rejects.toThrow(
+			'owner and run',
+		)
+	expect(commands).toHaveLength(1)
 	await expect(
 		runner.invoke({
-			runtimeSessionId: runnerSessionId('alice'),
+			runtimeSessionId: runnerSessionId('alice', 'one'),
 			payload: { code: 'secret source bytes' },
 		}),
 	).rejects.toThrow('reference')

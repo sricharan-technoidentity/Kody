@@ -1,10 +1,10 @@
 # Package jobs in the POC
 
 Package-owned configuration lives in PostgreSQL `jobs` rows. Temporal Schedules
-reflect enabled state and invoke `JobRun` on the execution queue; native workerd
-runs the package handler through the authenticated broker. Owner isolation and
-existing job IDs, manifest behavior and published package contracts remain in
-force. Local defaults use PGlite and explicit service fakes.
+reflect enabled state and invoke `JobRun` on the execution queue; Deno runs the
+package handler through the authenticated broker. Owner isolation and existing
+job IDs, manifest behavior and published package contracts remain in force.
+Local defaults use PGlite and explicit service fakes.
 
 The [jobs/runtime/email reference](../../poc/jobs-and-email.md) describes retry
 limits, storage and schedules. The [presenter flow](../../poc/demo.md) includes

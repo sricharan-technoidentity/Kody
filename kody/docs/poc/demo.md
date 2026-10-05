@@ -11,6 +11,13 @@ service fakes. First launch downloads the official Temporal CLI into
 services start. The application and Temporal UI bind to loopback; use the URLs
 printed by the launcher if default ports 3742 and 8233 are occupied.
 
+Workerd remains the supported default. Use
+`KODY_RUNNER_BACKEND=deno npm run demo` for the explicit replacement comparison;
+`KODY_RUNNER_BACKEND=workerd` selects the baseline. Deno preparation uses the
+pinned release or `KODY_DENO_EXECUTABLE`. There is no automatic fallback after
+dispatch. This selector does not establish completion of the compatibility gates
+in [package execution evidence](./package-execution.md).
+
 Sign in with `alice@example.invalid` / `demo-password-123`. Alice owns a private
 report package and an approved synthetic preference memory. Bob uses
 `bob@example.invalid` / `demo-password-123`. These are disposable fixture

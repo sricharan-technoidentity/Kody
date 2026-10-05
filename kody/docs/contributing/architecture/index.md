@@ -1,8 +1,8 @@
 # Runtime architecture
 
 The current migration POC runs a Node front door, Temporal workflows/activities,
-and a native workerd Runner. Keep the existing `packages/worker` and
-`packages/shared` workspace. Start at
+and a Deno Runner. Keep the existing `packages/worker` and `packages/shared`
+workspace. Start at
 [the POC architecture and service matrix](../../poc/architecture.md) for
 implemented components versus local fakes, then follow
 [the presenter flow](../../poc/demo.md) or

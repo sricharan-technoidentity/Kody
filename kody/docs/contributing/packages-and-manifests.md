@@ -1,7 +1,7 @@
 # Packages and manifests
 
-The local POC runs unchanged published modules in native workerd behind the Node
-front door and signed capability broker. PostgreSQL owns package/source and job
+The local POC runs unchanged published modules in Deno behind the Node front
+door and signed capability broker. PostgreSQL owns package/source and job
 configuration; Temporal owns publish orchestration, schedules and runs. Local
 Git, check and external provider fixtures are explicit simulations. See
 [the runtime matrix](../poc/architecture.md) and
@@ -73,7 +73,7 @@ both files. See [package-authoring](../guides/package-authoring.md).
 
 Saved packages may declare npm runtime dependencies in
 `package.json#dependencies` when the dependency is compatible with the native
-workerd runtime.
+Deno compatibility runtime.
 
 Important behavior:
 
@@ -280,15 +280,15 @@ A package app is a hosted Worker entry running in the package-app isolate:
   the Request when the route contract includes `appBasePath`, and pass explicit
   `clientEntry` ids (`kody:app#Name`). A handler that borrows `remix/headers` or
   `remix/html-template` needs none of that
-- Remix itself is an optional convenience:
-  `tools/build-worker-bundler-modules.ts` pre-bundles the Workers-safe
-  `remix/<subpath>` set (`packageAppRemixSubpaths`) with code splitting into the
-  deferred module `package-app-remix.mjs`, and `withPlatformRemixFiles`
-  (`package-app-remix.ts`) mounts it at `node_modules/remix/` in the bundler
-  file system for every package bundle (app, app-client, callable, importable,
-  ad hoc execute). The bundler skips the npm install for a package whose
-  `node_modules/<name>/package.json` exists, so a `remix` dependency is inert;
-  publish checks reject `@remix-run/*` dependencies outright
+- Remix itself is an optional convenience: `tools/build-platform-modules.ts`
+  pre-bundles the Workers-safe `remix/<subpath>` set (`packageAppRemixSubpaths`)
+  with code splitting into the deferred module `package-app-remix.mjs`, and
+  `withPlatformRemixFiles` (`package-app-remix.ts`) mounts it at
+  `node_modules/remix/` in the bundler file system for every package bundle
+  (app, app-client, callable, importable, ad hoc execute). The bundler skips the
+  npm install for a package whose `node_modules/<name>/package.json` exists, so
+  a `remix` dependency is inert; publish checks reject `@remix-run/*`
+  dependencies outright
 - `kody:runtime` exports `KodyRuntime`, a frozen `{ defaultValue }` object that
   Remix's `RequestContext.get()` returns when nothing called `set()`; the value
   is the module's default export (late-bound to the current run), and the

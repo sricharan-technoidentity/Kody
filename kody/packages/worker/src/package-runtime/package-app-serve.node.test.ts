@@ -49,8 +49,8 @@ vi.mock('#worker/package-runtime/published-bundle-artifacts.ts', () => ({
 		mockModule.persistPublishedBundleArtifact(...args),
 }))
 
-vi.mock('#worker/worker-bundler-modules.ts', () => ({
-	importWorkerBundler: async () => ({
+vi.mock('#worker/package-build-modules.ts', () => ({
+	importPackageBuildTools: async () => ({
 		createWorker: (...args: Array<unknown>) => mockModule.createWorker(...args),
 	}),
 }))

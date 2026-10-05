@@ -9,11 +9,11 @@ when that makes a single test longer and more assertion-heavy.
 Choose the lightest flavor that can falsify the behavior. Filename suffixes pick
 the Vitest project (`vitest.config.ts`):
 
-| Flavor / command                         | Use when                                                                                                                                                                                                                                                                           | Avoid when                                                                              |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `*.node.test.ts` (`npm run test:node`)   | Server logic, handlers and adapters. Use `createTestDb({ userId })` for the migrated PostgreSQL baseline and scoped writer/reader, or `createTargetTestEnv()` for the complete mock AWS/Temporal environment. Use native workerd Runner tests for published package compatibility. | In-process fakes cannot prove sandbox compatibility or HTTP/browser transport behavior. |
-| `*.mcp-e2e.test.ts` (`npm run test:mcp`) | A small suite for native Node MCP transport, OAuth and package-app session wiring.                                                                                                                                                                                                 | Capability coverage that a node test can exercise.                                      |
-| Playwright (`npm run test:e2e:run`)      | The selected POC browser journeys through the native front door and client. See [end-to-end testing](./end-to-end-testing.md).                                                                                                                                                     | Edge cases and behavior covered by faster tests.                                        |
+| Flavor / command                         | Use when                                                                                                                                                                                                                                                                 | Avoid when                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `*.node.test.ts` (`npm run test:node`)   | Server logic, handlers and adapters. Use `createTestDb({ userId })` for the migrated PostgreSQL baseline and scoped writer/reader, or `createTargetTestEnv()` for the complete mock AWS/Temporal environment. Use Deno Runner tests for published package compatibility. | In-process fakes cannot prove sandbox compatibility or HTTP/browser transport behavior. |
+| `*.mcp-e2e.test.ts` (`npm run test:mcp`) | A small suite for native Node MCP transport, OAuth and package-app session wiring.                                                                                                                                                                                       | Capability coverage that a node test can exercise.                                      |
+| Playwright (`npm run test:e2e:run`)      | The selected POC browser journeys through the native front door and client. See [end-to-end testing](./end-to-end-testing.md).                                                                                                                                           | Edge cases and behavior covered by faster tests.                                        |
 
 The migration POC no longer runs a Workers test pool. The retained legacy SQLite
 fixtures are pending P8 conversion; new application tests use PGlite.
@@ -113,7 +113,7 @@ factories explicitly inside each test (or a per-test factory). Do not introduce
   needed) to avoid Playwright spec discovery and accidental matches like
   `packages/worker/src/mcp/mcp-server.mcp-e2e.test.ts`.
 - Keep per-file isolation for Node, PGlite, Temporal and Runner tests. Native
-  workerd compatibility tests run through the Runner harness; an in-process fake
+  Deno compatibility tests run through the Runner harness; an in-process fake
   alone does not establish that published packages run unchanged.
 - Vitest is configured with `clearMocks` and `mockReset` globally
   (`vitest-shared.ts`). Each test starts with a clean mock slate; inline the
@@ -137,10 +137,10 @@ factories explicitly inside each test (or a per-test factory). Do not introduce
     (`packages/worker/src/test-support/incidental-runtime-warnings.ts`) for the
     bundler/registry-runtime noise set. Anything outside the allowlist still
     fails the test.
-  - Keep native workerd isolate failures visible. When the host can reject an
-    invalid request before entering the sandbox, assert that rejection through
-    the Runner/broker harness. Do not filter isolate crash dumps to obtain a
-    passing test.
+  - Keep Deno isolate failures visible. When the host can reject an invalid
+    request before entering the sandbox, assert that rejection through the
+    Runner/broker harness. Do not filter isolate crash dumps to obtain a passing
+    test.
 
   Keep test output free of stray logging.
 

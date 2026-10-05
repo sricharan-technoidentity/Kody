@@ -7,7 +7,7 @@ import { remixPackageName } from './package-app-remix-subpaths.ts'
  * Optional convenience: package apps may import `remix/<subpath>` like the
  * origin UI does, and the platform — not an npm install at publish time —
  * supplies those modules at the version the rest of Kody ships. The file
- * set is pre-bundled by `tools/build-worker-bundler-modules.ts`
+ * set is pre-bundled by `tools/build-platform-modules.ts`
  * (`package-app-remix.mjs`, loaded lazily from
  * `./node_modules/.kody-generated/` like the runtime bundler itself) and
  * mounted at `node_modules/remix/` in the bundler's virtual file system, so

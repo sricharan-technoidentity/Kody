@@ -8,8 +8,8 @@ import {
 	createLoadedPackageSource,
 } from '#worker/test-support/module-graph.ts'
 
-vi.mock('#worker/worker-bundler-modules.ts', () => ({
-	importWorkerBundler: async () => ({
+vi.mock('#worker/package-build-modules.ts', () => ({
+	importPackageBuildTools: async () => ({
 		createWorker: (...args: Array<unknown>) => mockModule.createWorker(...args),
 	}),
 }))

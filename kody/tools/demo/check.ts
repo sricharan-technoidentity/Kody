@@ -13,7 +13,7 @@ const files = [
 	'front-door/read-write-split',
 	'security/isolation',
 	'aws/frozen-keys',
-	'runner/workerd',
+	'runner/deno',
 	'test-support/aws/temporal-env',
 	'temporal/package-workflow',
 	'temporal/run-state',

@@ -25,13 +25,14 @@ test('execute is idempotent, consumes a finite meter and records one bounded Run
 		)
 		expect(env.runner.invocations).toHaveLength(1)
 		expect(env.runner.invocations[0]?.runtimeSessionId).toBe(
-			runnerSessionId(userId),
+			runnerSessionId(userId, first.runId),
 		)
-		expect(env.runner.invocations[0]?.payload).toMatchObject({
+		expect(env.runner.invocations[0]?.payload).toEqual({
 			runToken: expect.any(String),
-			bundleKey: expect.stringContaining(`${userId}/runner-inputs/`),
+			bundleKey: `${userId}/runner-inputs/${first.runId}.json`,
+			runId: first.runId,
 		})
-		const token = (env.runner.invocations[0]?.payload as { runToken: string })
+		const token = (env.runner.invocations[0]!.payload as { runToken: string })
 			.runToken
 		expect(
 			await verifyRunToken(env.RUN_TOKEN_SIGNING_KEY, token),
@@ -63,7 +64,8 @@ test(
 	'ExecuteRun activity resolves its S3 graph inside real workerd',
 	{ timeout: 60_000 },
 	async () => {
-		const { startWorkerdRunner } = await import('#worker/runner/supervisor.ts')
+		const { createDenoFixtureRunner } =
+			await import('#worker/test-support/deno-fixture-runner.ts')
 		const { createServer } = await import('node:http')
 		const { env, close } = await createTargetTestEnv({ userId: 'alice' })
 		const endpoints = createServer((_request, response) => {
@@ -75,7 +77,7 @@ test(
 		)
 		try {
 			const address = endpoints.address() as { port: number }
-			await using runner = await startWorkerdRunner({
+			await using runner = await createDenoFixtureRunner({
 				brokerUrl: `http://127.0.0.1:${address.port}`,
 				egressUrl: `http://127.0.0.1:${address.port}`,
 				async readObject(key) {

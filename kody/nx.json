@@ -22,6 +22,7 @@
 			"inputs": [
 				"default",
 				"^default",
+				{ "env": "KODY_RUNNER_BACKEND" },
 				{
 					"env": "CI"
 				},
@@ -36,6 +37,7 @@
 			"inputs": [
 				"default",
 				"^default",
+				{ "env": "KODY_RUNNER_BACKEND" },
 				{
 					"env": "CI"
 				},
@@ -50,6 +52,7 @@
 			"inputs": [
 				"default",
 				"^default",
+				{ "env": "KODY_RUNNER_BACKEND" },
 				{
 					"env": "CI"
 				},
@@ -67,6 +70,7 @@
 		"test-e2e": {
 			"cache": true,
 			"inputs": [
+				{ "env": "KODY_RUNNER_BACKEND" },
 				{
 					"env": "CI"
 				},

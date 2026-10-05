@@ -8,10 +8,9 @@ export type AwsProofConfig = {
 	kms?: { keyId: string }
 	runtime?: {
 		arn: string
-		compatibleWorkerdHost: boolean
-		invocationFile: string
-		sessionId: string
-		expectedResult: unknown
+		protocol: string
+		/** Existing HTTPS ingress forwards to this proof's temporary broker listener. */
+		broker?: { port: number; publicUrl: string }
 	}
 	interpreter?: { identifier: string }
 	identity?: {

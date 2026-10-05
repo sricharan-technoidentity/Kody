@@ -10,13 +10,9 @@ declare global {
 	interface Env {
 		RUNNER_LOADER?: import('./src/runner/loader.ts').RunnerLoader
 		RUNNER_BUNDLER?: {
-			createWorker(input: {
-				files: Record<string, string>
-				entryPoint: string
-				externals?: Array<string>
-				jsx?: string
-				jsxImportSource?: string
-			}): Promise<{
+			createWorker(
+				input: import('./src/package-runtime/package-build-tools.ts').BundleOptions,
+			): Promise<{
 				mainModule: string
 				modules: import('./src/worker-loader-types.ts').WorkerLoaderModules
 			}>

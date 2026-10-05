@@ -1,6 +1,7 @@
 import originHandler from './index.ts'
 import { createFrontDoorTestEnv } from '#worker/test-support/front-door.ts'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
+import { isHttpMutation } from '#worker/front-door/handler.ts'
 import {
 	cliClientIdMetadataPath,
 	cliOAuthCallbackUrl,
@@ -11,8 +12,13 @@ async function workerFetch(request: Request) {
 		handler: originHandler,
 		origin: 'https://kody.codes',
 	})
+	const temporal = vi
+		.spyOn(target.bindings.TEMPORAL!, 'client')
+		.mockRejectedValue(new Error('Temporal is unavailable.'))
 	try {
-		return await target.fetch(request)
+		const response = await target.fetch(request)
+		expect(temporal).not.toHaveBeenCalled()
+		return response
 	} finally {
 		await target.close()
 	}
@@ -20,6 +26,14 @@ async function workerFetch(request: Request) {
 
 test('worker serves CLI CIMD before the OAuth wrapper and reflects Origin for CORS', async () => {
 	const documentUrl = `https://kody.codes${cliClientIdMetadataPath}`
+	for (const method of ['GET', 'HEAD', 'OPTIONS'])
+		expect(isHttpMutation(new Request(documentUrl, { method }))).toBe(false)
+	expect(isHttpMutation(new Request(documentUrl, { method: 'POST' }))).toBe(
+		true,
+	)
+	expect(isHttpMutation(new Request('https://kody.codes/oauth/callback'))).toBe(
+		true,
+	)
 	const response = await workerFetch(new Request(documentUrl))
 	expect(response.status).toBe(200)
 	expect(response.headers.get('Content-Type')).toBe('application/json')

@@ -72,7 +72,7 @@ const catalogOutputPath = path.join(generatedDir, 'guide-catalog.mjs')
 
 // Outside `src/generated` on purpose: that tree is still inside wrangler's
 // additional-modules watch root (bundler wasm is not; see
-// tools/build-worker-bundler-modules.ts / Friction #1789), so a lock file
+// tools/build-platform-modules.ts / Friction #1789), so a lock file
 // churning there could retrigger reload. Keyed by a hash of `generatedDir`
 // (not a fixed name) so unrelated checkouts/worktrees on the same machine
 // never contend on the same lock.
@@ -380,7 +380,7 @@ export async function ensureGuideCatalogModules() {
 		await writeFileAtomic(stampPath, stampContent)
 		// Flush before `wrangler dev` starts watching `src/` (guide catalog
 		// stays under the additional-module watch root; bundler wasm does
-		// not — see tools/build-worker-bundler-modules.ts / Friction #1789).
+		// not — see tools/build-platform-modules.ts / Friction #1789).
 		await fsyncGeneratedDir()
 	} finally {
 		await release()

@@ -760,10 +760,6 @@
 		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
 	},
 	{
-		"file": "packages/worker/src/runner/supervisor.ts",
-		"reason": "Published package import/configuration compatibility and native workerd sandbox execution; the Runner intentionally preserves authored Cloudflare package APIs."
-	},
-	{
 		"file": "packages/worker/src/runtime-worker.ts",
 		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
 	},
@@ -892,10 +888,6 @@
 		"reason": "KV/object binding-shaped ports or test doubles preserve repository call contracts; the POC supplies DynamoDB/S3 adapters behind these shapes."
 	},
 	{
-		"file": "packages/worker/src/worker-bundler-modules.ts",
-		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
-	},
-	{
 		"file": "packages/worker/universal/compute-overage.node.test.ts",
 		"reason": "Published usage/billing field names, historical measured billing data and their formatting/aggregation coverage are preserved; these names do not provision a Cloudflare service."
 	},
@@ -948,11 +940,7 @@
 		"reason": "Explicit Node bridge for the existing OAuth SDK import surface; the host compatibility class is not a provisioned Cloudflare service."
 	},
 	{
-		"file": "tools/build-worker-bundler-modules.node.test.ts",
-		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
-	},
-	{
-		"file": "tools/build-worker-bundler-modules.ts",
+		"file": "tools/build-platform-modules.ts",
 		"reason": "Historical build/local-development explanation or regression fixture; the POC uses Node and native workerd, with no Wrangler command execution."
 	},
 	{
@@ -996,8 +984,24 @@
 		"reason": "Retained local/preview operator tooling or its regression fixtures; production and preview workflows are excluded from the POC."
 	},
 	{
+		"file": "tools/demo/deno-spike.ts",
+		"reason": "Isolated Deno compatibility adapter reads published cloudflare:workers imports without provisioning a Cloudflare service; workerd remains the comparison baseline."
+	},
+	{
+		"file": "tools/demo/package-build-tools.node.test.ts",
+		"reason": "Published DurableObject and Remix fixtures compare the Deno adapter with native workerd on synthetic state."
+	},
+	{
+		"file": "packages/worker/src/package-runtime/package-build-tools.ts",
+		"reason": "Prepared-files esbuild adapter preserves published cloudflare:workers imports as compatibility externals; no Cloudflare build or service is invoked."
+	},
+	{
 		"file": "tools/demo/runner-host.node.test.ts",
 		"reason": "Native workerd package fixture retains cloudflare:workers WorkerEntrypoint to prove the standalone HTTP Runner executes published package graphs unchanged."
+	},
+	{
+		"file": "tools/demo/runner-integration.node.test.ts",
+		"reason": "Published cloudflare:workers WorkerEntrypoint fixture verifies the explicit Deno backend in the retained application harness; no Cloudflare service is provisioned."
 	},
 	{
 		"file": "tools/ensure-dev.node.test.ts",

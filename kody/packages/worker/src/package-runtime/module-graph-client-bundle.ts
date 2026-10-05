@@ -4,7 +4,7 @@ import {
 	normalizePackageWorkspacePath,
 } from '#worker/package-registry/manifest.ts'
 import { type WorkerLoaderModules } from '#worker/worker-loader-types.ts'
-import { importWorkerBundler } from '#worker/worker-bundler-modules.ts'
+import { importPackageBuildTools } from '#worker/package-build-modules.ts'
 import {
 	collectLiteralImportNodes,
 	isBarePackageImportSpecifier,
@@ -285,12 +285,14 @@ export async function buildKodyAppClientBundle(input: {
 		: []
 	// Keep the experimental bundler out of the Worker's top-level deploy graph.
 	const { createWorker } =
-		input.env?.RUNNER_BUNDLER ?? (await importWorkerBundler())
+		input.env?.RUNNER_BUNDLER ?? (await importPackageBuildTools())
 	const bundle = await createWorker({
 		files,
 		entryPoint,
 		bundle: true,
-		...(input.env?.RUNNER_BUNDLER ? { externals } : {}),
+		...(input.env?.RUNNER_BUNDLER
+			? { externals, allowUnresolvedBareImports: true }
+			: {}),
 		target: 'es2022',
 		...createPackageAppJsxBundleOptions(input.sourceFiles),
 		...(externals.length > 0

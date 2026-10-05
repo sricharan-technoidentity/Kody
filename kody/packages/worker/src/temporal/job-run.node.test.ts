@@ -28,9 +28,9 @@ test('a scheduled job consumes its meter and fans a failure out to a subscriber'
 		expect(result.subscriberRunId).toBeDefined()
 		expect(env.kv.get('alice:meters', 'job_runs_per_day')?.remaining).toBe(0)
 		expect(env.runner.invocations).toHaveLength(2)
-		expect(env.runner.invocations[1]?.payload).toMatchObject({
-			surface: 'subscription',
-			bundleKey: expect.any(String),
+		expect(env.runner.invocations[1]?.payload).toEqual({
+			runId: result.subscriberRunId,
+			bundleKey: `alice/runner-inputs/${result.subscriberRunId}.json`,
 			runToken: expect.any(String),
 		})
 		const payload = env.runner.invocations[1]!.payload as { bundleKey: string }
@@ -38,6 +38,7 @@ test('a scheduled job consumes its meter and fans a failure out to a subscriber'
 			new TextDecoder().decode(env.objects.get(payload.bundleKey)!),
 		)
 		expect(graph).toMatchObject({
+			surface: 'subscription',
 			packageId: 'alerts',
 			params: { runId: result.eventId, surface: 'job', error: 'failed' },
 		})

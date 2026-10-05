@@ -72,7 +72,7 @@ export default mergeConfig(
 			environment: 'node',
 			include: ['**/*.node.test.ts'],
 			globalSetup: [
-				resolve(rootDir, 'tools/vitest-global-setup-worker-bundler-modules.ts'),
+				resolve(rootDir, 'tools/vitest-global-setup-platform-modules.ts'),
 				resolve(rootDir, 'tools/vitest-global-setup-guide-catalog-modules.ts'),
 			],
 			// Merged with the shared setupFiles (console spies). Routes the

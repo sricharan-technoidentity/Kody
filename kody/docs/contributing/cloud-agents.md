@@ -1,6 +1,6 @@
 # Cloud Agent notes for the local POC
 
-Use the Node/Temporal/native-workerd launcher described in
+Use the Node/Temporal/Deno launcher described in
 [local development](./setup/local-development.md). Cloud Agent VMs may place
 Node 22 at `/exec-daemon/node` ahead of nvm; prepend the Node 26 bin directory
 to `PATH` and verify `node --version` before running scripts.

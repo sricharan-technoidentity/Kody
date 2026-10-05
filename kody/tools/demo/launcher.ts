@@ -12,6 +12,12 @@ import {
 import { isExecutedDirectly } from '#tools/node-runtime.ts'
 
 export async function launchDemo() {
+	const requestedBackend = process.env.KODY_RUNNER_BACKEND ?? 'deno'
+	if (requestedBackend !== 'deno')
+		throw new Error(
+			'KODY_RUNNER_BACKEND must be deno; the workerd comparison backend is retired.',
+		)
+	const runnerBackend = requestedBackend
 	const port = await getPort({
 		host: '127.0.0.1',
 		port: Number(process.env.PORT ?? 3742),
@@ -34,6 +40,7 @@ export async function launchDemo() {
 		return startLocalPoc({
 			port,
 			uiPort,
+			runnerBackend,
 			decorateActivities(activities) {
 				return {
 					...activities,
@@ -120,7 +127,7 @@ export async function launchDemo() {
 			temporalUi: `http://127.0.0.1:${uiPort}`,
 		})
 		console.info(
-			`Kody demo: ${runtime.origin}\nTemporal UI: http://127.0.0.1:${uiPort}\nAlice: alice@example.invalid / demo-password-123\nBob: bob@example.invalid / demo-password-123\nSynthetic local services; run npm run demo:run in another terminal. Ctrl+C closes this session.`,
+			`Kody demo: ${runtime.origin}\nRunner: ${runnerBackend}\nTemporal UI: http://127.0.0.1:${uiPort}\nAlice: alice@example.invalid / demo-password-123\nBob: bob@example.invalid / demo-password-123\nSynthetic local services; run npm run demo:run in another terminal. Ctrl+C closes this session.`,
 		)
 	} catch (error) {
 		await close(1)

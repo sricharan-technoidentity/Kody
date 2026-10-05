@@ -2,14 +2,14 @@ import path from 'node:path'
 import { remix } from '@pitlane/dev'
 import { defineConfig } from 'vite'
 import { ensureGuideCatalogModules } from './tools/build-guide-catalog-modules.ts'
-import { ensureWorkerBundlerModules } from './tools/build-worker-bundler-modules.ts'
+import { ensurePlatformModules } from './tools/build-platform-modules.ts'
 import { ensureNodeOAuthProvider } from './tools/build-node-oauth-provider.ts'
 import { nodeRuntimeAliases } from './tools/node-runtime-aliases.ts'
 import { markdownAsText } from './tools/vite-markdown-as-text.ts'
 const root = import.meta.dirname
 export default defineConfig(async () => {
 	await Promise.all([
-		ensureWorkerBundlerModules(),
+		ensurePlatformModules(),
 		ensureGuideCatalogModules(),
 		ensureNodeOAuthProvider(),
 	])

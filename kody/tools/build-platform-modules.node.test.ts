@@ -4,11 +4,11 @@ import { fileURLToPath } from 'node:url'
 import { expect, test } from 'vitest'
 import { packageAppRemixSubpaths } from '#worker/package-runtime/package-app-remix-subpaths.ts'
 import {
-	ensureWorkerBundlerModules,
+	ensurePlatformModules,
 	leftoverSrcGeneratedBundlerNames,
-	workerBundlerGeneratedDir,
-	workerBundlerWranglerDir,
-} from './build-worker-bundler-modules.ts'
+	platformGeneratedDir,
+	platformVisibleDir,
+} from './build-platform-modules.ts'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 const leftoverSrcGeneratedDir = path.join(
@@ -25,46 +25,34 @@ async function pathExists(filePath: string) {
 	}
 }
 
-test('ensureWorkerBundlerModules writes bundler artifacts outside the src watch root', async () => {
-	await ensureWorkerBundlerModules()
+test('ensurePlatformModules preserves OAuth/Remix artifacts outside the src watch root', async () => {
+	await ensurePlatformModules()
 
 	for (const name of [
-		'worker-bundler.mjs',
-		'worker-bundler-typescript.mjs',
+		'codemode-host.mjs',
 		'oauth-provider.mjs',
 		'package-app-remix.mjs',
-		'esbuild.wasm',
-		'worker-bundler.stamp.json',
+		'platform-modules.stamp.json',
 	] as const) {
-		expect(await pathExists(path.join(workerBundlerGeneratedDir, name))).toBe(
-			true,
-		)
+		expect(await pathExists(path.join(platformGeneratedDir, name))).toBe(true)
 	}
 	for (const name of [
-		'worker-bundler.mjs',
-		'worker-bundler-typescript.mjs',
+		'codemode-host.mjs',
 		'oauth-provider.mjs',
 		'package-app-remix.mjs',
-		'esbuild.wasm',
 	] as const) {
-		expect(await pathExists(path.join(workerBundlerWranglerDir, name))).toBe(
-			true,
-		)
+		expect(await pathExists(path.join(platformVisibleDir, name))).toBe(true)
 	}
 
-	const generatedWasm = await readFile(
-		path.join(workerBundlerGeneratedDir, 'esbuild.wasm'),
-	)
-	const wranglerWasm = await readFile(
-		path.join(workerBundlerWranglerDir, 'esbuild.wasm'),
-	)
-	expect(generatedWasm.equals(wranglerWasm)).toBe(true)
+	for (const directory of [platformGeneratedDir, platformVisibleDir])
+		for (const name of leftoverSrcGeneratedBundlerNames)
+			expect(await pathExists(path.join(directory, name))).toBe(false)
 })
 
-test('ensureWorkerBundlerModules vendors every allowlisted remix subpath as one code-split file set', async () => {
-	await ensureWorkerBundlerModules()
+test('ensurePlatformModules vendors every allowlisted remix subpath as one code-split file set', async () => {
+	await ensurePlatformModules()
 	const remixModule = (await import(
-		path.join(workerBundlerGeneratedDir, 'package-app-remix.mjs')
+		path.join(platformGeneratedDir, 'package-app-remix.mjs')
 	)) as { remixVersion: string; files: Record<string, string> }
 	const installedRemix = JSON.parse(
 		await readFile(
@@ -109,8 +97,8 @@ test('ensureWorkerBundlerModules vendors every allowlisted remix subpath as one 
 	])
 })
 
-test('ensureWorkerBundlerModules removes leftover src/generated bundler artifacts', async () => {
-	await ensureWorkerBundlerModules()
+test('ensurePlatformModules removes leftover src/generated bundler artifacts', async () => {
+	await ensurePlatformModules()
 	const leftoverWasm = path.join(leftoverSrcGeneratedDir, 'esbuild.wasm')
 	await writeFile(leftoverWasm, 'leftover-wasm')
 	for (const name of leftoverSrcGeneratedBundlerNames) {
@@ -118,7 +106,7 @@ test('ensureWorkerBundlerModules removes leftover src/generated bundler artifact
 		await writeFile(path.join(leftoverSrcGeneratedDir, name), 'leftover')
 	}
 
-	await ensureWorkerBundlerModules()
+	await ensurePlatformModules()
 
 	for (const name of leftoverSrcGeneratedBundlerNames) {
 		expect(await pathExists(path.join(leftoverSrcGeneratedDir, name))).toBe(
